@@ -8,6 +8,8 @@
  * - Internal (worker-based) applet requests
  * - External (subprocess-based) applet requests
  * - Virtual routes with regex matching
+ * 
+ * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { NANOS } from './vendor.esm.js';
@@ -255,11 +257,12 @@ class Route {
  * Router class for managing routes and matching requests
  */
 class Router {
-	constructor (config = new NANOS()) {
+	constructor (config = new NANOS(), fsRouting = false) {
 		this.config = config;
 		this.routes = [];
 		this.appRoot = '';
 		this.root = '';
+		this.fsRouting = fsRouting;
 
 		this.parseConfig();
 	}
@@ -286,9 +289,42 @@ class Router {
 			// Iterate through NANOS values (each is a route specification)
 			this.routes = [];
 			for (const routeSpec of routesSpec.values()) {
-				this.routes.push(new Route(routeSpec));
+				const route = new Route(routeSpec);
+
+				// Skip filesystem routes when fsRouting is disabled
+				if (!this.fsRouting && this.isFilesystemRoute(route)) {
+					console.warn(`Skipping filesystem route (fsRouting disabled): ${route.spec.at('path', '(no path)')}`);
+					continue;
+				}
+
+				this.routes.push(route);
 			}
 		}
+	}
+
+	/**
+	 * Check if a route requires filesystem access
+	 * @param {Route} route Route to check
+	 * @returns {boolean} True if route requires filesystem access
+	 */
+	isFilesystemRoute (route) {
+		// Routes with @name or @* path components require filesystem access
+		// (shouldn't be used with explicit app field, but check first just in case)
+		for (const part of route.pathParts) {
+			if (part.type === 'applet-named' || part.type === 'applet-any') {
+				return true;
+			}
+		}
+
+		// Virtual routes (explicit app field) don't require filesystem access
+		if (route.isVirtual) {
+			return false;
+		}
+
+		// Routes that are neither FS nor virtual don't resolve to an applet
+		// These are typically static file routes or response-only routes
+		// They don't require filesystem access for route resolution
+		return false;
 	}
 
 	/**
@@ -313,14 +349,88 @@ class Router {
 	/**
 	 * Update router configuration
 	 * @param {NANOS} config New configuration
+	 * @param {boolean} fsRouting Whether filesystem routing is enabled
 	 */
-	updateConfig (config) {
+	updateConfig (config, fsRouting = false) {
 		this.config = config;
 		this.routes = [];
 		this.appRoot = '';
 		this.root = '';
+		this.fsRouting = fsRouting;
 		this.parseConfig();
 	}
+}
+
+// Web Worker message handler (when running as a worker)
+if (typeof self !== 'undefined' && self.postMessage) {
+	let router = null;
+
+	self.onmessage = async (event) => {
+		const { type, id, data } = event.data;
+
+		try {
+			switch (type) {
+				case 'init': {
+					// Initialize router with configuration
+					const { config, fsRouting } = data;
+					router = new Router(config, fsRouting);
+					self.postMessage({ type: 'init-res', id, success: true });
+					break;
+				}
+
+				case 'config': {
+					// Update router configuration
+					const { config, fsRouting } = data;
+					if (router) {
+						router.updateConfig(config, fsRouting);
+						self.postMessage({ type: 'config-res', id, success: true });
+					} else {
+						throw new Error('Router not initialized');
+					}
+					break;
+				}
+
+				case 'route': {
+					// Find matching route
+					const { pathname, method } = data;
+					if (!router) {
+						throw new Error('Router not initialized');
+					}
+
+					const result = router.findRoute(pathname, method);
+					self.postMessage({
+						type: 'route-res',
+						id,
+						success: true,
+						result: result ? {
+							route: {
+								class: result.route.class,
+								method: result.route.method,
+								ws: result.route.ws,
+								response: result.route.response,
+								href: result.route.href,
+								app: result.route.app,
+								root: result.route.root,
+								isVirtual: result.route.isVirtual,
+							},
+							match: result.match,
+						} : null,
+					});
+					break;
+				}
+
+				default:
+					throw new Error(`Unknown message type: ${type}`);
+			}
+		} catch (error) {
+			self.postMessage({
+				type: `${type}-res`,
+				id,
+				success: false,
+				error: error.message,
+			});
+		}
+	};
 }
 
 export { Router, Route };

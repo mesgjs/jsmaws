@@ -1,8 +1,8 @@
 /**
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
- * 
  * Command-line argument parser for JSMAWS
  * Handles configuration overrides and development flags
+ * 
+ * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { parseArgs } from 'https://deno.land/std@0.208.0/cli/parse_args.ts';

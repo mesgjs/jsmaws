@@ -1,8 +1,8 @@
 /**
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
- * 
  * Centralized logging utility for JSMAWS with pluggable backends.
  * Supports console and syslog output with Apache-like log format.
+ * 
+ * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 /**

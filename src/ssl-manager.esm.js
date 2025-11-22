@@ -9,6 +9,8 @@
  * - Detects symlink target changes (common with certbot)
  * - Triggers graceful server reload on certificate updates
  * - Supports "noSSL" mode for development/localhost
+ * 
+ * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 const HOURS_TO_MS = 60 * 60 * 1000;

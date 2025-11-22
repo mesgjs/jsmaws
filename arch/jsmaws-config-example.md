@@ -99,6 +99,17 @@ This document provides an example configuration for JSMAWS using the new pool-ba
 		]
 	]
 	
+	/* Response Chunking Configuration */
+	/* Controls how responders handle large response bodies */
+	/* See arch/requirements.md for detailed flow-control answer */
+	chunking=[
+		maxDirectWrite=65536      /* < 64KB: direct write (no flow-control) */
+		autoChunkThresh=10485760  /* >= 10MB: chunked streaming */
+		chunkSize=65536           /* Chunk size for streaming */
+		maxWriteBuffer=1048576    /* 1MB: legacy, unused with timing-based detection */
+		bpWriteTimeThresh=50      /* 50ms: write time indicating backpressure */
+	]
+	
 	/* Routing Configuration */
 	/* Routes are checked in order; first match wins */
 	/* Routes now reference pools by name */
@@ -200,6 +211,38 @@ pools=[
 - **`conTimeout`**: Connection timeout for long-lived connections (WebSocket, SSE)
 - **`reqTimeout`**: Per-request timeout (0 = no timeout)
 
+### 5. Response Chunking Configuration
+
+New response chunking parameters control how responders handle large response bodies to prevent write-blocking:
+
+- **`maxDirectWrite`**: Maximum response size for direct write without flow-control (default: 65536 bytes / 64KB)
+  - Responses smaller than this are written directly without backpressure monitoring
+  - Tier 1: Direct write (no overhead)
+  
+- **`autoChunkThresh`**: Threshold at which chunked streaming is automatically activated (default: 10485760 bytes / 10MB)
+  - Responses larger than this are streamed in chunks
+  - Between `maxDirectWrite` and `autoChunkThresh`: Tier 2 backpressure monitoring
+  - At or above `autoChunkThresh`: Tier 3 chunked streaming
+  
+- **`chunkSize`**: Size of chunks for streaming large responses (default: 65536 bytes / 64KB)
+  - Used when streaming responses >= `autoChunkThresh`
+  - Smaller chunks = more responsive but more overhead
+  - Larger chunks = less overhead but less responsive
+  
+- **`maxWriteBuffer`**: IPC write buffer size threshold (default: 1048576 bytes / 1MB)
+  - Legacy parameter, kept for compatibility
+  - Not used with timing-based backpressure detection
+
+- **`bpWriteTimeThresh`**: Backpressure write time threshold (default: 50 milliseconds)
+  - Average write time indicating backpressure
+  - Responder tracks recent write times to detect slow writes (indicating full buffers)
+  - Responder reports `workersAvailable=0` until buffer drains
+  - Operator sees no available workers and queues/routes request elsewhere
+
+**Backpressure Signaling**: When a responder's IPC write buffer fills up (during large response streaming), it reports `workersAvailable=0` in the next response message. The operator interprets this as "no capacity" and either queues the request or routes to another responder. No explicit backpressure flag is needed.
+
+See [`arch/requirements.md`](requirements.md) and [`arch/ipc-protocol.md`](ipc-protocol.md) for detailed flow-control answer.
+
 ## Minimal Configuration Example
 
 For simple deployments, a single pool can handle all requests:
@@ -214,7 +257,7 @@ For simple deployments, a single pool can handle all requests:
 	]
 	
 	routes=[
-		[path='/*' pool=default applet=@*]
+		[path='/@*/:*' pool=default]
 	]
 )]
 ```

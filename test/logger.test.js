@@ -1,6 +1,4 @@
 /**
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
- * 
  * Tests for logger.esm.js
  */
 

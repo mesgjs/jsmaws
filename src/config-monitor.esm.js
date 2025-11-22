@@ -4,6 +4,8 @@
  *
  * Uses Deno's file watching capabilities to detect configuration updates
  * and notifies listeners when changes occur.
+ * 
+ * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { parseSLID } from './vendor.esm.js';

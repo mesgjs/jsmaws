@@ -85,6 +85,36 @@ Based on research into servlet containers and application servers (see [`service
   - Maximum idle time before connection closed
   - Only relevant for streaming protocols
 
+### Response Chunking Parameters
+
+Response chunking configuration controls how responders handle large response bodies to prevent write-blocking (see [`arch/requirements.md`](requirements.md) for detailed flow-control answer):
+
+- **`maxDirectWrite`**: Maximum response size for direct write without flow-control (default: 65536 bytes / 64KB)
+  - Responses smaller than this are written directly to IPC socket without backpressure monitoring
+  - Tier 1: Direct write (no overhead)
+  - Typical for most API responses
+  
+- **`autoChunkThresh`**: Threshold at which chunked streaming is automatically activated (default: 10485760 bytes / 10MB)
+  - Responses larger than this are streamed in chunks to IPC socket
+  - Between `maxDirectWrite` and `autoChunkThresh`: Tier 2 backpressure monitoring
+  - At or above `autoChunkThresh`: Tier 3 chunked streaming
+  
+- **`chunkSize`**: Size of chunks for streaming large responses (default: 65536 bytes / 64KB)
+  - Used when streaming responses >= `autoChunkThresh`
+  - Smaller chunks = more responsive but more overhead
+  - Larger chunks = less overhead but less responsive
+  
+- **`maxWriteBuffer`**: IPC write buffer size threshold (default: 1048576 bytes / 1MB)
+  - Legacy parameter, kept for compatibility
+  - Not used with timing-based backpressure detection
+  
+- **`bpWriteTimeThresh`**: Backpressure write time threshold (default: 50 milliseconds)
+  - Average write time indicating backpressure
+  - Based on Unix pipe behavior - writes should be fast if buffer not full
+  - Responder tracks recent write times and signals backpressure when average exceeds threshold
+
+**Note**: These are global defaults; individual pools can override if needed.
+
 ### Derived Behavior
 
 The `lifecycle` parameter mentioned in research is **redundant** - it's derived from `maxReqs`:
@@ -288,11 +318,21 @@ bad=[minProcs=2 maxProcs=10 scaling=static]
 If no pools are defined, use these defaults:
 
 ```slid
-[(pools=[
+[(
+pools=[
   fast=[minProcs=2 maxProcs=10 scaling=dynamic minWorkers=2 maxWorkers=8 maxReqs=1000 reqTimeout=5]
   standard=[minProcs=1 maxProcs=20 scaling=dynamic minWorkers=1 maxWorkers=4 maxReqs=100 reqTimeout=60]
   stream=[minProcs=1 maxProcs=50 scaling=ondemand maxWorkers=1 maxReqs=1 conTimeout=3600]
-])]
+]
+
+# Response chunking configuration (global defaults)
+chunking=[
+  maxDirectWrite=65536
+  autoChunkThresh=10485760
+  chunkSize=65536
+  maxWriteBuffer=1048576
+]
+)]
 ```
 
 ## Example Configurations

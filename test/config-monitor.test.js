@@ -37,7 +37,7 @@ Deno.test("ConfigMonitor - prevents duplicate monitoring", async () => {
 
 	try {
 		const monitor = new ConfigMonitor(testFile, null);
-		
+
 		// Start monitoring
 		const startPromise = monitor.startMonitoring();
 		await startPromise;
@@ -59,7 +59,7 @@ Deno.test("ConfigMonitor - stops monitoring", async () => {
 
 	try {
 		const monitor = new ConfigMonitor(testFile, null);
-		
+
 		await monitor.startMonitoring();
 		assertEquals(monitor.isMonitoring, true);
 
