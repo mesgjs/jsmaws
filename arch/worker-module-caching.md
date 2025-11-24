@@ -88,8 +88,8 @@ class ServiceProcess {
   // Report loaded modules in heartbeat
   getHeartbeat() {
     return {
-      workersAvailable: this.availableWorkers.length,
-      workersTotal: this.maxWorkers,
+      availableWorkers: this.availableWorkers.length,
+      totalWorkers: this.maxWorkers,
       requestsQueued: this.requestQueue.length,
       loadedModules: Array.from(this.loadedModules)  // NEW
     };
@@ -166,8 +166,8 @@ Add `loadedModules` to heartbeat message:
 ```
 # Heartbeat message (service → privileged, periodic)
 [(type=heartbeat id=proc-12345 [
-  workersAvailable=3
-  workersTotal=4
+  availableWorkers=3
+  totalWorkers=4
   requestsQueued=0
   loadedModules=[@api/users @api/posts @health]  # NEW
 ])]

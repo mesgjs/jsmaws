@@ -48,8 +48,8 @@ class ManagedProcess {
 		this.startTime = Date.now();
 		this.requestCount = 0;
 		this.lastHealthCheck = null;
-		this.workersAvailable = 0;
-		this.workersTotal = 0;
+		this.availableWorkers = 0;
+		this.totalWorkers = 0;
 		this.requestsQueued = 0;
 		this.affinity = new Set(); // Applet paths this process has loaded
 	}
@@ -72,21 +72,21 @@ class ManagedProcess {
 	 * Check if process has capacity
 	 */
 	hasCapacity () {
-		return this.state === ProcessState.READY && this.workersAvailable > 0;
+		return this.state === ProcessState.READY && this.availableWorkers > 0;
 	}
 
 	/**
 	 * Update worker capacity from response
 	 */
-	updateCapacity (workersAvailable, workersTotal, requestsQueued) {
-		this.workersAvailable = workersAvailable;
-		this.workersTotal = workersTotal;
+	updateCapacity (availableWorkers, totalWorkers, requestsQueued) {
+		this.availableWorkers = availableWorkers;
+		this.totalWorkers = totalWorkers;
 		this.requestsQueued = requestsQueued;
 
 		// Update state based on capacity
-		if (workersAvailable === 0 && requestsQueued > 0) {
+		if (availableWorkers === 0 && requestsQueued > 0) {
 			this.state = ProcessState.BUSY;
-		} else if (workersAvailable > 0) {
+		} else if (availableWorkers > 0) {
 			this.state = ProcessState.READY;
 		} else if (requestsQueued === 0) {
 			this.state = ProcessState.IDLE;
@@ -356,8 +356,8 @@ export class ProcessManager {
 			if (proc.state === ProcessState.READY) readyCount++;
 			if (proc.state === ProcessState.BUSY) busyCount++;
 
-			totalWorkers += proc.workersTotal;
-			availableWorkers += proc.workersAvailable;
+			totalWorkers += proc.totalWorkers;
+			availableWorkers += proc.availableWorkers;
 			queuedRequests += proc.requestsQueued;
 		}
 

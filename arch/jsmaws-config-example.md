@@ -236,10 +236,10 @@ New response chunking parameters control how responders handle large response bo
 - **`bpWriteTimeThresh`**: Backpressure write time threshold (default: 50 milliseconds)
   - Average write time indicating backpressure
   - Responder tracks recent write times to detect slow writes (indicating full buffers)
-  - Responder reports `workersAvailable=0` until buffer drains
+  - Responder reports `availableWorkers=0` until buffer drains
   - Operator sees no available workers and queues/routes request elsewhere
 
-**Backpressure Signaling**: When a responder's IPC write buffer fills up (during large response streaming), it reports `workersAvailable=0` in the next response message. The operator interprets this as "no capacity" and either queues the request or routes to another responder. No explicit backpressure flag is needed.
+**Backpressure Signaling**: When a responder's IPC write buffer fills up (during large response streaming), it reports `availableWorkers=0` in the next response message. The operator interprets this as "no capacity" and either queues the request or routes to another responder. No explicit backpressure flag is needed.
 
 See [`arch/requirements.md`](requirements.md) and [`arch/ipc-protocol.md`](ipc-protocol.md) for detailed flow-control answer.
 

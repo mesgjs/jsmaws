@@ -336,7 +336,7 @@ Deno.test('Logger: HTTP request without duration', () => {
     assertStringIncludes(output, '200');
 });
 
-Deno.test('Logger: Multiple backends', () => {
+Deno.test('Logger: Multiple backends', async () => {
     const capture = new ConsoleCapture();
     capture.start();
 
@@ -347,9 +347,15 @@ Deno.test('Logger: Multiple backends', () => {
     });
 
     logger.info('Test message');
+    
+    // Wait for async log operations to complete
+    await new Promise(resolve => setTimeout(resolve, 10));
 
     capture.stop();
     const output = capture.getStdout();
     // Should have logged to console backend
     assertStringIncludes(output, 'Test message');
+    
+    // Clean up TCP connection
+    await logger.close();
 });

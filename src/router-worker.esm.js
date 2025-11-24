@@ -1,38 +1,58 @@
 /**
- * JSMAWS Router
+ * JSMAWS Router Worker
  * Handles request routing based on SLID configuration
  *
  * Routes are matched in order, with the first matching route being used.
+ * 
+ * Route Types:
+ * - Filesystem routes: Contain @name or @* applet components (require filesystem access)
+ * - Virtual routes: Have explicit app property (including @static) or response property
+ * - Response routes: Virtual routes with response code (and possibly href for redirects)
+ * 
  * Supports:
- * - Static file serving
- * - Internal (worker-based) applet requests
- * - External (subprocess-based) applet requests
- * - Virtual routes with regex matching
+ * - Literal path matching
+ * - Parameter matching (:name, :?name, :*)
+ * - Applet path matching (@name, @*)
+ * - Regex pattern matching
+ * - HTTP method filtering
+ * - Pool-based request routing
+ * - Response codes and redirects
+ * - Static file serving via @static applet
  * 
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { NANOS } from './vendor.esm.js';
+import { Configuration } from './configuration.esm.js';
 
 /**
  * Route specification parsed from SLID configuration
  */
 class Route {
-	constructor (spec) {
+	constructor (spec, config = null) {
 		this.spec = spec;
+		this.config = config; // Configuration instance
 		this.pathParts = [];
 		this.regexPattern = null;
-		this.class = 'static'; // 'static', 'int', 'ext'
+		this.pool = null; // Pool name for this route
 		this.method = ['get']; // HTTP methods
-		this.ws = false; // WebSocket support
 		this.response = null; // Response code or redirect
 		this.href = null; // Redirect target
-		this.app = null; // Applet path
+		this.app = null; // Applet path (or @static for static files)
 		this.root = null; // Local root directory
-		this.headers = []; // Response headers
-		this.isVirtual = false; // Virtual route (no filesystem check)
+		this.headers = new NANOS(); // Response headers
+		this.isFilesystem = false; // Filesystem route (requires FS access)
+		this.isVirtual = false; // Virtual route (explicit app or response)
 
 		this.parseSpec();
+	}
+
+	/**
+	 * Set configuration instance
+	 * @param {Configuration} config Configuration instance
+	 */
+	setConfig (config) {
+		this.config = config;
 	}
 
 	/**
@@ -55,22 +75,16 @@ class Route {
 			}
 		}
 
-		// Parse service class
-		const classSpec = this.spec.at('class');
-		if (classSpec) {
-			this.class = classSpec;
+		// Parse pool name
+		const poolSpec = this.spec.at('pool');
+		if (poolSpec) {
+			this.pool = poolSpec;
 		}
 
 		// Parse HTTP methods
 		const methodSpec = this.spec.at('method');
 		if (methodSpec) {
 			this.method = this.parseMethod(methodSpec);
-		}
-
-		// Parse WebSocket flag
-		const wsSpec = this.spec.at('ws');
-		if (wsSpec) {
-			this.ws = wsSpec === true || wsSpec === '@t';
 		}
 
 		// Parse response code
@@ -85,11 +99,10 @@ class Route {
 			this.href = hrefSpec;
 		}
 
-		// Parse applet path
+		// Parse applet path (including @static for static file serving)
 		const appSpec = this.spec.at('app');
 		if (appSpec) {
 			this.app = appSpec;
-			this.isVirtual = true; // If app is specified, it's a virtual route
 		}
 
 		// Parse local root
@@ -103,6 +116,40 @@ class Route {
 		if (headersSpec && headersSpec instanceof NANOS) {
 			this.headers = headersSpec;
 		}
+
+		// Classify route type based on parsed data
+		this.classifyRoute();
+	}
+
+	/**
+	 * Classify route as filesystem, virtual, or neither
+	 * 
+	 * Classification rules:
+	 * - Filesystem route: Contains @name or @* applet component (regardless of app property)
+	 * - Virtual route: Has non-empty app property (including @static) OR has response property
+	 * - Response routes are a variation of virtual routes
+	 */
+	classifyRoute () {
+		// Check for applet components in path
+		for (const part of this.pathParts) {
+			if (part.type === 'applet-named' || part.type === 'applet-any') {
+				this.isFilesystem = true;
+				this.isVirtual = false;
+				return;
+			}
+		}
+
+		// If no applet components, check for explicit app property or response
+		if (this.app || this.response) {
+			this.isFilesystem = false;
+			this.isVirtual = true;
+			return;
+		}
+
+		// Neither filesystem nor virtual - invalid route
+		this.isFilesystem = false;
+		this.isVirtual = false;
+		console.warn(`Route has no applet resolution mechanism: ${this.spec.at('path', '(no path)')}`);
 	}
 
 	/**
@@ -121,7 +168,7 @@ class Route {
 				return { type: 'tail' };
 			} else if (part.startsWith(':')) {
 				return { type: 'param', name: part.substring(1) };
-			} else if (part.startsWith('@*')) {
+			} else if (part === '@*') {
 				return { type: 'applet-any' };
 			} else if (part.startsWith('@')) {
 				return { type: 'applet-named', name: part.substring(1) };
@@ -171,26 +218,44 @@ class Route {
 	}
 
 	/**
-	 * Check if this route matches a request
+	 * Check if this route's path matches a request
 	 * @param {string} pathname URL pathname
 	 * @param {string} method HTTP method
 	 * @returns {Object|null} Match result with extracted parameters, or null if no match
 	 */
-	match (pathname, method) {
+	matchPath (pathname, method) {
+		// Skip filesystem routes when fsRouting is disabled
+		if (this.isFilesystem && this.config && !this.config.routing.fsRouting) {
+			return null;
+		}
+
 		// Check method
 		if (!this.method.includes('any') && !this.method.includes(method.toLowerCase())) {
 			return null;
 		}
 
-		// Check regex pattern if present
-		if (this.regexPattern && !this.regexPattern.test(pathname)) {
-			return null;
+		// Check regex pattern if present and capture groups
+		let regexMatch = null;
+		if (this.regexPattern) {
+			regexMatch = pathname.match(this.regexPattern);
+			if (!regexMatch) {
+				return null;
+			}
 		}
 
 		// If no path parts, only regex matching applies
 		if (this.pathParts.length === 0) {
-			if (this.regexPattern) {
-				return { params: {}, app: this.app, tail: '' };
+			if (this.regexPattern && regexMatch) {
+				// Use regex captures for app, tail, and params
+				const result = {
+					params: regexMatch.groups || {},
+					app: this.app || regexMatch[1] || null,
+					tail: regexMatch[2] || '',
+					pool: this.pool,
+					response: this.response,
+					href: this.href
+				};
+				return result;
 			}
 			return null;
 		}
@@ -201,9 +266,13 @@ class Route {
 			params: {},
 			app: this.app,
 			tail: '',
+			pool: this.pool,
+			response: this.response,
+			href: this.href,
 		};
 
 		let urlIndex = 0;
+		let prePath = []; // Track pre-applet path parts for filesystem routes
 
 		for (let i = 0; i < this.pathParts.length; i++) {
 			const part = this.pathParts[i];
@@ -211,6 +280,10 @@ class Route {
 			if (part.type === 'literal') {
 				if (urlIndex >= urlParts.length || urlParts[urlIndex] !== part.value) {
 					return null;
+				}
+				// Track literal parts before applet for filesystem path construction
+				if (!result.app || result.app === this.app) {
+					prePath.push(urlParts[urlIndex]);
 				}
 				urlIndex++;
 			} else if (part.type === 'param') {
@@ -223,13 +296,23 @@ class Route {
 				if (urlIndex >= urlParts.length || urlParts[urlIndex] !== part.name) {
 					return null;
 				}
-				result.app = part.name;
+				// For filesystem routes, construct full applet path
+				if (this.isFilesystem && !this.root) {
+					result.app = [...prePath, part.name].join('/');
+				} else {
+					result.app = part.name;
+				}
 				urlIndex++;
 			} else if (part.type === 'applet-any') {
 				if (urlIndex >= urlParts.length) {
 					return null;
 				}
-				result.app = urlParts[urlIndex];
+				// For filesystem routes, construct full applet path
+				if (this.isFilesystem && !this.root) {
+					result.app = [...prePath, urlParts[urlIndex]].join('/');
+				} else {
+					result.app = urlParts[urlIndex];
+				}
 				urlIndex++;
 			} else if (part.type === 'optional-param') {
 				if (urlIndex < urlParts.length) {
@@ -249,50 +332,124 @@ class Route {
 			return null;
 		}
 
+		// Merge regex capture groups into params if present
+		if (regexMatch && regexMatch.groups) {
+			result.params = { ...result.params, ...regexMatch.groups };
+		}
+
 		return result;
+	}
+
+	/**
+	 * Check if this route fully matches a request (including filesystem verification for FS routes)
+	 * @param {string} pathname URL pathname
+	 * @param {string} method HTTP method
+	 * @returns {Promise<Object|null>} Match result with extracted parameters, or null if no match
+	 */
+	async match (pathname, method) {
+		// First do path matching
+		const pathMatch = this.matchPath(pathname, method);
+		if (!pathMatch) {
+			return null;
+		}
+
+		// For filesystem routes, verify the file exists
+		if (this.isFilesystem && this.config && this.config.routing.fsRouting) {
+			return await this.verifyFilesystem(pathMatch);
+		}
+
+		// For non-filesystem routes, path match is sufficient
+		return pathMatch;
+	}
+
+	/**
+		* Verify filesystem route exists (async)
+		* This method should be called after matchPath() for filesystem routes
+		* @param {Object} matchResult Result from matchPath()
+		* @returns {Promise<Object|null>} Match result with resolved app path, or null if not found
+		*/
+	async verifyFilesystem (matchResult) {
+		if (!this.isFilesystem || !matchResult || !matchResult.app) {
+			return matchResult;
+		}
+
+		if (!this.config) {
+			throw new Error('Route configuration not set');
+		}
+
+		// Use local root if specified, otherwise global root from config
+		let basePath = this.root || this.config.routing.root;
+		
+		// Ensure basePath ends with / for consistent path construction
+		if (basePath && !basePath.endsWith('/')) {
+			basePath += '/';
+		}
+		
+		const extensions = this.config.routing.extensions;
+		const appPath = matchResult.app;
+		
+		// If appPath already has a .js extension, check it directly
+		if (appPath.endsWith('.js')) {
+			const fullPath = `${basePath}${appPath}`;
+			try {
+				const stat = await Deno.stat(fullPath);
+				if (stat.isFile) {
+					// Return FULL absolute path for responder to load
+					matchResult.app = fullPath;
+					return matchResult;
+				}
+			} catch (error) {
+				// File doesn't exist
+				return null;
+			}
+		}
+		
+		// Try each extension in order
+		// Note: Even if appPath exists as a directory, we still check for appPath.esm.js, appPath.js
+		for (const ext of extensions) {
+			const fullPath = `${basePath}${appPath}${ext}`;
+			try {
+				const stat = await Deno.stat(fullPath);
+				if (stat.isFile) {
+					// File exists, return FULL absolute path for responder to load
+					matchResult.app = fullPath;
+					return matchResult;
+				}
+			} catch (error) {
+				// File doesn't exist with this extension, try next
+				continue;
+			}
+		}
+
+		// No file found with any extension
+		return null;
 	}
 }
 
 /**
- * Router class for managing routes and matching requests
- */
+	* Router class for managing routes and matching requests
+	*/
 class Router {
-	constructor (config = new NANOS(), fsRouting = false) {
-		this.config = config;
+	constructor (config) {
+		this.config = config; // Configuration instance
 		this.routes = [];
-		this.appRoot = '';
-		this.root = '';
-		this.fsRouting = fsRouting;
-
 		this.parseConfig();
 	}
 
 	/**
-	 * Parse configuration from NANOS object
+	 * Parse configuration and create routes
 	 */
 	parseConfig () {
-		// Parse app root
-		const appRootSpec = this.config.at('appRoot');
-		if (appRootSpec) {
-			this.appRoot = appRootSpec.endsWith('/') ? appRootSpec : appRootSpec + '/';
-		}
-
-		// Parse default root
-		const rootSpec = this.config.at('root');
-		if (rootSpec) {
-			this.root = rootSpec.endsWith('/') ? rootSpec : rootSpec + '/';
-		}
-
 		// Parse routes - routes is a NANOS containing route specifications
-		const routesSpec = this.config.at('routes');
+		const routesSpec = this.config.routes;
 		if (routesSpec && routesSpec instanceof NANOS) {
 			// Iterate through NANOS values (each is a route specification)
 			this.routes = [];
 			for (const routeSpec of routesSpec.values()) {
-				const route = new Route(routeSpec);
+				const route = new Route(routeSpec, this.config);
 
 				// Skip filesystem routes when fsRouting is disabled
-				if (!this.fsRouting && this.isFilesystemRoute(route)) {
+				if (!this.config.routing.fsRouting && route.isFilesystem) {
 					console.warn(`Skipping filesystem route (fsRouting disabled): ${route.spec.at('path', '(no path)')}`);
 					continue;
 				}
@@ -303,40 +460,22 @@ class Router {
 	}
 
 	/**
-	 * Check if a route requires filesystem access
-	 * @param {Route} route Route to check
-	 * @returns {boolean} True if route requires filesystem access
-	 */
-	isFilesystemRoute (route) {
-		// Routes with @name or @* path components require filesystem access
-		// (shouldn't be used with explicit app field, but check first just in case)
-		for (const part of route.pathParts) {
-			if (part.type === 'applet-named' || part.type === 'applet-any') {
-				return true;
-			}
-		}
-
-		// Virtual routes (explicit app field) don't require filesystem access
-		if (route.isVirtual) {
-			return false;
-		}
-
-		// Routes that are neither FS nor virtual don't resolve to an applet
-		// These are typically static file routes or response-only routes
-		// They don't require filesystem access for route resolution
-		return false;
-	}
-
-	/**
 	 * Find the first matching route for a request
 	 * @param {string} pathname URL pathname
 	 * @param {string} method HTTP method
-	 * @returns {Object|null} Route match result or null
+	 * @returns {Promise<Object|null>} Route match result or null
 	 */
-	findRoute (pathname, method = 'GET') {
+	async findRoute (pathname, method = 'GET') {
 		for (const route of this.routes) {
-			const match = route.match(pathname, method);
+			// Use the complete match() method which includes filesystem verification
+			const match = await route.match(pathname, method);
 			if (match) {
+				// For virtual routes with relative app paths, resolve using appRoot
+				const app = match.app;
+				if (route.isVirtual && app && app !== '@static' && !app.startsWith('https://') && !app.startsWith('http://') && !app.startsWith('/')) {
+					match.app = `${this.config.routing.appRoot}${match.app}`;
+				}
+				
 				return {
 					route,
 					match,
@@ -348,15 +487,10 @@ class Router {
 
 	/**
 	 * Update router configuration
-	 * @param {NANOS} config New configuration
-	 * @param {boolean} fsRouting Whether filesystem routing is enabled
+	 * Configuration instance is updated externally; this just rebuilds routes
 	 */
-	updateConfig (config, fsRouting = false) {
-		this.config = config;
+	updateConfig () {
 		this.routes = [];
-		this.appRoot = '';
-		this.root = '';
-		this.fsRouting = fsRouting;
 		this.parseConfig();
 	}
 }
@@ -364,6 +498,7 @@ class Router {
 // Web Worker message handler (when running as a worker)
 if (typeof self !== 'undefined' && self.postMessage) {
 	let router = null;
+	let config = null;
 
 	self.onmessage = async (event) => {
 		const { type, id, data } = event.data;
@@ -372,17 +507,20 @@ if (typeof self !== 'undefined' && self.postMessage) {
 			switch (type) {
 				case 'init': {
 					// Initialize router with configuration
-					const { config, fsRouting } = data;
-					router = new Router(config, fsRouting);
+					const { config: slidConfig } = data;
+					config = Configuration.fromSLID(slidConfig);
+					router = new Router(config);
 					self.postMessage({ type: 'init-res', id, success: true });
 					break;
 				}
 
 				case 'config': {
 					// Update router configuration
-					const { config, fsRouting } = data;
-					if (router) {
-						router.updateConfig(config, fsRouting);
+					const { config: slidConfig } = data;
+					if (router && config) {
+						const configNanos = NANOS.parseSLID(slidConfig);
+						config.updateConfig(configNanos);
+						router.updateConfig();
 						self.postMessage({ type: 'config-res', id, success: true });
 					} else {
 						throw new Error('Router not initialized');
@@ -397,20 +535,20 @@ if (typeof self !== 'undefined' && self.postMessage) {
 						throw new Error('Router not initialized');
 					}
 
-					const result = router.findRoute(pathname, method);
+					const result = await router.findRoute(pathname, method);
 					self.postMessage({
 						type: 'route-res',
 						id,
 						success: true,
 						result: result ? {
 							route: {
-								class: result.route.class,
+								pool: result.route.pool,
 								method: result.route.method,
-								ws: result.route.ws,
 								response: result.route.response,
 								href: result.route.href,
 								app: result.route.app,
 								root: result.route.root,
+								isFilesystem: result.route.isFilesystem,
 								isVirtual: result.route.isVirtual,
 							},
 							match: result.match,

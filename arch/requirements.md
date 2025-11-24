@@ -8,6 +8,14 @@
   - Enumerate under `mimeTypes` level, e.g.: `[mimeTypes=['.htm'=text/html '.html'=text/html '.js'=text/javascript '.txt'=text/plain]]`
 - `appRoot=/ar1/ar2`: the base path for relative `app` paths (add trailing `/` if missing)
 - `root=/dr1/dr2/...`: the default filesystem "root" directory for `path` specifications
+- `extensions=['.esm.js' '.js']`: ordered list of file extensions to try when resolving filesystem-based applet routes
+  - Default: `['.esm.js' '.js']`
+  - Extensions are tried in order until a file is found
+  - **Critical**: The unmodified path might match a directory; the router must verify it's looking for a *file* (or symlink resolving to one), not a directory
+  - Example filesystem: `foo/bar.esm.js` and `foo/bar/baz.esm.js`
+    - URL `/foo/bar` should match `foo/bar.esm.js` (file), not `foo/bar/` (directory)
+    - URL `/foo/bar/baz` should match `foo/bar/baz.esm.js` (file)
+  - This ensures proper disambiguation between files and directories with the same base name
 
 ## Routing Configuration
 
@@ -50,7 +58,9 @@
     - Value is normally scalar, but might be a sub-list for some headers (e.g. `Set-Cookie`)
   - ~~An applet request (class of `int` or `ext`)~~ All requests should load a JavaScript applet
     - Use the applet path from `app=path` if provided, otherwise use the applet matched from the URL path
-    - If the applet ends in `.js`, use the applet path as-is; otherwise, try `.esm.js` (first) and `.js` extensions (second)
+    - If the applet path ends in `.js` (which will also match `.esm.js`), use the applet path as-is
+    - Otherwise, try extensions from the `extensions` configuration in order (default: `['.esm.js' '.js']`)
+    - **Important**: When checking filesystem paths, verify the result is a *file* (or symlink resolving to one), not a directory
     - Create a built-in applet `app=@static` for standard static file service (serving file at root + tail)
 - Routes are checked in order; the first matching route is used
 - For both virtual and filesystem-based routes, if there are URL components after the applet that are not accounted for (i.e. "consumed") by variable-part matching, the route is deemed non-matching.
@@ -61,8 +71,34 @@
 
 - Let the *pre-path* be defined as any *non-variable* path parts preceding the applet part (`@name` or `@*`)
 - For filesystem-based (non-virtual) routes:
-  - The applet must be present at `/dr1/dr2/.../pre-path/parts/.../applet{.esm,}.js` if the routing entry *does not have* a local root
-  - The applet must be present at `/lr1/lr2/.../applet{.esm,}.js` if routing entry *does have* a local root (the pre-path must match the routing specification, but has no effect on the filesystem path)
+  - The applet must be present at `/dr1/dr2/.../pre-path/parts/.../applet{extensions}` if the routing entry *does not have* a local root
+  - The applet must be present at `/lr1/lr2/.../applet{extensions}` if routing entry *does have* a local root (the pre-path must match the routing specification, but has no effect on the filesystem path)
+  - `{extensions}` refers to the configured extension list (default: `.esm.js`, `.js`)
+  - The router tries each extension in order and verifies the result is a file (or symlink resolving to one), not a directory
+
+### File vs Directory Disambiguation
+
+When resolving filesystem-based routes, the router must distinguish between files and directories:
+
+**Example filesystem structure:**
+```
+foo/bar.esm.js          # File
+foo/bar/                # Directory
+foo/bar/baz.esm.js      # File in subdirectory
+```
+
+**Route resolution:**
+- URL `/foo/bar` with route `path=/foo/@*`:
+  1. Check `/foo/bar` (might be directory) - skip if directory
+  2. Check `/foo/bar.esm.js` (file) - **match found**
+  3. Return applet path: `foo/bar.esm.js`
+
+- URL `/foo/bar/baz` with route `path=/foo/bar/@*`:
+  1. Check `/foo/bar/baz` (doesn't exist) - skip
+  2. Check `/foo/bar/baz.esm.js` (file) - **match found**
+  3. Return applet path: `foo/bar/baz.esm.js`
+
+This ensures that files and directories with the same base name are properly disambiguated. Without checking for directories, URL `/foo/bar` might incorrectly match the directory instead of the file `foo/bar.esm.js`.
 
 ## Ideas For Potential Future Enhancements
 

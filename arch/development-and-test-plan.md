@@ -866,6 +866,8 @@ class ProcessManager {
 
 ## Phase 6: Applet Loading
 
+(Historical design; in current design, applets are just web worker scripts)
+
 ### Goals
 - Implement JavaScript applet loading
 - Support ES module imports
@@ -904,6 +906,8 @@ class ProcessManager {
 ---
 
 ## Phase 7: Internal Request Handling
+
+(Historical design; in current design, applet routes are assigned to behavioral "pools")
 
 ### Goals
 - Implement internal applet request handling
@@ -944,6 +948,8 @@ class ProcessManager {
 ---
 
 ## Phase 8: External Request Handling
+
+(Historical design; in current design, applet routes are assigned to behavioral "pools")
 
 ### Goals
 - Implement external applet request handling

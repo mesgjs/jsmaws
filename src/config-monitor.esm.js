@@ -58,6 +58,11 @@ class ConfigMonitor {
 	async processWatchEvents () {
 		try {
 			for await (const event of this.watcher) {
+				// Break if monitoring stopped
+				if (!this.isMonitoring) {
+					break;
+				}
+				
 				// Only process modify events
 				if (event.kind === 'modify') {
 					// Debounce rapid changes
@@ -65,6 +70,7 @@ class ConfigMonitor {
 				}
 			}
 		} catch (error) {
+			// Ignore errors after monitoring stopped (watcher closed)
 			if (this.isMonitoring) {
 				console.error('Error in configuration monitor:', error.message);
 			}
@@ -111,7 +117,11 @@ class ConfigMonitor {
 
 			// Notify listener of configuration change
 			if (this.onConfigChange) {
-				await this.onConfigChange(newConfig);
+				try {
+					await this.onConfigChange(newConfig);
+				} catch (callbackError) {
+					console.error('Error in configuration change callback:', callbackError.message);
+				}
 			}
 		} catch (error) {
 			console.error('Failed to reload configuration:', error.message);

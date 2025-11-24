@@ -14,11 +14,14 @@
 
 import { NANOS, parseSLID } from './vendor.esm.js';
 import { createSSLManager } from './ssl-manager.esm.js';
-import { Router } from './router.esm.js';
+import { Router } from './router-worker.esm.js';
 import { createConfigMonitor } from './config-monitor.esm.js';
 import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
-import { createRequest, MessageType } from './ipc-protocol.esm.js';
+import {
+	createRequest,
+	MessageType,
+} from './ipc-protocol.esm.js';
 
 const DEFAULT_HTTP_PORT = 80;
 const DEFAULT_HTTPS_PORT = 443;
@@ -95,7 +98,7 @@ class OperatorProcess {
 		this.logger = null;
 		this.isShuttingDown = false;
 		this.isReloading = false;
-		this.pendingRequests = new Map(); // requestId -> {resolve, reject, timeout}
+		this.pendingRequests = new Map(); // requestId -> {resolve, reject, timeout, controller, writer}
 		this.healthCheckInterval = null;
 	}
 
@@ -412,34 +415,33 @@ class OperatorProcess {
 				this.processManager.updateAffinity(process.id, appletPath);
 			}
 
-			// Wait for response
+			// Wait for initial response
 			const { message, binaryData } = await process.ipcConn.readMessage();
-
-			if (message.type !== MessageType.WEB_RESPONSE) {
-				throw new Error(`Unexpected message type: ${message.type}`);
-			}
 
 			// Update process capacity from response
 			process.updateCapacity(
-				message.fields.at('workersAvailable', 0),
-				message.fields.at('workersTotal', 0),
+				message.fields.at('availableWorkers', 0),
+				message.fields.at('totalWorkers', 0),
 				message.fields.at('requestsQueued', 0)
 			);
 
-			// Convert response headers from NANOS to Headers
-			const responseHeaders = new Headers();
-			const headersField = message.fields.at('headers');
-			if (headersField instanceof NANOS) {
-				for (const [key, value] of headersField.entries()) {
-					responseHeaders.set(key, value);
-				}
+			// Handle different message types
+			switch (message.type) {
+				case MessageType.WEB_RESPONSE:
+					return await this.handleWebResponse(message, binaryData);
+					
+				case MessageType.WEB_CHUNK:
+					return await this.handleChunkedResponse(message.id, message, binaryData, process);
+					
+				case MessageType.WEB_STREAM:
+					return await this.handleStreamingResponse(message.id, message, binaryData, process);
+					
+				case MessageType.WS_UPGRADE:
+					return await this.handleWebSocketUpgrade(message.id, message, process, req);
+					
+				default:
+					throw new Error(`Unexpected message type: ${message.type}`);
 			}
-
-			// Create HTTP response
-			return new Response(binaryData, {
-				status: message.fields.at('status', 200),
-				headers: responseHeaders,
-			});
 		} catch (error) {
 			this.logger.error(`IPC communication error with ${process.id}: ${error.message}`);
 			return new Response(
@@ -450,6 +452,148 @@ class OperatorProcess {
 				}
 			);
 		}
+	}
+
+	/**
+	 * Convert NANOS-format headers to Headers
+	 */
+	convertHeaders (hdrIn) {
+		const hdrOut = new Headers();
+		if (hdrIn instanceof NANOS) {
+			for (const [name, content] of hdrIn.entries()) {
+				if (typeof content?.values === 'function') {
+					// Multi-valued, e.g. Set-Cookie
+					for (const content1 of content.values()) hdrOut.append(name, content1);
+				} else hdrOut.set(name, content);
+			}
+		}
+		return hdrOut;
+	}
+
+	/**
+	 * Handle regular web response
+	 */
+	async handleWebResponse (message, binaryData) {
+		// Convert response headers from NANOS to Headers
+		const responseHeaders = this.convertHeaders(message.fields.at('headers'));
+
+		// Create HTTP response
+		return new Response(binaryData, {
+			status: message.fields.at('status', 200),
+			headers: responseHeaders,
+		});
+	}
+
+	/**
+	 * Handle chunked response (large files, etc.)
+	 */
+	async handleChunkedResponse (requestId, initialMessage, initialData, process) {
+		// Convert response headers
+		const responseHeaders = this.convertHeaders(initialMessage.fields.at('headers'));
+
+		// Create readable stream for chunked response
+		const stream = new ReadableStream({
+			start: async (controller) => {
+				try {
+					// Send initial chunk if present
+					if (initialData && initialData.length > 0) {
+						controller.enqueue(initialData);
+					}
+
+					// Check if this was the final chunk
+					if (initialMessage.fields.at('final', false)) {
+						controller.close();
+						return;
+					}
+
+					// Read subsequent chunks
+					while (true) {
+						const { message, binaryData } = await process.ipcConn.readMessage();
+
+						if (message.type !== MessageType.WEB_CHUNK) {
+							throw new Error(`Expected WEB_CHUNK, got ${message.type}`);
+						}
+
+						// Send chunk data
+						if (binaryData && binaryData.length > 0) {
+							controller.enqueue(binaryData);
+						}
+
+						// Check if final chunk
+						if (message.fields.at('final', false)) {
+							controller.close();
+							break;
+						}
+					}
+				} catch (error) {
+					controller.error(error);
+				}
+			},
+		});
+
+		return new Response(stream, {
+			status: initialMessage.fields.at('status', 200),
+			headers: responseHeaders,
+		});
+	}
+
+	/**
+	 * Handle streaming response (SSE, etc.)
+	 */
+	async handleStreamingResponse (requestId, initialMessage, initialData, process) {
+		// Convert response headers
+		const responseHeaders = this.convertHeaders(initialMessage.fields.at('headers'));
+
+		// Create readable stream for streaming response
+		const stream = new ReadableStream({
+			start: async (controller) => {
+				try {
+					// Send initial data if present
+					if (initialData && initialData.length > 0) {
+						controller.enqueue(initialData);
+					}
+
+					// Read subsequent stream data
+					while (true) {
+						const { message, binaryData } = await process.ipcConn.readMessage();
+
+						if (message.type === MessageType.WEB_STREAM) {
+							// Send stream data
+							if (binaryData && binaryData.length > 0) {
+								controller.enqueue(binaryData);
+							}
+						} else if (message.type === MessageType.WEB_STREAM_CLOSE) {
+							// Stream closed
+							controller.close();
+							break;
+						} else {
+							throw new Error(`Expected WEB_STREAM or WEB_STREAM_CLOSE, got ${message.type}`);
+						}
+					}
+				} catch (error) {
+					controller.error(error);
+				}
+			},
+		});
+
+		return new Response(stream, {
+			status: initialMessage.fields.at('status', 200),
+			headers: responseHeaders,
+		});
+	}
+
+	/**
+	 * Handle WebSocket upgrade
+	 */
+	async handleWebSocketUpgrade (requestId, message, process, req) {
+		// WebSocket upgrade handling would require Deno.upgradeWebSocket
+		// This is a placeholder for the full implementation
+		this.logger.warn('WebSocket upgrade not yet fully implemented');
+		
+		return new Response('WebSocket upgrade not yet implemented', {
+			status: 501,
+			headers: { 'Content-Type': 'text/plain' },
+		});
 	}
 
 	/**

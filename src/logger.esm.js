@@ -73,26 +73,18 @@ class ConsoleBackend {
 }
 
 /**
- * Syslog backend for logging to system syslog
- * Note: Requires syslog daemon to be running
+ * Syslog backend for logging to system syslog via TCP
+ * Note: Requires syslog daemon to be running and accepting TCP connections
  */
 class SyslogBackend {
     constructor (options = {}) {
         this.level = LOG_LEVELS[options.level?.toUpperCase() || 'INFO'];
         this.facility = this.parseFacility(options.facility || 'local0');
         this.tag = options.tag || 'jsmaws';
-        this.socketPath = options.socketPath || this.getDefaultSocketPath();
+        this.host = options.host || '127.0.0.1';
+        this.port = options.port || 514;
         this.socket = null;
         this.connected = false;
-    }
-
-    getDefaultSocketPath () {
-        // Try common syslog socket paths based on OS
-        if (Deno.build.os === 'darwin') {
-            return '/var/run/syslog';
-        }
-        // Linux and other Unix-like systems
-        return '/dev/log';
     }
 
     parseFacility (facility) {
@@ -110,12 +102,13 @@ class SyslogBackend {
 
         try {
             this.socket = await Deno.connect({
-                transport: 'unix',
-                path: this.socketPath,
+                transport: 'tcp',
+                hostname: this.host,
+                port: this.port,
             });
             this.connected = true;
         } catch (error) {
-            console.error(`Failed to connect to syslog at ${this.socketPath}: ${error.message}`);
+            console.error(`Failed to connect to syslog at ${this.host}:${this.port}: ${error.message}`);
             this.connected = false;
         }
     }
@@ -134,13 +127,22 @@ class SyslogBackend {
 
         const message = this.formatMessage(entry);
         const priority = this.facility + entry.level;
-        const syslogMessage = `<${priority}>${this.tag}[${Deno.pid}]: ${message}`;
+        const syslogMessage = `<${priority}>${this.tag}[${Deno.pid}]: ${message}\n`;
 
         try {
             await this.socket.write(new TextEncoder().encode(syslogMessage));
         } catch (error) {
-            console.error(`Failed to write to syslog: ${error.message}`);
+            console.error(`Failed to send to syslog: ${error.message}`);
             this.connected = false;
+            // Try to reconnect on next log attempt
+            if (this.socket) {
+                try {
+                    this.socket.close();
+                } catch {
+                    // Ignore close errors
+                }
+                this.socket = null;
+            }
         }
     }
 

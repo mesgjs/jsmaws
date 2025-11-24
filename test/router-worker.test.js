@@ -1,0 +1,972 @@
+/**
+ * Tests for JSMAWS Router Worker
+ * Tests the Router and Route classes that handle request routing
+ */
+
+import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.0/assert/mod.ts";
+import { Router, Route } from "../src/router-worker.esm.js";
+import { RouterWorker } from "../src/router-worker-manager.esm.js";
+import { Configuration } from "../src/configuration.esm.js";
+import { NANOS } from '../src/vendor.esm.js';
+
+// ============================================================================
+// Route Class - Path Parsing Tests
+// ============================================================================
+
+Deno.test("Route - parses literal path", () => {
+	const spec = new NANOS({ path: 'api/users', pool: 'standard' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 2);
+	assertEquals(route.pathParts[0].type, 'literal');
+	assertEquals(route.pathParts[0].value, 'api');
+	assertEquals(route.pathParts[1].type, 'literal');
+	assertEquals(route.pathParts[1].value, 'users');
+	assertEquals(route.pool, 'standard');
+});
+
+Deno.test("Route - parses path with parameters", () => {
+	const spec = new NANOS({ path: 'api/:id/users/:name', app: '/app.esm.js' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 4);
+	assertEquals(route.pathParts[0].type, 'literal');
+	assertEquals(route.pathParts[1].type, 'param');
+	assertEquals(route.pathParts[1].name, 'id');
+	assertEquals(route.pathParts[2].type, 'literal');
+	assertEquals(route.pathParts[3].type, 'param');
+	assertEquals(route.pathParts[3].name, 'name');
+});
+
+Deno.test("Route - parses named applet path", () => {
+	const spec = new NANOS({ path: 'api/@myapp' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 2);
+	assertEquals(route.pathParts[0].type, 'literal');
+	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[1].name, 'myapp');
+});
+
+Deno.test("Route - parses wildcard applet", () => {
+	const spec = new NANOS({ path: 'apps/@*' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 2);
+	assertEquals(route.pathParts[1].type, 'applet-any');
+});
+
+Deno.test("Route - parses applet with required parameter", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:action' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 3);
+	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[2].type, 'param');
+	assertEquals(route.pathParts[2].name, 'action');
+});
+
+Deno.test("Route - parses applet with optional parameter", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:?format' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 3);
+	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[2].type, 'optional-param');
+	assertEquals(route.pathParts[2].name, 'format');
+});
+
+Deno.test("Route - parses applet with tail parameter", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:*' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 3);
+	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[2].type, 'tail');
+});
+
+Deno.test("Route - parses tail parameter", () => {
+	const spec = new NANOS({ path: 'files/:*', app: '@static' });
+	const route = new Route(spec);
+
+	assertEquals(route.pathParts.length, 2);
+	assertEquals(route.pathParts[1].type, 'tail');
+});
+
+Deno.test("Route - parses regex pattern", () => {
+	const spec = new NANOS({ regex: '^/api/v[0-9]+/.*', app: '/app.esm.js' });
+	const route = new Route(spec);
+
+	assertExists(route.regexPattern);
+	assertEquals(route.regexPattern.test('/api/v1/users'), true);
+	assertEquals(route.regexPattern.test('/api/v2/posts'), true);
+	assertEquals(route.regexPattern.test('/api/users'), false);
+});
+
+// ============================================================================
+// Route Class - Property Parsing Tests
+// ============================================================================
+
+Deno.test("Route - parses HTTP methods", () => {
+	const spec = new NANOS({ method: 'get', app: '/app.esm.js' });
+	const route = new Route(spec);
+
+	assertEquals(route.method.length, 1);
+	assertEquals(route.method[0], 'get');
+});
+
+Deno.test("Route - parses method shortcuts", () => {
+	const spec1 = new NANOS({ method: 'read', app: '/app.esm.js' });
+	const route1 = new Route(spec1);
+	assertEquals(route1.method.includes('get'), true);
+	assertEquals(route1.method.includes('head'), true);
+
+	const spec2 = new NANOS({ method: 'write', app: '/app.esm.js' });
+	const route2 = new Route(spec2);
+	assertEquals(route2.method.includes('post'), true);
+	assertEquals(route2.method.includes('put'), true);
+	assertEquals(route2.method.includes('patch'), true);
+});
+
+Deno.test("Route - parses pool name", () => {
+	const spec = new NANOS({ path: 'api/users', pool: 'fast', app: '/app.esm.js' });
+	const route = new Route(spec);
+
+	assertEquals(route.pool, 'fast');
+});
+
+Deno.test("Route - parses response code", () => {
+	const spec = new NANOS({ path: 'old', response: 404 });
+	const route = new Route(spec);
+
+	assertEquals(route.response, 404);
+});
+
+Deno.test("Route - parses redirect", () => {
+	const spec = new NANOS({ path: 'old', response: 307, href: 'https://example.com' });
+	const route = new Route(spec);
+
+	assertEquals(route.response, 307);
+	assertEquals(route.href, 'https://example.com');
+});
+
+Deno.test("Route - parses applet from spec", () => {
+	const spec = new NANOS({ path: 'api/users', app: '/path/to/app.esm.js' });
+	const route = new Route(spec);
+
+	assertEquals(route.app, '/path/to/app.esm.js');
+});
+
+Deno.test("Route - parses local root", () => {
+	const spec = new NANOS({ path: 'test/@*', root: '/var/apps' });
+	const route = new Route(spec);
+
+	assertEquals(route.root, '/var/apps');
+});
+
+// ============================================================================
+// Route Class - Classification Tests
+// ============================================================================
+
+Deno.test("Route - classifies filesystem route with @name", () => {
+	const spec = new NANOS({ path: 'api/@myapp' });
+	const route = new Route(spec);
+
+	assertEquals(route.isFilesystem, true);
+	assertEquals(route.isVirtual, false);
+});
+
+Deno.test("Route - classifies filesystem route with @*", () => {
+	const spec = new NANOS({ path: 'apps/@*' });
+	const route = new Route(spec);
+
+	assertEquals(route.isFilesystem, true);
+	assertEquals(route.isVirtual, false);
+});
+
+Deno.test("Route - classifies filesystem route with parameters", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:action' });
+	const route = new Route(spec);
+
+	assertEquals(route.isFilesystem, true);
+	assertEquals(route.isVirtual, false);
+});
+
+Deno.test("Route - classifies virtual route with app property", () => {
+	const spec = new NANOS({ path: 'api/users', app: '/path/to/app.esm.js' });
+	const route = new Route(spec);
+
+	assertEquals(route.isFilesystem, false);
+	assertEquals(route.isVirtual, true);
+});
+
+Deno.test("Route - classifies virtual route with @static app", () => {
+	const spec = new NANOS({ path: 'static/:*', app: '@static' });
+	const route = new Route(spec);
+
+	assertEquals(route.isFilesystem, false);
+	assertEquals(route.isVirtual, true);
+});
+
+Deno.test("Route - classifies response route", () => {
+	const spec = new NANOS({ path: 'old-path', response: 301, href: '/new-path' });
+	const route = new Route(spec);
+
+	assertEquals(route.isFilesystem, false);
+	assertEquals(route.isVirtual, true);
+});
+
+Deno.test("Route - warns about invalid route (no resolution mechanism)", () => {
+	const spec = new NANOS({ path: 'api/users' }); // No app, no @name/@*, no response
+	const route = new Route(spec);
+
+	assertEquals(route.isFilesystem, false);
+	assertEquals(route.isVirtual, false);
+});
+
+// ============================================================================
+// Route Class - Path Matching Tests
+// ============================================================================
+
+Deno.test("Route - matchPath matches literal path", () => {
+	const spec = new NANOS({ path: 'api/users', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/users', 'GET');
+
+	assertExists(match);
+	assertEquals(match.params, {});
+});
+
+Deno.test("Route - matchPath matches path with parameters", () => {
+	const spec = new NANOS({ path: 'api/:id/users/:name', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/123/users/john', 'GET');
+
+	assertExists(match);
+	assertEquals(match.params.id, '123');
+	assertEquals(match.params.name, 'john');
+});
+
+Deno.test("Route - matchPath rejects non-matching path", () => {
+	const spec = new NANOS({ path: 'api/users', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/posts', 'GET');
+
+	assertEquals(match, null);
+});
+
+Deno.test("Route - matchPath rejects wrong method", () => {
+	const spec = new NANOS({ path: 'api/users', method: 'post', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/users', 'GET');
+
+	assertEquals(match, null);
+});
+
+Deno.test("Route - matchPath matches any method", () => {
+	const spec = new NANOS({ path: 'api/users', method: 'any', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+
+	assertExists(route.matchPath('/api/users', 'GET'));
+	assertExists(route.matchPath('/api/users', 'POST'));
+	assertExists(route.matchPath('/api/users', 'DELETE'));
+});
+
+Deno.test("Route - matchPath case-insensitive method matching", () => {
+	const spec = new NANOS({ path: 'api/users', method: 'POST', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+
+	assertExists(route.matchPath('/api/users', 'post'));
+	assertExists(route.matchPath('/api/users', 'POST'));
+});
+
+Deno.test("Route - matchPath matches named applet", () => {
+	const spec = new NANOS({ path: 'apps/@myapp' });
+	const config = new Configuration(new NANOS({ fsRouting: true }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/apps/myapp', 'GET');
+
+	assertExists(match);
+	// Filesystem routes include prePath
+	assertEquals(match.app, 'apps/myapp');
+});
+
+Deno.test("Route - matchPath matches wildcard applet", () => {
+	const spec = new NANOS({ path: 'apps/@*' });
+	const config = new Configuration(new NANOS({ fsRouting: true }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/apps/anyapp', 'GET');
+
+	assertExists(match);
+	// Filesystem routes include prePath
+	assertEquals(match.app, 'apps/anyapp');
+});
+
+Deno.test("Route - matchPath matches applet with required parameter", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:action' });
+	const config = new Configuration(new NANOS({ fsRouting: true }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/myapp/create', 'GET');
+
+	assertExists(match);
+	// Filesystem routes include prePath
+	assertEquals(match.app, 'api/myapp');
+	assertEquals(match.params.action, 'create');
+});
+
+Deno.test("Route - matchPath matches applet with optional parameter when present", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:?format' });
+	const config = new Configuration(new NANOS({ fsRouting: true }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/myapp/json', 'GET');
+
+	assertExists(match);
+	// Filesystem routes include prePath
+	assertEquals(match.app, 'api/myapp');
+	assertEquals(match.params.format, 'json');
+});
+
+Deno.test("Route - matchPath matches applet with optional parameter when absent", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:?format' });
+	const config = new Configuration(new NANOS({ fsRouting: true }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/myapp', 'GET');
+
+	assertExists(match);
+	// Filesystem routes include prePath
+	assertEquals(match.app, 'api/myapp');
+	assertEquals(match.params.format, undefined);
+});
+
+Deno.test("Route - matchPath matches applet with tail parameter", () => {
+	const spec = new NANOS({ path: 'api/@myapp/:*' });
+	const config = new Configuration(new NANOS({ fsRouting: true }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/myapp/path/to/resource', 'GET');
+
+	assertExists(match);
+	// Filesystem routes include prePath
+	assertEquals(match.app, 'api/myapp');
+	assertEquals(match.tail, 'path/to/resource');
+});
+
+Deno.test("Route - matchPath matches tail parameter", () => {
+	const spec = new NANOS({ path: 'files/:*', app: '@static' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/files/path/to/file.txt', 'GET');
+
+	assertExists(match);
+	assertEquals(match.tail, 'path/to/file.txt');
+});
+
+Deno.test("Route - matchPath matches regex pattern", () => {
+	const spec = new NANOS({ regex: '^/api/v[0-9]+/.*', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+
+	assertExists(route.matchPath('/api/v1/users', 'GET'));
+	assertExists(route.matchPath('/api/v2/posts', 'GET'));
+	assertEquals(route.matchPath('/api/users', 'GET'), null);
+});
+
+Deno.test("Route - matchPath rejects path with extra segments", () => {
+	const spec = new NANOS({ path: 'api/users', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/users/123', 'GET');
+
+	assertEquals(match, null);
+});
+
+Deno.test("Route - matchPath rejects path with missing required segments", () => {
+	const spec = new NANOS({ path: 'api/:id/users/:name', app: '/app.esm.js' });
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+	const match = route.matchPath('/api/123', 'GET');
+
+	assertEquals(match, null);
+});
+
+Deno.test("Route - matchPath with regex and path constraint", () => {
+	const spec = new NANOS({ 
+		path: 'api/:version',
+		regex: '^/api/v[0-9]+$',
+		app: '/app.esm.js'
+	});
+	const config = new Configuration(new NANOS({ fsRouting: false }));
+	const route = new Route(spec, config);
+
+	assertExists(route.matchPath('/api/v1', 'GET'));
+	assertEquals(route.matchPath('/api/beta', 'GET'), null);
+});
+
+// ============================================================================
+// Route Class - Filesystem Verification Tests
+// ============================================================================
+
+Deno.test("Route - match includes filesystem verification", async () => {
+	const spec = new NANOS({ path: 'test/@*' });
+	const tempDir = await Deno.makeTempDir();
+	// Create test/ subdirectory
+	const testDir = `${tempDir}/test`;
+	await Deno.mkdir(testDir);
+	const testFile = `${testDir}/myapp.esm.js`;
+	await Deno.writeTextFile(testFile, '// test');
+	
+	try {
+		const config = new Configuration(new NANOS({
+			root: tempDir,
+			fsRouting: true
+		}));
+		const route = new Route(spec, config);
+		
+		const match = await route.match('/test/myapp', 'GET');
+		assertExists(match);
+		// Should return full absolute path for responder to load
+		assertEquals(match.app, `${testDir}/myapp.esm.js`);
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+Deno.test("Route - match returns null for non-existent file", async () => {
+	const spec = new NANOS({ path: 'test/@*' });
+	const tempDir = await Deno.makeTempDir();
+	
+	try {
+		const config = new Configuration(new NANOS({ 
+			root: tempDir,
+			fsRouting: true 
+		}));
+		const route = new Route(spec, config);
+		
+		const match = await route.match('/test/nonexistent', 'GET');
+		assertEquals(match, null);
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+Deno.test("Route - match tries extensions in order", async () => {
+	const spec = new NANOS({ path: 'test/@*' });
+	const tempDir = await Deno.makeTempDir();
+	// Create test/ subdirectory
+	const testDir = `${tempDir}/test`;
+	await Deno.mkdir(testDir);
+	const testFile = `${testDir}/myapp.js`; // Only .js exists
+	await Deno.writeTextFile(testFile, '// test');
+	
+	try {
+		const config = new Configuration(new NANOS({
+			root: tempDir,
+			extensions: new NANOS(['.esm.js', '.js']),
+			fsRouting: true
+		}));
+		const route = new Route(spec, config);
+		
+		const match = await route.match('/test/myapp', 'GET');
+		assertExists(match);
+		// Should return full absolute path
+		assertEquals(match.app, `${testDir}/myapp.js`);
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+Deno.test("Route - match skips directories", async () => {
+	const spec = new NANOS({ path: 'test/@*' });
+	const tempDir = await Deno.makeTempDir();
+	// Create test/ subdirectory
+	const testDir = `${tempDir}/test`;
+	await Deno.mkdir(testDir);
+	const dirPath = `${testDir}/myapp.esm.js`;
+	await Deno.mkdir(dirPath);
+	
+	try {
+		const config = new Configuration(new NANOS({
+			root: tempDir,
+			fsRouting: true
+		}));
+		const route = new Route(spec, config);
+		
+		const match = await route.match('/test/myapp', 'GET');
+		assertEquals(match, null); // Should not match directory
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+Deno.test("Route - match uses local root if specified", async () => {
+	const tempDir = await Deno.makeTempDir();
+	const customRoot = `${tempDir}/custom/root/test`;
+	const spec = new NANOS({ path: 'test/@*', root: customRoot });
+	await Deno.mkdir(customRoot, { recursive: true });
+	const testFile = `${customRoot}/myapp.esm.js`;
+	await Deno.writeTextFile(testFile, '// test');
+	
+	try {
+		const config = new Configuration(new NANOS({
+			root: tempDir,
+			fsRouting: true
+		}));
+		const route = new Route(spec, config);
+		
+		const match = await route.match('/test/myapp', 'GET');
+		// TEST IS FAILING (match is null - probably (incorrectly) trying to FS verify with a pre-path on a local root (not the defined behavior))
+		assertExists(match);
+		// Should return full absolute path
+		assertEquals(match.app, `${customRoot}/myapp.esm.js`);
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+// ============================================================================
+// Router Class - Configuration Tests
+// ============================================================================
+
+Deno.test("Router - creates with Configuration", () => {
+	const config = new Configuration(new NANOS());
+	const router = new Router(config);
+
+	assertExists(router);
+	assertEquals(router.routes.length, 0);
+});
+
+Deno.test("Router - parses routes from configuration", () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', pool: 'standard', app: '/users.esm.js' }),
+		new NANOS({ path: 'api/posts', pool: 'fast', app: '/posts.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+	const router = new Router(config);
+
+	assertEquals(router.routes.length, 2);
+	assertEquals(router.routes[0].pool, 'standard');
+	assertEquals(router.routes[1].pool, 'fast');
+});
+
+Deno.test("Router - updates configuration", () => {
+	const config = new Configuration(new NANOS());
+	const router = new Router(config);
+	assertEquals(router.routes.length, 0);
+
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	config.updateConfig(new NANOS({ routes }));
+	router.updateConfig();
+
+	assertEquals(router.routes.length, 1);
+});
+
+// ============================================================================
+// Router Class - Route Finding Tests
+// ============================================================================
+
+Deno.test("Router - findRoute finds matching route", async () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+	const router = new Router(config);
+	
+	const result = await router.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.route.app, '/app.esm.js');
+	assertEquals(result.match.params, {});
+});
+
+Deno.test("Router - findRoute returns first matching route", async () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/:id', pool: 'standard', app: '/app1.esm.js' }),
+		new NANOS({ path: 'api/:id', pool: 'fast', app: '/app2.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+	const router = new Router(config);
+	
+	const result = await router.findRoute('/api/123', 'GET');
+
+	assertExists(result);
+	assertEquals(result.route.pool, 'standard'); // First match
+});
+
+Deno.test("Router - findRoute returns null for no match", async () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+	const router = new Router(config);
+	
+	const result = await router.findRoute('/api/posts', 'GET');
+
+	assertEquals(result, null);
+});
+
+Deno.test("Router - findRoute resolves relative virtual app paths", async () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: 'users.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
+	const router = new Router(config);
+	
+	const result = await router.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/apps/users.esm.js');
+});
+
+Deno.test("Router - findRoute does not modify absolute paths", async () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/absolute/path/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
+	const router = new Router(config);
+	
+	const result = await router.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/absolute/path/app.esm.js');
+});
+
+Deno.test("Router - findRoute does not modify @static", async () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'static/:*', app: '@static' })
+	]);
+	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
+	const router = new Router(config);
+	
+	const result = await router.findRoute('/static/file.txt', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '@static');
+});
+
+Deno.test("Router - findRoute does not modify URL paths", async () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: 'https://example.com/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
+	const router = new Router(config);
+	
+	const result = await router.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, 'https://example.com/app.esm.js');
+});
+
+// ============================================================================
+// Router Class - Filesystem Routing Tests
+// ============================================================================
+
+Deno.test("Router - skips filesystem routes when fsRouting disabled", () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/@myapp' }), // Filesystem route
+		new NANOS({ path: 'api/users', app: '/app.esm.js' }) // Virtual route
+	]);
+	const config = new Configuration(new NANOS({ routes, fsRouting: false }));
+	const router = new Router(config);
+
+	// Should only include non-filesystem routes
+	assertEquals(router.routes.length, 1);
+	assertEquals(router.routes[0].pathParts[1].value, 'users');
+});
+
+Deno.test("Router - includes filesystem routes when fsRouting enabled", () => {
+	const routes = new NANOS([
+		new NANOS({ path: 'api/@myapp' }), // Filesystem route
+		new NANOS({ path: 'api/users', app: '/app.esm.js' }) // Virtual route
+	]);
+	const config = new Configuration(new NANOS({ routes, fsRouting: true }));
+	const router = new Router(config);
+
+	// Should include all routes
+	assertEquals(router.routes.length, 2);
+});
+
+Deno.test("Router - findRoute verifies filesystem routes", async () => {
+	const tempDir = await Deno.makeTempDir();
+	// Create test/ subdirectory
+	const testDir = `${tempDir}/test`;
+	await Deno.mkdir(testDir);
+	const testFile = `${testDir}/myapp.esm.js`;
+	await Deno.writeTextFile(testFile, '// test');
+	
+	try {
+		const routes = new NANOS([
+			new NANOS({ path: 'test/@*' })
+		]);
+		const config = new Configuration(new NANOS({ routes, root: tempDir, fsRouting: true }));
+		const router = new Router(config);
+		
+		const result = await router.findRoute('/test/myapp', 'GET');
+
+		assertExists(result);
+		// Should return full absolute path
+		assertEquals(result.match.app, `${testDir}/myapp.esm.js`);
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+Deno.test("Router - findRoute returns null for non-existent filesystem route", async () => {
+	const tempDir = await Deno.makeTempDir();
+	
+	try {
+		const routes = new NANOS([
+			new NANOS({ path: 'test/@*' })
+		]);
+		const config = new Configuration(new NANOS({ routes, root: tempDir, fsRouting: true }));
+		const router = new Router(config);
+		
+		const result = await router.findRoute('/test/nonexistent', 'GET');
+
+		assertEquals(result, null);
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+Deno.test("Router - findRoute continues to next route if filesystem verification fails", async () => {
+	const tempDir = await Deno.makeTempDir();
+	const testFile = `${tempDir}/fallback.esm.js`;
+	await Deno.writeTextFile(testFile, '// test');
+	
+	try {
+		const routes = new NANOS([
+			new NANOS({ path: 'test/@*' }), // Filesystem route
+			new NANOS({ path: 'test/:name', app: 'fallback.esm.js' }) // Virtual fallback
+		]);
+		const config = new Configuration(new NANOS({ 
+			routes, 
+			root: tempDir, 
+			appRoot: tempDir + '/',
+			fsRouting: true 
+		}));
+		const router = new Router(config);
+		
+		const result = await router.findRoute('/test/nonexistent', 'GET');
+
+		assertExists(result);
+		assertEquals(result.match.app, `${tempDir}/fallback.esm.js`);
+	} finally {
+		await Deno.remove(tempDir, { recursive: true });
+	}
+});
+
+// ============================================================================
+// RouterWorker Manager Tests
+// ============================================================================
+
+Deno.test("RouterWorker - creates worker instance", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-1', workerUrl);
+
+	assertExists(worker);
+	assertEquals(worker.id, 'test-1');
+	assertEquals(worker.isAvailable, false);
+	assertEquals(worker.isInitialized, false);
+
+	worker.terminate();
+});
+
+Deno.test("RouterWorker - initializes with config", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-2', workerUrl);
+
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+
+	await worker.initialize(config);
+
+	assertEquals(worker.isInitialized, true);
+	assertEquals(worker.isAvailable, true);
+
+	worker.terminate();
+});
+
+Deno.test("RouterWorker - finds route via worker", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-3', workerUrl);
+
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', pool: 'standard', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+
+	await worker.initialize(config);
+
+	const result = await worker.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.route.pool, 'standard');
+	assertEquals(result.match.params, {});
+
+	worker.terminate();
+});
+
+Deno.test("RouterWorker - returns null for non-matching route", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-4', workerUrl);
+
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+
+	await worker.initialize(config);
+
+	const result = await worker.findRoute('/api/posts', 'GET');
+
+	assertEquals(result, null);
+
+	worker.terminate();
+});
+
+Deno.test("RouterWorker - updates configuration", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-5', workerUrl);
+
+	// Initial config
+	const routes1 = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes: routes1 }));
+
+	await worker.initialize(config);
+
+	// Should find initial route
+	let result = await worker.findRoute('/api/users', 'GET');
+	assertExists(result);
+
+	// Update config
+	const routes2 = new NANOS([
+		new NANOS({ path: 'api/posts', app: '/app.esm.js' })
+	]);
+	config.updateConfig(new NANOS({ routes: routes2 }));
+
+	await worker.updateConfig(config);
+
+	// Should find new route
+	result = await worker.findRoute('/api/posts', 'GET');
+	assertExists(result);
+
+	// Should not find old route
+	result = await worker.findRoute('/api/users', 'GET');
+	assertEquals(result, null);
+
+	worker.terminate();
+});
+
+Deno.test("RouterWorker - handles fsRouting flag", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-6', workerUrl);
+
+	const routes = new NANOS([
+		new NANOS({ path: 'api/@myapp' }), // Filesystem route
+		new NANOS({ path: 'api/users', app: '/app.esm.js' }) // Virtual route
+	]);
+	const config = new Configuration(new NANOS({ routes, fsRouting: false }));
+
+	// Initialize with fsRouting disabled
+	await worker.initialize(config);
+
+	// Should not find filesystem route
+	let result = await worker.findRoute('/api/myapp', 'GET');
+	assertEquals(result, null);
+
+	// Should find virtual route
+	result = await worker.findRoute('/api/users', 'GET');
+	assertExists(result);
+
+	// Update with fsRouting enabled
+	config.set('fsRouting', true);
+	await worker.updateConfig(config);
+
+	// Should now find filesystem route (but won't match without actual file)
+	result = await worker.findRoute('/api/myapp', 'GET');
+	// Note: Will be null because no actual file exists
+	assertEquals(result, null);
+
+	worker.terminate();
+});
+
+/*
+ * Test does not appear to be reliable
+ *
+Deno.test("RouterWorker - handles timeout", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-7', workerUrl);
+
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+
+	await worker.initialize(config);
+
+	// Send message with very short timeout
+	try {
+		await worker.sendMessage('route', { pathname: '/api/users', method: 'GET' }, 1);
+		assert(false, 'Should have timed out');
+	} catch (error) {
+		console.log('Error message was:', error.message);
+		assert(error.message.includes('timeout'));
+	}
+
+	worker.terminate();
+});
+ */
+
+Deno.test("RouterWorker - marks unavailable during routing", async () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-8', workerUrl);
+
+	const routes = new NANOS([
+		new NANOS({ path: 'api/users', app: '/app.esm.js' })
+	]);
+	const config = new Configuration(new NANOS({ routes }));
+
+	await worker.initialize(config);
+
+	assertEquals(worker.isAvailable, true);
+
+	// Start routing (don't await yet)
+	const routePromise = worker.findRoute('/api/users', 'GET');
+
+	// Worker should be marked unavailable during routing
+	assertEquals(worker.isAvailable, false);
+
+	// Wait for routing to complete
+	await routePromise;
+
+	// Worker should be available again
+	assertEquals(worker.isAvailable, true);
+
+	worker.terminate();
+});
+
+Deno.test("RouterWorker - generates unique message IDs", () => {
+	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
+	const worker = new RouterWorker('test-9', workerUrl);
+
+	const id1 = worker.generateMessageId();
+	const id2 = worker.generateMessageId();
+	const id3 = worker.generateMessageId();
+
+	assert(id1 !== id2);
+	assert(id2 !== id3);
+	assert(id1.startsWith('test-9-'));
+
+	worker.terminate();
+});

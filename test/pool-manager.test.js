@@ -6,34 +6,34 @@ import { assertEquals, assertRejects } from 'https://deno.land/std@0.208.0/asser
 import { PoolManager, ItemState, ScalingStrategy } from '../src/pool-manager.esm.js';
 
 // Mock worker factory
-function createMockWorkerFactory() {
+function createMockWorkerFactory () {
 	let workerCount = 0;
 	return async (itemId) => {
 		workerCount++;
 		const mockWorker = {
 			id: itemId,
-			terminate: () => {},
-			postMessage: () => {},
+			terminate: () => { },
+			postMessage: () => { },
 		};
 		return { item: mockWorker, isWorker: true };
 	};
 }
 
 // Mock process factory
-function createMockProcessFactory() {
+function createMockProcessFactory () {
 	let processCount = 0;
 	return async (itemId) => {
 		processCount++;
 		const mockProcess = {
 			id: itemId,
-			shutdown: async () => {},
+			shutdown: async () => { },
 		};
 		return { item: mockProcess, isWorker: false };
 	};
 }
 
 // Helper to wait for async operations
-function delay(ms) {
+function delay (ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -145,11 +145,18 @@ Deno.test('PoolManager - Static Scaling', async (t) => {
 		await pool.initialize();
 		assertEquals(pool.items.size, 2);
 
-		// Try to get more items than available
+		// Get first item and mark it busy
 		const item1 = await pool.getAvailableItem();
-		const item2 = await pool.getAvailableItem();
-		const item3 = await pool.getAvailableItem();
+		assertEquals(item1 !== null, true);
+		pool.markItemBusy(item1.id);
 
+		// Get second item and mark it busy
+		const item2 = await pool.getAvailableItem();
+		assertEquals(item2 !== null, true);
+		pool.markItemBusy(item2.id);
+
+		// Try to get third item - should return null (no scaling in static mode)
+		const item3 = await pool.getAvailableItem();
 		assertEquals(item3, null); // Should not spawn new item
 		assertEquals(pool.items.size, 2);
 
@@ -565,5 +572,7 @@ Deno.test('PoolManager - Shutdown', async (t) => {
 			Error,
 			'shutting down'
 		);
+
+		clearInterval(pool.scaleTimer);
 	});
 });

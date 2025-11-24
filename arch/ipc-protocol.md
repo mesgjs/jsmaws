@@ -159,8 +159,8 @@ Sent by responder back to operator with response data. The operator then sends t
   status=200
   headers=[Content-Type=application/json Content-Length=5678...]
   bodySize=5678
-  workersAvailable=3
-  workersTotal=4
+  availableWorkers=3
+  totalWorkers=4
   requestsQueued=0
 ])]
 ```
@@ -170,8 +170,8 @@ Sent by responder back to operator with response data. The operator then sends t
 - `status`: HTTP status code (200, 404, 500, etc.)
 - `headers`: Array of response headers
 - `bodySize`: Size of binary data following header
-- `workersAvailable`: Number of available workers in this responder
-- `workersTotal`: Total workers in this responder
+- `availableWorkers`: Number of available workers in this responder
+- `totalWorkers`: Total workers in this responder
 - `requestsQueued`: Number of requests queued in this responder
 
 **Binary Data**: Response body (if `bodySize > 0`)
@@ -236,8 +236,8 @@ Sent periodically to verify process is alive.
 [(health-check id=hc-12345 [
   timestamp=1700000000000
   status=ok
-  workersAvailable=3
-  workersTotal=4
+  availableWorkers=3
+  totalWorkers=4
   requestsQueued=0
   uptime=3600
 ])]
@@ -347,7 +347,7 @@ For large response bodies, responders implement a tiered flow-control strategy t
 - Use async write operations to IPC socket
 - Monitor write buffer size
 - Implement backpressure: pause request processing if IPC buffer exceeds threshold
-- When backpressure is active, report `workersAvailable=0` in response
+- When backpressure is active, report `availableWorkers=0` in response
 - Resume when buffer drains and report actual worker availability
 
 **Tier 3: Large Responses (> 10MB)**
@@ -359,9 +359,9 @@ For large response bodies, responders implement a tiered flow-control strategy t
 **Backpressure Signaling**:
 - Responder detects backpressure by monitoring write operation timing
 - When average write time exceeds `bpWriteTimeThresh` (default: 50ms), backpressure is detected
-- Responder reports `workersAvailable=0` in the next response message
+- Responder reports `availableWorkers=0` in the next response message
 - Operator sees no available workers and either queues the request or routes to another responder
-- No explicit backpressure flag needed - `workersAvailable=0` is the signal
+- No explicit backpressure flag needed - `availableWorkers=0` is the signal
 - When writes become fast again, responder clears backpressure and reports actual worker availability
 - This approach leverages Unix pipe behavior: writes are fast when buffer has space, slow when full
 
@@ -436,8 +436,8 @@ This map is built from dispatch history (no IPC reporting needed) and enables:
 ### Worker Capacity Tracking
 
 Responders report worker availability in every response:
-- `workersAvailable`: Workers ready to handle requests
-- `workersTotal`: Total workers in responder
+- `availableWorkers`: Workers ready to handle requests
+- `totalWorkers`: Total workers in responder
 - `requestsQueued`: Requests waiting for workers
 
 This information is piggybacked on responses (no extra IPC traffic) and enables:

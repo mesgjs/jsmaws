@@ -247,7 +247,8 @@ export class PoolManager {
 		}
 
 		// Strategy 2: Spawn new item if allowed
-		if (this.canSpawnItem()) {
+		const canSpawn = this.canSpawnItem();
+		if (canSpawn) {
 			try {
 				return await this.spawnItem();
 			} catch (error) {
@@ -399,14 +400,26 @@ export class PoolManager {
 			}
 		}
 
-		// Scale up: Spawn items if all busy and below maxProcs
-		const availableCount = Array.from(this.items.values()).filter((item) => item.isAvailable()).length;
-		if (availableCount === 0 && this.canSpawnItem()) {
-			console.log(`[PoolManager:${this.poolName}] Scaling up: no available items, spawning new item`);
+		// Scale up: Spawn items if below minProcs OR (all busy and below maxProcs)
+		if (this.items.size < this.config.minProcs) {
+			// Below minimum - spawn to reach minProcs
+			console.log(`[PoolManager:${this.poolName}] Scaling up: below minProcs, spawning new item`);
 			try {
 				await this.spawnItem();
 			} catch (error) {
 				console.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
+			}
+		} else {
+			// At or above minimum - only spawn if all items are busy
+			const availableCount = Array.from(this.items.values()).filter((item) => item.isAvailable()).length;
+			const busyCount = this.items.size - availableCount;
+			if (availableCount === 0 && busyCount > 0 && this.canSpawnItem()) {
+				console.log(`[PoolManager:${this.poolName}] Scaling up: all items busy, spawning new item`);
+				try {
+					await this.spawnItem();
+				} catch (error) {
+					console.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
+				}
 			}
 		}
 	}
@@ -488,8 +501,13 @@ export class PoolManager {
 		}
 
 		// Wait for all items to shutdown with timeout
-		const timeoutPromise = new Promise((resolve) => setTimeout(resolve, timeoutSeconds * 1000));
-		await Promise.race([Promise.all(shutdownPromises), timeoutPromise]);
+		if (shutdownPromises.length) {
+			const wrapUpPromise = Promise.withResolvers();
+			Promise.all(shutdownPromises).then(() => wrapUpPromise.resolve(true));
+			const timer = setTimeout(() => wrapUpPromise.resolve(false), timeoutSeconds * 1000);
+			await wrapUpPromise.promise;
+			clearTimeout(timer);
+		}
 
 		console.log(`[PoolManager:${this.poolName}] Shutdown complete (${this.items.size} items remaining)`);
 	}

@@ -1,24 +1,24 @@
 /**
  * JSMAWS Router Process
  * Semi-privileged service process for filesystem-based route resolution
- * 
+ *
  * This process:
  * - Runs with reduced privileges (read-only filesystem access, non-root uid/gid)
  * - Hosts router workers for route resolution (managed by pool-manager)
  * - Receives route requests from operator via IPC
  * - Sends route responses back to operator via IPC
  * - Only spawned when fsRouting is enabled in configuration
- * 
+ *
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { NANOS } from './vendor.esm.js';
 import {
-	IPCConnection,
 	MessageType,
 	createRouteResponse,
 	validateMessage,
 } from './ipc-protocol.esm.js';
+import { ServiceProcess } from './service-process.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
 import { RouterWorker } from './router-worker-manager.esm.js';
 
@@ -26,12 +26,9 @@ import { RouterWorker } from './router-worker-manager.esm.js';
  * Router process class
  * Hosts router workers in a pool for filesystem-based route resolution
  */
-class RouterProcess {
+class RouterProcess extends ServiceProcess {
 	constructor (processId) {
-		this.processId = processId || Deno.env.get('JSMAWS_PID') || `router-${Date.now()}`;
-		this.config = new NANOS();
-		this.ipcConn = null;
-		this.isShuttingDown = false;
+		super('router', processId);
 		this.fsRouting = false;
 		this.poolManager = null;
 		this.workerUrl = new URL('./router-worker.esm.js', import.meta.url).href;
@@ -43,34 +40,24 @@ class RouterProcess {
 	async handleConfigUpdate (fields) {
 		console.log(`[${this.processId}] Received configuration update`);
 
-		// Extract configuration fields
-		const pools = fields.at('pools');
-		const mimeTypes = fields.at('mimeTypes');
-		const routes = fields.at('routes');
-		const fsRouting = fields.at('fsRouting', false);
-
-		// Update configuration
-		if (pools) this.config.set('pools', pools);
-		if (mimeTypes) this.config.set('mimeTypes', mimeTypes);
-		if (routes) this.config.set('routes', routes);
-		this.config.set('fsRouting', fsRouting);
-		this.fsRouting = fsRouting === true;
+		// Configuration instance is already updated by ServiceProcess base class
+		// Just need to propagate to pool manager and workers
 
 		// Update pool manager if already initialized
 		if (this.poolManager) {
 			// Get router pool config
-			const routerPoolConfig = pools?.at('@router') || {};
+			const routerPoolConfig = this.config.getPoolConfig('@router') || {};
 			await this.poolManager.updateConfig(routerPoolConfig);
 
 			// Update all workers with new configuration
 			for (const item of this.poolManager.items.values()) {
 				if (item.item instanceof RouterWorker) {
-					await item.item.updateConfig(this.config, this.fsRouting);
+					await item.item.updateConfig(this.config);
 				}
 			}
 		}
 
-		console.log(`[${this.processId}] Configuration updated (fsRouting: ${this.fsRouting})`);
+		console.log(`[${this.processId}] Configuration updated (fsRouting: ${this.config.routing.fsRouting})`);
 	}
 
 	/**
@@ -136,6 +123,20 @@ class RouterProcess {
 	}
 
 	/**
+	 * Get message handlers for router-specific messages
+	 */
+	getMessageHandlers () {
+		const baseHandlers = super.getMessageHandlers();
+		
+		// Add router-specific handler
+		baseHandlers.set(MessageType.ROUTE_REQUEST, async (id, fields) => {
+			await this.handleRouteRequest(id, fields);
+		});
+		
+		return baseHandlers;
+	}
+
+	/**
 	 * Handle health check from operator
 	 */
 	async handleHealthCheck (id, fields) {
@@ -150,8 +151,8 @@ class RouterProcess {
 		response.push([{
 			timestamp: fields.at('timestamp'),
 			status: 'ok',
-			workersAvailable: metrics.availableItems,
-			workersTotal: metrics.totalItems,
+			availableWorkers: metrics.availableItems,
+			totalWorkers: metrics.totalItems,
 			requestsQueued: metrics.queuedRequests,
 			uptime: Math.floor(performance.now() / 1000),
 		}]);
@@ -183,82 +184,11 @@ class RouterProcess {
 	}
 
 	/**
-	 * Process incoming IPC messages
+	 * Initialize pool manager after configuration is loaded
 	 */
-	async processMessages () {
-		while (!this.isShuttingDown) {
-			try {
-				const result = await this.ipcConn.readMessage();
-
-				if (!result) {
-					// Connection closed
-					console.log(`[${this.processId}] IPC connection closed`);
-					break;
-				}
-
-				const { message } = result;
-
-				// Handle message based on type
-				switch (message.type) {
-					case MessageType.CONFIG_UPDATE:
-						await this.handleConfigUpdate(message.fields);
-						break;
-
-					case MessageType.ROUTE_REQUEST:
-						await this.handleRouteRequest(message.id, message.fields);
-						break;
-
-					case MessageType.HEALTH_CHECK:
-						await this.handleHealthCheck(message.id, message.fields);
-						break;
-
-					case MessageType.SHUTDOWN:
-						await this.handleShutdown(message.fields);
-						break;
-
-					default:
-						console.warn(`[${this.processId}] Unknown message type: ${message.type}`);
-				}
-			} catch (error) {
-				if (this.isShuttingDown) {
-					break;
-				}
-				console.error(`[${this.processId}] Message processing error:`, error);
-			}
-		}
-	}
-
-	/**
-	 * Start the router process
-	 */
-	async start () {
-		console.log(`[${this.processId}] Starting router process...`);
-
-		// Create IPC connection using stdin/stdout
-		this.ipcConn = new IPCConnection({
-			read: (buffer) => Deno.stdin.read(buffer),
-			write: (data) => Deno.stdout.write(data),
-			close: () => {
-				Deno.stdin.close();
-				Deno.stdout.close();
-			},
-		});
-
-		console.log(`[${this.processId}] IPC connection established`);
-
-		// Wait for initial configuration from operator
-		console.log(`[${this.processId}] Waiting for initial configuration...`);
-		const result = await this.ipcConn.readMessage();
-
-		if (!result || result.message.type !== MessageType.CONFIG_UPDATE) {
-			throw new Error('Expected initial configuration message');
-		}
-
-		// Handle initial configuration
-		await this.handleConfigUpdate(result.message.fields);
-
+	async onStarted () {
 		// Initialize pool manager with router worker factory
-		const routerPoolConfig = this.config.at(['pools', '@router']) || {
+		const routerPoolConfig = this.config.getPoolConfig('@router') || {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
@@ -269,17 +199,12 @@ class RouterProcess {
 
 		const workerFactory = async (itemId) => {
 			const worker = new RouterWorker(itemId, this.workerUrl);
-			await worker.initialize(this.config, this.fsRouting);
+			await worker.initialize(this.config);
 			return { item: worker, isWorker: true };
 		};
 
 		this.poolManager = new PoolManager('@router', routerPoolConfig, workerFactory);
 		await this.poolManager.initialize();
-
-		console.log(`[${this.processId}] Router process started successfully`);
-
-		// Process incoming messages
-		await this.processMessages();
 	}
 }
 
@@ -288,18 +213,7 @@ class RouterProcess {
  */
 async function main () {
 	const processId = Deno.env.get('JSMAWS_PID');
-	const routerProcess = new RouterProcess(processId);
-
-	// Handle shutdown signals
-	const shutdownHandler = async () => {
-		await routerProcess.handleShutdown(new NANOS());
-	};
-
-	Deno.addSignalListener('SIGINT', shutdownHandler);
-	Deno.addSignalListener('SIGTERM', shutdownHandler);
-
-	// Start the router process
-	await routerProcess.start();
+	await ServiceProcess.run(RouterProcess, processId);
 }
 
 // Run if this is the main module

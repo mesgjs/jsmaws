@@ -20,10 +20,16 @@ export const MessageType = {
 	ROUTE_RESPONSE: 'RRES',
 	WEB_REQUEST: 'WREQ',
 	WEB_RESPONSE: 'WRES',
+	WEB_CHUNK: 'WCHK',        // Chunked response data
+	WEB_STREAM: 'WSTR',       // Streaming data (SSE, etc.)
+	WEB_STREAM_CLOSE: 'WSCL', // Stream close
+	WS_UPGRADE: 'WSUP',       // WebSocket upgrade
+	WS_DATA: 'WSDT',          // WebSocket data
+	WS_CLOSE: 'WSCL',         // WebSocket close
 	CONFIG_UPDATE: 'CFG',
 	SHUTDOWN: 'HALT',
 	SCALE_DOWN: 'RIF',
-	HEALTH_CHECK: 'CHK',
+	HEALTH_CHECK: 'HCHK',
 };
 
 /**
@@ -271,13 +277,13 @@ export function createRequest (method, path, app, pool, headers, bodySize, remot
 /**
  * Create response message
  */
-export function createResponse (id, status, headers, bodySize, workersAvailable, workersTotal, requestsQueued) {
+export function createResponse (id, status, headers, bodySize, availableWorkers, totalWorkers, requestsQueued) {
 	return createMessage({ type: MessageType.WEB_RESPONSE, id }, {
 		status,
 		headers,
 		bodySize,
-		workersAvailable,
-		workersTotal,
+		availableWorkers,
+		totalWorkers,
 		requestsQueued,
 	});
 }
@@ -314,6 +320,61 @@ export function createScaleDown () {
 export function createHealthCheck () {
 	return createMessage({ type: MessageType.HEALTH_CHECK }, {
 		timestamp: Date.now(),
+	});
+}
+
+/**
+ * Create chunk message
+ */
+export function createChunk (id, data, final = false) {
+	return createMessage({ type: MessageType.WEB_CHUNK, id }, {
+		dataSize: data ? data.length : 0,
+		final,
+	});
+}
+
+/**
+ * Create stream data message
+ */
+export function createStreamData (id, data) {
+	return createMessage({ type: MessageType.WEB_STREAM, id }, {
+		dataSize: data ? data.length : 0,
+	});
+}
+
+/**
+ * Create stream close message
+ */
+export function createStreamClose (id) {
+	return createMessage({ type: MessageType.WEB_STREAM_CLOSE, id }, {});
+}
+
+/**
+ * Create WebSocket upgrade message
+ */
+export function createWebSocketUpgrade (id, protocol = null) {
+	return createMessage({ type: MessageType.WS_UPGRADE, id }, {
+		protocol: protocol || '',
+	});
+}
+
+/**
+ * Create WebSocket data message
+ */
+export function createWebSocketData (id, opcode, data) {
+	return createMessage({ type: MessageType.WS_DATA, id }, {
+		opcode,
+		dataSize: data ? data.length : 0,
+	});
+}
+
+/**
+ * Create WebSocket close message
+ */
+export function createWebSocketClose (id, code = 1000, reason = '') {
+	return createMessage({ type: MessageType.WS_CLOSE, id }, {
+		code,
+		reason,
 	});
 }
 

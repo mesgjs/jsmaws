@@ -201,10 +201,16 @@ Deno.test("ConfigMonitor - parses SLID configuration", async () => {
 		const monitor = new ConfigMonitor(testFile, callback);
 		monitor.debounceDelay = 100;
 
-		// Write SLID content
+		// Write initial SLID content
 		await Deno.writeTextFile(testFile, '[(httpPort=8080 httpsPort=8443)]');
 
 		await monitor.startMonitoring();
+
+		// Wait for initial state
+		await new Promise(resolve => setTimeout(resolve, 200));
+
+		// Modify the file to trigger callback
+		await Deno.writeTextFile(testFile, '[(httpPort=8080 httpsPort=8443 hostname="test")]');
 
 		// Wait for detection and callback
 		await new Promise(resolve => setTimeout(resolve, 300));
@@ -212,6 +218,7 @@ Deno.test("ConfigMonitor - parses SLID configuration", async () => {
 		assertExists(receivedConfig);
 		assertEquals(receivedConfig.at('httpPort'), 8080);
 		assertEquals(receivedConfig.at('httpsPort'), 8443);
+		assertEquals(receivedConfig.at('hostname'), 'test');
 
 		monitor.stopMonitoring();
 	} finally {
@@ -314,7 +321,15 @@ Deno.test("ConfigMonitor - handles complex SLID structures", async () => {
 		const monitor = new ConfigMonitor(testFile, callback);
 		monitor.debounceDelay = 100;
 
-		// Write complex SLID content with nested structures
+		// Write initial SLID content
+		await Deno.writeTextFile(testFile, '[(httpPort=8080)]');
+
+		await monitor.startMonitoring();
+
+		// Wait for initial state
+		await new Promise(resolve => setTimeout(resolve, 200));
+
+		// Write complex SLID content with nested structures to trigger callback
 		const slid = `[(
 			httpPort=8080
 			routes=[
@@ -324,8 +339,6 @@ Deno.test("ConfigMonitor - handles complex SLID structures", async () => {
 		)]`;
 
 		await Deno.writeTextFile(testFile, slid);
-
-		await monitor.startMonitoring();
 
 		// Wait for detection and callback
 		await new Promise(resolve => setTimeout(resolve, 300));

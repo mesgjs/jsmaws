@@ -94,18 +94,24 @@ export class RouterWorker {
 
 	/**
 	 * Initialize worker with configuration
+	 * @param {Configuration} config Configuration instance
 	 */
-	async initialize (config, fsRouting) {
-		await this.sendMessage('init', { config, fsRouting });
+	async initialize (config) {
+		// Serialize configuration to SLID for transmission
+		const slidConfig = config.toSLID();
+		await this.sendMessage('init', { config: slidConfig });
 		this.isInitialized = true;
 		this.isAvailable = true;
 	}
 
 	/**
 	 * Update worker configuration
+	 * @param {Configuration} config Configuration instance
 	 */
-	async updateConfig (config, fsRouting) {
-		await this.sendMessage('config', { config, fsRouting });
+	async updateConfig (config) {
+		// Serialize configuration to SLID for transmission
+		const slidConfig = config.toSLID();
+		await this.sendMessage('config', { config: slidConfig });
 	}
 
 	/**
