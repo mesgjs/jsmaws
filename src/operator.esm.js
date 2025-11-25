@@ -15,6 +15,7 @@
 import { NANOS, parseSLID } from './vendor.esm.js';
 import { createSSLManager } from './ssl-manager.esm.js';
 import { Router } from './router-worker.esm.js';
+import { Configuration } from './configuration.esm.js';
 import { createConfigMonitor } from './config-monitor.esm.js';
 import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
@@ -57,7 +58,7 @@ class ServerConfig {
 		this.certFile = options.certFile;
 		this.keyFile = options.keyFile;
 		this.hostname = options.hostname || 'localhost';
-		this.acmeChallengeDir = options.acmeChallengeDir || '/var/www/acme-challenge';
+		this.acmeChallengeDir = options.acmeChallengeDir;
 		this.noSSL = options.noSSL || false;
 		this.sslCheckIntervalHours = options.sslCheckIntervalHours || 1;
 	}
@@ -68,16 +69,7 @@ class ServerConfig {
 	 * @returns {ServerConfig}
 	 */
 	static fromNANOS (config) {
-		return new ServerConfig({
-			httpPort: config.at('httpPort', DEFAULT_HTTP_PORT),
-			httpsPort: config.at('httpsPort', DEFAULT_HTTPS_PORT),
-			certFile: config.at('certFile'),
-			keyFile: config.at('keyFile'),
-			hostname: config.at('hostname', 'localhost'),
-			acmeChallengeDir: config.at('acmeChallengeDir', '/var/www/acme-challenge'),
-			noSSL: config.at('noSSL', false),
-			sslCheckIntervalHours: config.at('sslCheckIntervalHours', 1),
-		});
+		return new ServerConfig(Object.fromEntries(config.entries()));
 	}
 }
 
@@ -88,6 +80,7 @@ class OperatorProcess {
 	constructor (config, configPath = DEFAULT_CONFIG_FILE) {
 		this.config = config;
 		this.configData = new NANOS(); // Full SLID configuration
+		this.configuration = null; // Configuration instance for router
 		this.configPath = configPath;
 		this.httpServer = null;
 		this.httpsServer = null;
@@ -186,7 +179,7 @@ class OperatorProcess {
 		const url = new URL(req.url);
 
 		// Check if this is an ACME challenge request
-		if (url.pathname.startsWith(ACME_CHALLENGE_PREFIX)) {
+		if (url.pathname.startsWith(ACME_CHALLENGE_PREFIX) && this.config.acmeChallengeDir) {
 			return await this.handleAcmeChallenge(url.pathname);
 		}
 
@@ -233,7 +226,8 @@ class OperatorProcess {
 	 * Initialize router with current configuration
 	 */
 	initializeRouter () {
-		this.router = new Router(this.configData);
+		this.configuration = new Configuration(this.configData);
+		this.router = new Router(this.configuration);
 		this.logger.info(`Router initialized with ${this.router.routes.length} route(s)`);
 	}
 
@@ -247,9 +241,10 @@ class OperatorProcess {
 		// Update server config
 		this.config = ServerConfig.fromNANOS(newConfig);
 
-		// Update router
-		if (this.router) {
-			this.router.updateConfig(newConfig);
+		// Update router configuration
+		if (this.configuration && this.router) {
+			this.configuration.updateConfig(newConfig);
+			this.router.updateConfig();
 			this.logger.info(`Router updated with ${this.router.routes.length} route(s)`);
 		}
 
@@ -277,8 +272,8 @@ class OperatorProcess {
 		try {
 			// Use router to find matching route
 			if (this.router) {
-				const routeMatch = this.router.findRoute(url.pathname, req.method);
-
+				const routeMatch = await this.router.findRoute(url.pathname, req.method);
+	
 				if (routeMatch) {
 					const { route, match } = routeMatch;
 
@@ -801,7 +796,7 @@ async function main () {
 	console.log(`  Cert File: ${config.certFile || '(not configured)'}`);
 	console.log(`  Key File: ${config.keyFile || '(not configured)'}`);
 	console.log(`  SSL Check Interval: ${config.sslCheckIntervalHours} hour(s)`);
-	console.log(`  ACME Challenge Dir: ${config.acmeChallengeDir}`);
+	console.log(`  ACME Challenge Dir: ${config.acmeChallengeDir || '(not configured'}`);
 
 	// Create and start operator
 	const operator = new OperatorProcess(config, configFile);

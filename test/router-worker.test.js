@@ -5,7 +5,7 @@
 
 import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.0/assert/mod.ts";
 import { Router, Route } from "../src/router-worker.esm.js";
-import { RouterWorker } from "../src/router-worker-manager.esm.js";
+import { RouterWorkerProxy } from "../src/router-worker-proxy.esm.js";
 import { Configuration } from "../src/configuration.esm.js";
 import { NANOS } from '../src/vendor.esm.js';
 
@@ -763,12 +763,12 @@ Deno.test("Router - findRoute continues to next route if filesystem verification
 });
 
 // ============================================================================
-// RouterWorker Manager Tests
+// RouterWorkerProxy Manager Tests
 // ============================================================================
 
-Deno.test("RouterWorker - creates worker instance", async () => {
+Deno.test("RouterWorkerProxy - creates worker instance", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-1', workerUrl);
+	const worker = new RouterWorkerProxy('test-1', workerUrl);
 
 	assertExists(worker);
 	assertEquals(worker.id, 'test-1');
@@ -778,9 +778,9 @@ Deno.test("RouterWorker - creates worker instance", async () => {
 	worker.terminate();
 });
 
-Deno.test("RouterWorker - initializes with config", async () => {
+Deno.test("RouterWorkerProxy - initializes with config", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-2', workerUrl);
+	const worker = new RouterWorkerProxy('test-2', workerUrl);
 
 	const routes = new NANOS([
 		new NANOS({ path: 'api/users', app: '/app.esm.js' })
@@ -795,9 +795,9 @@ Deno.test("RouterWorker - initializes with config", async () => {
 	worker.terminate();
 });
 
-Deno.test("RouterWorker - finds route via worker", async () => {
+Deno.test("RouterWorkerProxy - finds route via worker", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-3', workerUrl);
+	const worker = new RouterWorkerProxy('test-3', workerUrl);
 
 	const routes = new NANOS([
 		new NANOS({ path: 'api/users', pool: 'standard', app: '/app.esm.js' })
@@ -815,9 +815,9 @@ Deno.test("RouterWorker - finds route via worker", async () => {
 	worker.terminate();
 });
 
-Deno.test("RouterWorker - returns null for non-matching route", async () => {
+Deno.test("RouterWorkerProxy - returns null for non-matching route", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-4', workerUrl);
+	const worker = new RouterWorkerProxy('test-4', workerUrl);
 
 	const routes = new NANOS([
 		new NANOS({ path: 'api/users', app: '/app.esm.js' })
@@ -833,9 +833,9 @@ Deno.test("RouterWorker - returns null for non-matching route", async () => {
 	worker.terminate();
 });
 
-Deno.test("RouterWorker - updates configuration", async () => {
+Deno.test("RouterWorkerProxy - updates configuration", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-5', workerUrl);
+	const worker = new RouterWorkerProxy('test-5', workerUrl);
 
 	// Initial config
 	const routes1 = new NANOS([
@@ -868,9 +868,9 @@ Deno.test("RouterWorker - updates configuration", async () => {
 	worker.terminate();
 });
 
-Deno.test("RouterWorker - handles fsRouting flag", async () => {
+Deno.test("RouterWorkerProxy - handles fsRouting flag", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-6', workerUrl);
+	const worker = new RouterWorkerProxy('test-6', workerUrl);
 
 	const routes = new NANOS([
 		new NANOS({ path: 'api/@myapp' }), // Filesystem route
@@ -904,9 +904,9 @@ Deno.test("RouterWorker - handles fsRouting flag", async () => {
 /*
  * Test does not appear to be reliable
  *
-Deno.test("RouterWorker - handles timeout", async () => {
+Deno.test("RouterWorkerProxy - handles timeout", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-7', workerUrl);
+	const worker = new RouterWorkerProxy('test-7', workerUrl);
 
 	const routes = new NANOS([
 		new NANOS({ path: 'api/users', app: '/app.esm.js' })
@@ -928,9 +928,9 @@ Deno.test("RouterWorker - handles timeout", async () => {
 });
  */
 
-Deno.test("RouterWorker - marks unavailable during routing", async () => {
+Deno.test("RouterWorkerProxy - marks unavailable during routing", async () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-8', workerUrl);
+	const worker = new RouterWorkerProxy('test-8', workerUrl);
 
 	const routes = new NANOS([
 		new NANOS({ path: 'api/users', app: '/app.esm.js' })
@@ -956,9 +956,9 @@ Deno.test("RouterWorker - marks unavailable during routing", async () => {
 	worker.terminate();
 });
 
-Deno.test("RouterWorker - generates unique message IDs", () => {
+Deno.test("RouterWorkerProxy - generates unique message IDs", () => {
 	const workerUrl = new URL('../src/router-worker.esm.js', import.meta.url).href;
-	const worker = new RouterWorker('test-9', workerUrl);
+	const worker = new RouterWorkerProxy('test-9', workerUrl);
 
 	const id1 = worker.generateMessageId();
 	const id2 = worker.generateMessageId();

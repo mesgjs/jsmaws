@@ -20,7 +20,7 @@ import {
 } from './ipc-protocol.esm.js';
 import { ServiceProcess } from './service-process.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
-import { RouterWorker } from './router-worker-manager.esm.js';
+import { RouterWorkerProxy } from './router-worker-proxy.esm.js';
 
 /**
  * Router process class
@@ -51,7 +51,7 @@ class RouterProcess extends ServiceProcess {
 
 			// Update all workers with new configuration
 			for (const item of this.poolManager.items.values()) {
-				if (item.item instanceof RouterWorker) {
+				if (item.item instanceof RouterWorkerProxy) {
 					await item.item.updateConfig(this.config);
 				}
 			}
@@ -198,7 +198,7 @@ class RouterProcess extends ServiceProcess {
 		};
 
 		const workerFactory = async (itemId) => {
-			const worker = new RouterWorker(itemId, this.workerUrl);
+			const worker = new RouterWorkerProxy(itemId, this.workerUrl);
 			await worker.initialize(this.config);
 			return { item: worker, isWorker: true };
 		};
@@ -212,7 +212,7 @@ class RouterProcess extends ServiceProcess {
  * Main entry point
  */
 async function main () {
-	const processId = Deno.env.get('JSMAWS_PID');
+	const processId = Deno.env.get('JSMAWS_PID'); // process id string
 	await ServiceProcess.run(RouterProcess, processId);
 }
 

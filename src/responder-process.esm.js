@@ -625,7 +625,7 @@ class ResponderProcess extends ServiceProcess {
  * Main entry point
  */
 async function main () {
-	const processId = Deno.env.get('JSMAWS_PID');
+	const processId = Deno.env.get('JSMAWS_PID'); // process id string
 	const poolName = Deno.env.get('JSMAWS_POOL');
 	await ServiceProcess.run(ResponderProcess, processId, poolName);
 }

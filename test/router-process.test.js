@@ -94,9 +94,9 @@ class MockPoolManager {
 }
 
 /**
- * Mock RouterWorker for testing
+ * Mock RouterWorkerProxy for testing
  */
-class MockRouterWorker {
+class MockRouterWorkerProxy {
 	constructor (id) {
 		this.id = id;
 		this.configUpdated = false;
@@ -195,7 +195,7 @@ Deno.test('RouterProcess - handleConfigUpdate updates pool manager', async () =>
 	// Verify configuration was updated correctly
 	assertEquals(process.config.routing.fsRouting, true);
 
-	// Note: Worker update testing requires actual RouterWorker instances due to instanceof check
+	// Note: Worker update testing requires actual RouterWorkerProxy instances due to instanceof check
 	// This is tested in integration tests with real workers
 });
 
@@ -212,7 +212,7 @@ Deno.test('RouterProcess - handleRouteRequest with successful match', async () =
 	process.config = new Configuration(configFields);
 
 	// Create mock worker with route result
-	const mockWorker = new MockRouterWorker('worker-1');
+	const mockWorker = new MockRouterWorkerProxy('worker-1');
 	mockWorker.routeResult = {
 		pool: 'standard',
 		app: '/test/apps/myapp.esm.js',
@@ -257,7 +257,7 @@ Deno.test('RouterProcess - handleRouteRequest with no match returns 404', async 
 	process.config = new Configuration(configFields);
 
 	// Create mock worker with no route result
-	const mockWorker = new MockRouterWorker('worker-1');
+	const mockWorker = new MockRouterWorkerProxy('worker-1');
 	mockWorker.routeResult = null;
 
 	// Add worker to available pool
@@ -323,7 +323,7 @@ Deno.test('RouterProcess - handleRouteRequest marks worker busy and idle', async
 	process.config = new Configuration(configFields);
 
 	// Create mock worker
-	const mockWorker = new MockRouterWorker('worker-1');
+	const mockWorker = new MockRouterWorkerProxy('worker-1');
 	mockWorker.routeResult = { pool: 'standard', app: '/test/app.esm.js', params: {}, tail: '' };
 
 	// Add worker to available pool
@@ -355,7 +355,7 @@ Deno.test('RouterProcess - handleRouteRequest handles worker error', async () =>
 	process.config = new Configuration(configFields);
 
 	// Create mock worker that throws error
-	const mockWorker = new MockRouterWorker('worker-1');
+	const mockWorker = new MockRouterWorkerProxy('worker-1');
 	mockWorker.findRoute = async () => {
 		throw new Error('Worker error');
 	};

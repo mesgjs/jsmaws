@@ -347,14 +347,22 @@ class Route {
 	 * @returns {Promise<Object|null>} Match result with extracted parameters, or null if no match
 	 */
 	async match (pathname, method) {
-		// First do path matching
+		const routingConfig = this.config?.routing;
+		const fsRouting = routingConfig?.fsRouting;
+		const hasRoot = this.root || routingConfig?.root;
+		if (this.isFilesystem && (!fsRouting || !hasRoot)) {
+			// Void ex facie
+			return null;
+		}
+
+		// First, try path matching
 		const pathMatch = this.matchPath(pathname, method);
 		if (!pathMatch) {
 			return null;
 		}
 
-		// For filesystem routes, verify the file exists
-		if (this.isFilesystem && this.config && this.config.routing.fsRouting) {
+		// For filesystem routes, also verify the file exists
+		if (this.isFilesystem) {
 			return await this.verifyFilesystem(pathMatch);
 		}
 

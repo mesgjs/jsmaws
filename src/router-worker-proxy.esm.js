@@ -1,15 +1,15 @@
 /**
- * JSMAWS Router Worker Manager
- * Reusable router worker wrapper for both operator (internal routing) and router-process (delegated routing)
+ * JSMAWS Router Worker Proxy
+ * A reusable router worker wrapper (proxy) for both operator (internal routing) and router-process (delegated routing)
  * 
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 /**
- * Router worker wrapper
+ * Router worker proxy
  * Manages a single Web Worker running router-worker.esm.js
  */
-export class RouterWorker {
+export class RouterWorkerProxy {
 	constructor (workerId, workerUrl) {
 		this.id = workerId;
 		this.worker = new Worker(workerUrl, { type: 'module' });
@@ -59,7 +59,7 @@ export class RouterWorker {
 
 		const pending = this.pendingMessages.get(id);
 		if (!pending) {
-			console.warn(`[RouterWorker ${this.id}] Received response for unknown message: ${id}`);
+			console.warn(`[RouterWorkerProxy ${this.id}] Received response for unknown message: ${id}`);
 			return;
 		}
 
@@ -79,7 +79,7 @@ export class RouterWorker {
 	 * Handle worker error
 	 */
 	handleWorkerError (error) {
-		console.error(`[RouterWorker ${this.id}] Worker error:`, error);
+		console.error(`[RouterWorkerProxy ${this.id}] Worker error:`, error);
 
 		// Reject all pending messages
 		for (const [id, pending] of this.pendingMessages.entries()) {

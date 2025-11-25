@@ -163,6 +163,9 @@ export class ProcessManager {
 			stdin: 'piped',
 			stdout: 'piped',
 			stderr: 'piped',
+			env: {
+				JSMAWS_PID: processId,
+			},
 		});
 
 		const process = command.spawn();
