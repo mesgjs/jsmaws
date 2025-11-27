@@ -5,6 +5,7 @@
 import { assertEquals, assertRejects } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { NANOS } from '../src/vendor.esm.js';
 import { ServiceProcess } from '../src/service-process.esm.js';
+import { Configuration } from '../src/configuration.esm.js';
 import { MessageType } from '../src/ipc-protocol.esm.js';
 
 /**
@@ -17,9 +18,10 @@ class MockServiceProcess extends ServiceProcess {
 		this.healthCheckCalled = false;
 		this.shutdownCalled = false;
 		this.onStartedCalled = false;
+		this.config = new Configuration();
 	}
 
-	async handleConfigUpdate (fields) {
+	handleConfigUpdate (fields) {
 		this.configUpdateCalled = true;
 		this.config.set('test', fields.at('test'));
 	}
@@ -67,18 +69,18 @@ class MockIPCConnection {
 		});
 	}
 
-	async readMessage () {
+	readMessage () {
 		if (this.readIndex >= this.messages.length) {
 			return null;
 		}
 		return this.messages[this.readIndex++];
 	}
 
-	async writeMessage (message, binaryData = null) {
+	writeMessage (message, binaryData = null) {
 		this.writtenMessages.push({ message, binaryData });
 	}
 
-	async close () {
+	close () {
 		this.closed = true;
 	}
 }
@@ -126,7 +128,7 @@ Deno.test('ServiceProcess - processMessages handles CONFIG_UPDATE', async () => 
 	await processPromise;
 	
 	assertEquals(process.configUpdateCalled, true);
-	assertEquals(process.config.at('test'), 'value');
+	assertEquals(process.config.get('test'), 'value');
 });
 
 Deno.test('ServiceProcess - processMessages handles HEALTH_CHECK', async () => {
@@ -134,9 +136,7 @@ Deno.test('ServiceProcess - processMessages handles HEALTH_CHECK', async () => {
 	const mockConn = new MockIPCConnection();
 	
 	// Add health check message
-	const fields = new NANOS();
-	fields.setOpts({ transform: true });
-	fields.push([{ timestamp: Date.now() }]);
+	const fields = new NANOS({ timestamp: Date.now() });
 	mockConn.addMessage(MessageType.HEALTH_CHECK, 'hc-1', fields);
 	
 	process.ipcConn = mockConn;
@@ -161,9 +161,7 @@ Deno.test('ServiceProcess - processMessages handles SHUTDOWN', async () => {
 	const mockConn = new MockIPCConnection();
 	
 	// Add shutdown message
-	const fields = new NANOS();
-	fields.setOpts({ transform: true });
-	fields.push([{ timeout: 30 }]);
+	const fields = new NANOS({ timeout: 30 });
 	mockConn.addMessage(MessageType.SHUTDOWN, 'halt-1', fields);
 	
 	process.ipcConn = mockConn;

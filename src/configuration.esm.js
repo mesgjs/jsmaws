@@ -35,6 +35,7 @@ export class Configuration {
 		this._ipc = null;
 		this._logging = null;
 		this._chunking = null;
+		this._bidiFlowControl = null;
 	}
 
 	/**
@@ -74,7 +75,7 @@ export class Configuration {
 	 * @returns {NANOS|null} Pool configuration or null if not found
 	 */
 	getPoolConfig (poolName) {
-		return this.pools.at(poolName);
+		return this.pools.at(poolName, null);
 	}
 
 	/**
@@ -124,6 +125,23 @@ export class Configuration {
 	}
 
 	/**
+	 * Get bidirectional flow control configuration
+	 * @returns {Object} Bidi flow control context with credit and buffer settings
+	 */
+	get bidiFlowControl () {
+		if (!this._bidiFlowControl) {
+			const bidiConfig = this.config.at('bidiFlowControl') || { at (_n, d) { return d; } };
+			this._bidiFlowControl = {
+				initialCredits: bidiConfig.at('initialCredits', 10),
+				maxBufferSize: bidiConfig.at('maxBufferSize', 1048576),
+				maxBytesPerSecond: bidiConfig.at('maxBytesPerSecond', 10485760),
+				idleTimeout: bidiConfig.at('idleTimeout', 60)
+			};
+		}
+		return this._bidiFlowControl;
+	}
+
+	/**
 	 * Get MIME types configuration
 	 * @returns {NANOS} MIME types mapping
 	 */
@@ -160,6 +178,7 @@ export class Configuration {
 		this._ipc = null;
 		this._logging = null;
 		this._chunking = null;
+		this._bidiFlowControl = null;
 	}
 
 	/**
@@ -168,9 +187,7 @@ export class Configuration {
 	 */
 	mergeConfig (configUpdate) {
 		// Merge fields from update into existing config
-		for (const [key, value] of configUpdate.entries()) {
-			this.config.set(key, value);
-		}
+		this.config.fromEntries(configUpdate.namedEntries());
 		
 		// Invalidate all cached values
 		this._routing = null;
@@ -178,6 +195,7 @@ export class Configuration {
 		this._ipc = null;
 		this._logging = null;
 		this._chunking = null;
+		this._bidiFlowControl = null;
 	}
 
 	/**
@@ -192,11 +210,11 @@ export class Configuration {
 
 	/**
 	 * Set configuration value
-	 * @param {string|Array} path Path to configuration value
+	 * @param {string} name Name of configuration value
 	 * @param {*} value Value to set
 	 */
-	set (path, value) {
-		this.config.set(path, value);
+	set (name, value) {
+		this.config.set(name, value);
 		
 		// Invalidate caches that might be affected
 		// (Could be more granular, but simple invalidation is safer)
@@ -205,6 +223,7 @@ export class Configuration {
 		this._ipc = null;
 		this._logging = null;
 		this._chunking = null;
+		this._bidiFlowControl = null;
 	}
 
 	/**

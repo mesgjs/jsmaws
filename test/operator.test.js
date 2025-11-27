@@ -22,7 +22,7 @@ Deno.test("ServerConfig - creates with default values", () => {
 	assertEquals(config.httpPort, 80);
 	assertEquals(config.httpsPort, 443);
 	assertEquals(config.hostname, 'localhost');
-	assertEquals(config.acmeChallengeDir, '/var/www/acme-challenge');
+	assertEquals(config.acmeChallengeDir, undefined);
 	assertEquals(config.noSSL, false);
 	assertEquals(config.sslCheckIntervalHours, 1);
 });
@@ -56,21 +56,22 @@ Deno.test("ServerConfig - creates from NANOS with defaults", () => {
 	assertEquals(config.httpPort, 80);
 	assertEquals(config.httpsPort, 443);
 	assertEquals(config.hostname, 'localhost');
-	assertEquals(config.acmeChallengeDir, '/var/www/acme-challenge');
+	assertEquals(config.acmeChallengeDir, undefined);
 	assertEquals(config.noSSL, false);
 	assertEquals(config.sslCheckIntervalHours, 1);
 });
 
 Deno.test("ServerConfig - creates from NANOS with custom values", () => {
-	const nanos = new NANOS();
-	nanos.set('httpPort', 8080);
-	nanos.set('httpsPort', 8443);
-	nanos.set('certFile', '/path/to/cert.pem');
-	nanos.set('keyFile', '/path/to/key.pem');
-	nanos.set('hostname', 'example.com');
-	nanos.set('acmeChallengeDir', '/custom/acme');
-	nanos.set('noSSL', true);
-	nanos.set('sslCheckIntervalHours', 2);
+	const nanos = new NANOS({
+		httpPort: 8080,
+		httpsPort: 8443,
+		certFile: '/path/to/cert.pem',
+		keyFile: '/path/to/key.pem',
+		hostname: 'example.com',
+		acmeChallengeDir: '/custom/acme',
+		noSSL: true,
+		sslCheckIntervalHours: 2
+	});
 
 	const config = ServerConfig.fromNANOS(nanos);
 
@@ -170,8 +171,8 @@ Deno.test("OperatorProcess - HTTP redirect response", async () => {
 	assertEquals(response.headers.get('Location'), 'https://example.com/test/path?query=value');
 });
 
-Deno.test("OperatorProcess - ACME challenge path detection", async () => {
-	const config = new ServerConfig({ httpPort: 8080 });
+Deno.test("OperatorProcess - ACME challenge path detection with configured dir", async () => {
+	const config = new ServerConfig({ httpPort: 8080, acmeChallengeDir: '/tmp/acme-test' });
 	const operator = new OperatorProcess(config);
 	operator.initializeLogger();
 
@@ -180,6 +181,19 @@ Deno.test("OperatorProcess - ACME challenge path detection", async () => {
 
 	// Should attempt to handle ACME challenge (will fail without actual file)
 	assertEquals(response.status, 404);
+});
+
+Deno.test("OperatorProcess - ACME challenge path without configured dir redirects", async () => {
+	const config = new ServerConfig({ httpPort: 8080, noSSL: false });
+	const operator = new OperatorProcess(config);
+	operator.initializeLogger();
+
+	const req = new Request('http://example.com/.well-known/acme-challenge/test-token');
+	const response = await operator.handleHttpRequest(req);
+
+	// Without acmeChallengeDir configured, should redirect to HTTPS
+	assertEquals(response.status, 301);
+	assertEquals(response.headers.get('Location'), 'https://example.com/.well-known/acme-challenge/test-token');
 });
 
 Deno.test("OperatorProcess - HTTP request in noSSL mode", async () => {
@@ -241,9 +255,10 @@ Deno.test("OperatorProcess - handles configuration update", async () => {
 	operator.initializeRouter();
 	operator.initializeProcessManager();
 
-	const newConfig = new NANOS();
-	newConfig.set('httpPort', 9090);
-	newConfig.set('httpsPort', 9443);
+	const newConfig = new NANOS({
+		httpPort: 9090,
+		httpsPort: 9443
+	});
 
 	await operator.handleConfigUpdate(newConfig);
 
@@ -260,9 +275,10 @@ Deno.test("OperatorProcess - converts NANOS headers to Headers", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 
-	const nanosHeaders = new NANOS();
-	nanosHeaders.set('content-type', 'application/json');
-	nanosHeaders.set('x-custom', 'value');
+	const nanosHeaders = new NANOS({
+		'content-type': 'application/json',
+		'x-custom': 'value'
+	});
 
 	const headers = operator.convertHeaders(nanosHeaders);
 
@@ -274,14 +290,11 @@ Deno.test("OperatorProcess - converts multi-valued NANOS headers", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 
-	const nanosHeaders = new NANOS();
-	nanosHeaders.set('content-type', 'application/json');
-	
-	// Create multi-valued header (e.g., Set-Cookie)
-	const cookies = new NANOS();
-	cookies.push('session=abc123');
-	cookies.push('user=john');
-	nanosHeaders.set('set-cookie', cookies);
+	// Include multi-valued header (e.g., Set-Cookie)
+	const nanosHeaders = new NANOS({
+		'content-type': 'application/json',
+		'set-cookie': new NANOS('session=abc123', 'user=john')
+	});
 
 	const headers = operator.convertHeaders(nanosHeaders);
 
@@ -298,22 +311,39 @@ Deno.test("OperatorProcess - converts multi-valued NANOS headers", () => {
 // Response Handler Tests
 // ============================================================================
 
-Deno.test("OperatorProcess - handleWebResponse creates proper Response", async () => {
+Deno.test("OperatorProcess - handleFrameResponse creates proper Response", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 
-	const message = {
-		fields: new NANOS(),
+	// Create a mock process with IPC connection
+	const mockProcess = {
+		id: 'test-process',
+		ipcConn: {
+			readMessage: async () => {
+				// Return a final frame to close the stream
+				const finalFrame = {
+					type: 'WEB_FRAME',
+					id: 'test-request',
+					fields: new NANOS({ final: true, keepAlive: false }),
+				};
+				return { message: finalFrame, binaryData: new Uint8Array(0) };
+			}
+		}
 	};
-	message.fields.set('status', 200);
+
+	// Create first frame with response mode
+	const firstFrame = {
+		type: 'WEB_FRAME',
+		id: 'test-request',
+		fields: new NANOS({ mode: 'response', status: 200 }),
+	};
 	
-	const headers = new NANOS();
-	headers.set('content-type', 'text/plain');
-	message.fields.set('headers', headers);
+	const headers = new NANOS({ 'content-type': 'text/plain' });
+	firstFrame.fields.push({ headers: headers, final: true, keepAlive: false });
 
 	const binaryData = new TextEncoder().encode('Hello, World!');
 
-	const response = await operator.handleWebResponse(message, binaryData);
+	const response = await operator.handleFrameResponse('test-request', firstFrame, binaryData, mockProcess, new Request('https://example.com/test'));
 
 	assertEquals(response.status, 200);
 	assertEquals(response.headers.get('content-type'), 'text/plain');

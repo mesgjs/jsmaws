@@ -21,6 +21,7 @@ import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import {
 	createRequest,
+	createFrame,
 	MessageType,
 } from './ipc-protocol.esm.js';
 
@@ -92,6 +93,7 @@ class OperatorProcess {
 		this.isShuttingDown = false;
 		this.isReloading = false;
 		this.pendingRequests = new Map(); // requestId -> {resolve, reject, timeout, controller, writer}
+		this.bidiConnections = new Map(); // requestId -> bidirectional connection state
 		this.healthCheckInterval = null;
 	}
 
@@ -420,22 +422,11 @@ class OperatorProcess {
 				message.fields.at('requestsQueued', 0)
 			);
 
-			// Handle different message types
-			switch (message.type) {
-				case MessageType.WEB_RESPONSE:
-					return await this.handleWebResponse(message, binaryData);
-					
-				case MessageType.WEB_CHUNK:
-					return await this.handleChunkedResponse(message.id, message, binaryData, process);
-					
-				case MessageType.WEB_STREAM:
-					return await this.handleStreamingResponse(message.id, message, binaryData, process);
-					
-				case MessageType.WS_UPGRADE:
-					return await this.handleWebSocketUpgrade(message.id, message, process, req);
-					
-				default:
-					throw new Error(`Unexpected message type: ${message.type}`);
+			// Handle frame message (unified protocol)
+			if (message.type === MessageType.WEB_FRAME) {
+				return await this.handleFrameResponse(message.id, message, binaryData, process, req);
+			} else {
+				throw new Error(`Unexpected message type: ${message.type}`);
 			}
 		} catch (error) {
 			this.logger.error(`IPC communication error with ${process.id}: ${error.message}`);
@@ -466,103 +457,71 @@ class OperatorProcess {
 	}
 
 	/**
-	 * Handle regular web response
+	 * Handle frame response (unified protocol)
 	 */
-	async handleWebResponse (message, binaryData) {
-		// Convert response headers from NANOS to Headers
-		const responseHeaders = this.convertHeaders(message.fields.at('headers'));
-
-		// Create HTTP response
-		return new Response(binaryData, {
-			status: message.fields.at('status', 200),
-			headers: responseHeaders,
-		});
+	async handleFrameResponse (requestId, firstFrame, firstData, process, req) {
+		const mode = firstFrame.fields.at('mode');
+		const status = firstFrame.fields.at('status', 200);
+		const headers = this.convertHeaders(firstFrame.fields.at('headers'));
+		const keepAlive = firstFrame.fields.at('keepAlive', false);
+		const final = firstFrame.fields.at('final', false);
+		
+		// Handle bidirectional upgrade
+		if (mode === 'bidi' && status === 101) {
+			return await this.handleBidiUpgrade(requestId, firstFrame, process, req);
+		}
+		
+		// Handle response/stream modes
+		if (mode === 'response' || mode === 'stream') {
+			return await this.handleResponseStream(requestId, status, headers, keepAlive, final, firstData, process);
+		}
+		
+		// Unknown mode
+		throw new Error(`Unknown frame mode: ${mode}`);
 	}
-
+	
 	/**
-	 * Handle chunked response (large files, etc.)
+	 * Handle response or stream mode frames
 	 */
-	async handleChunkedResponse (requestId, initialMessage, initialData, process) {
-		// Convert response headers
-		const responseHeaders = this.convertHeaders(initialMessage.fields.at('headers'));
-
-		// Create readable stream for chunked response
+	async handleResponseStream (requestId, status, headers, keepAlive, firstFinal, firstData, process) {
+		// Create readable stream to handle frame messages
 		const stream = new ReadableStream({
 			start: async (controller) => {
 				try {
-					// Send initial chunk if present
-					if (initialData && initialData.length > 0) {
-						controller.enqueue(initialData);
+					// Send first frame data if present
+					if (firstData && firstData.length > 0) {
+						controller.enqueue(firstData);
 					}
-
-					// Check if this was the final chunk
-					if (initialMessage.fields.at('final', false)) {
+					
+					// If first frame is final and not keepAlive, close immediately
+					if (firstFinal && !keepAlive) {
 						controller.close();
 						return;
 					}
-
-					// Read subsequent chunks
+					
+					// Read subsequent frame messages
 					while (true) {
-						const { message, binaryData } = await process.ipcConn.readMessage();
-
-						if (message.type !== MessageType.WEB_CHUNK) {
-							throw new Error(`Expected WEB_CHUNK, got ${message.type}`);
+						const { message: frameMsg, binaryData: frameData } = await process.ipcConn.readMessage();
+						
+						if (frameMsg.type !== MessageType.WEB_FRAME) {
+							throw new Error(`Expected WEB_FRAME, got ${frameMsg.type}`);
 						}
-
-						// Send chunk data
-						if (binaryData && binaryData.length > 0) {
-							controller.enqueue(binaryData);
+						
+						// Send frame data chunk if present
+						if (frameData && frameData.length > 0) {
+							controller.enqueue(frameData);
 						}
-
+						
 						// Check if final chunk
-						if (message.fields.at('final', false)) {
-							controller.close();
-							break;
-						}
-					}
-				} catch (error) {
-					controller.error(error);
-				}
-			},
-		});
-
-		return new Response(stream, {
-			status: initialMessage.fields.at('status', 200),
-			headers: responseHeaders,
-		});
-	}
-
-	/**
-	 * Handle streaming response (SSE, etc.)
-	 */
-	async handleStreamingResponse (requestId, initialMessage, initialData, process) {
-		// Convert response headers
-		const responseHeaders = this.convertHeaders(initialMessage.fields.at('headers'));
-
-		// Create readable stream for streaming response
-		const stream = new ReadableStream({
-			start: async (controller) => {
-				try {
-					// Send initial data if present
-					if (initialData && initialData.length > 0) {
-						controller.enqueue(initialData);
-					}
-
-					// Read subsequent stream data
-					while (true) {
-						const { message, binaryData } = await process.ipcConn.readMessage();
-
-						if (message.type === MessageType.WEB_STREAM) {
-							// Send stream data
-							if (binaryData && binaryData.length > 0) {
-								controller.enqueue(binaryData);
+						const final = frameMsg.fields.at('final', false);
+						if (final) {
+							const frameKeepAlive = frameMsg.fields.at('keepAlive', keepAlive);
+							if (!frameKeepAlive) {
+								// Last frame - close stream
+								controller.close();
+								break;
 							}
-						} else if (message.type === MessageType.WEB_STREAM_CLOSE) {
-							// Stream closed
-							controller.close();
-							break;
-						} else {
-							throw new Error(`Expected WEB_STREAM or WEB_STREAM_CLOSE, got ${message.type}`);
+							// Otherwise, more frames coming later (streaming mode)
 						}
 					}
 				} catch (error) {
@@ -570,25 +529,235 @@ class OperatorProcess {
 				}
 			},
 		});
-
+		
 		return new Response(stream, {
-			status: initialMessage.fields.at('status', 200),
-			headers: responseHeaders,
+			status,
+			headers,
 		});
+	}
+	
+	/**
+	 * Handle bidirectional connection upgrade (transport-agnostic)
+	 */
+	async handleBidiUpgrade (requestId, firstFrame, process, req) {
+		try {
+			// Read protocol parameters from next frame (sent by responder after status 101)
+			const { message: paramsMsg } = await process.ipcConn.readMessage();
+			
+			if (paramsMsg.type !== MessageType.WEB_FRAME) {
+				throw new Error(`Expected WEB_FRAME with protocol params, got ${paramsMsg.type}`);
+			}
+			
+			// Extract protocol parameters (transport-independent)
+			const initialCredits = paramsMsg.fields.at('initialCredits', 655360);
+			const maxChunkSize = paramsMsg.fields.at('maxChunkSize', 65536);
+			const maxBytesPerSecond = paramsMsg.fields.at('maxBytesPerSecond', 10485760);
+			const idleTimeout = paramsMsg.fields.at('idleTimeout', 60);
+			const maxBufferSize = paramsMsg.fields.at('maxBufferSize', 1048576);
+			
+			// Determine transport type from request headers
+			const upgradeHeader = req.headers.get('upgrade');
+			
+			if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
+				// WebSocket transport
+				return await this.handleWebSocketUpgrade(
+					requestId, process, req,
+					initialCredits, maxChunkSize, maxBytesPerSecond, idleTimeout, maxBufferSize
+				);
+			}
+			
+			// Future: Add other bidirectional transports here
+			// else if (upgradeHeader && upgradeHeader.toLowerCase() === 'h2') {
+			//   return await this.handleHTTP2Upgrade(...);
+			// }
+			
+			// Unsupported transport
+			throw new Error(`Unsupported bidirectional transport: ${upgradeHeader || 'none'}`);
+			
+		} catch (error) {
+			this.logger.error(`Bidi upgrade error: ${error.message}`);
+			return new Response('Bidirectional upgrade failed', {
+				status: 500,
+				headers: { 'Content-Type': 'text/plain' },
+			});
+		}
+	}
+	
+	/**
+	 * Handle WebSocket-specific upgrade (transport-specific helper)
+	 */
+	async handleWebSocketUpgrade (requestId, process, req, initialCredits, maxChunkSize, maxBytesPerSecond, idleTimeout, maxBufferSize) {
+		// Verify WebSocket upgrade headers
+		const connectionHeader = req.headers.get('connection');
+		if (!connectionHeader || !connectionHeader.toLowerCase().includes('upgrade')) {
+			this.logger.error(`WebSocket upgrade but Connection header missing upgrade`);
+			return new Response('Bad Request: Invalid Connection header', {
+				status: 400,
+				headers: { 'Content-Type': 'text/plain' },
+			});
+		}
+		
+		// Upgrade to WebSocket
+		const { socket, response } = Deno.upgradeWebSocket(req);
+		
+		// Track connection state
+		const connState = {
+			socket,
+			process,
+			requestId,
+			outboundCredits: initialCredits,
+			inboundCredits: initialCredits,
+			maxCredits: initialCredits,
+			maxChunkSize,
+			maxBytesPerSecond,
+			idleTimeout,
+			maxBufferSize,
+			lastActivity: Date.now(),
+		};
+		
+		this.bidiConnections.set(requestId, connState);
+		
+		// Handle WebSocket messages from client
+		socket.onmessage = async (event) => {
+			try {
+				await this.handleClientBidiMessage(requestId, event.data, connState);
+			} catch (error) {
+				this.logger.error(`Bidi client message error: ${error.message}`);
+				socket.close(1011, 'Internal error');
+				this.bidiConnections.delete(requestId);
+			}
+		};
+		
+		// Handle WebSocket close from client
+		socket.onclose = () => {
+			this.logger.debug(`Bidi connection ${requestId} closed by client`);
+			this.bidiConnections.delete(requestId);
+		};
+		
+		// Handle WebSocket errors
+		socket.onerror = (error) => {
+			this.logger.error(`Bidi connection ${requestId} error: ${error}`);
+			this.bidiConnections.delete(requestId);
+		};
+		
+		// Start reading frames from responder process
+		this.readBidiFrames(requestId, connState);
+		
+		return response;
 	}
 
 	/**
-	 * Handle WebSocket upgrade
+	 * Handle client message in bidirectional connection
 	 */
-	async handleWebSocketUpgrade (requestId, message, process, req) {
-		// WebSocket upgrade handling would require Deno.upgradeWebSocket
-		// This is a placeholder for the full implementation
-		this.logger.warn('WebSocket upgrade not yet fully implemented');
+	async handleClientBidiMessage (requestId, data, connState) {
+		// Convert WebSocket message to Uint8Array
+		let frameData;
+		if (typeof data === 'string') {
+			frameData = new TextEncoder().encode(data);
+		} else if (data instanceof ArrayBuffer) {
+			frameData = new Uint8Array(data);
+		} else if (data instanceof Uint8Array) {
+			frameData = data;
+		} else {
+			this.logger.warn(`Unexpected WebSocket data type: ${typeof data}`);
+			return;
+		}
 		
-		return new Response('WebSocket upgrade not yet implemented', {
-			status: 501,
-			headers: { 'Content-Type': 'text/plain' },
+		const chunkSize = frameData.length;
+		
+		// Check credits (flow control)
+		if (connState.inboundCredits < chunkSize) {
+			this.logger.warn(`Client ${requestId} exceeded inbound credits`);
+			connState.socket.close(1008, 'Flow control violation');
+			this.bidiConnections.delete(requestId);
+			return;
+		}
+		
+		// Consume credits
+		connState.inboundCredits -= chunkSize;
+		
+		// Forward to responder process via IPC using frame protocol
+		const frameMsg = createFrame(requestId, {
+			data: frameData,
+			final: false
 		});
+		await connState.process.ipcConn.writeMessage(frameMsg, frameData);
+		
+		// Implicit credit grant (applet processes the data)
+		connState.inboundCredits = Math.min(
+			connState.inboundCredits + chunkSize,
+			connState.maxCredits
+		);
+		
+		// Update activity timestamp
+		connState.lastActivity = Date.now();
+	}
+	
+	/**
+	 * Read bidirectional frames from responder process
+	 */
+	async readBidiFrames (requestId, connState) {
+		try {
+			while (this.bidiConnections.has(requestId)) {
+				const { message, binaryData } = await connState.process.ipcConn.readMessage();
+				
+				if (message.type !== MessageType.WEB_FRAME) {
+					this.logger.warn(`Expected WEB_FRAME for bidi ${requestId}, got ${message.type}`);
+					continue;
+				}
+				
+				const mode = message.fields.at('mode');
+				if (mode !== 'bidi') {
+					this.logger.warn(`Expected mode='bidi' for ${requestId}, got ${mode}`);
+					continue;
+				}
+				
+				const final = message.fields.at('final', false);
+				const keepAlive = message.fields.at('keepAlive', true);
+				
+				// Send data to WebSocket client
+				if (binaryData && binaryData.length > 0) {
+					const chunkSize = binaryData.length;
+					
+					// Check credits
+					if (connState.outboundCredits < chunkSize) {
+						this.logger.warn(`Responder ${requestId} exceeded outbound credits`);
+						connState.socket.close(1008, 'Flow control violation');
+						this.bidiConnections.delete(requestId);
+						return;
+					}
+					
+					// Consume credits
+					connState.outboundCredits -= chunkSize;
+					
+					// Send to client
+					connState.socket.send(binaryData);
+					
+					// Implicit credit grant
+					connState.outboundCredits = Math.min(
+						connState.outboundCredits + chunkSize,
+						connState.maxCredits
+					);
+				}
+				
+				// Handle connection close
+				if (final && !keepAlive) {
+					connState.socket.close(1000, 'Normal closure');
+					this.bidiConnections.delete(requestId);
+					return;
+				}
+				
+				// Update activity timestamp
+				connState.lastActivity = Date.now();
+			}
+		} catch (error) {
+			this.logger.error(`Bidi frame read error for ${requestId}: ${error.message}`);
+			if (this.bidiConnections.has(requestId)) {
+				const conn = this.bidiConnections.get(requestId);
+				conn.socket.close(1011, 'Internal error');
+				this.bidiConnections.delete(requestId);
+			}
+		}
 	}
 
 	/**

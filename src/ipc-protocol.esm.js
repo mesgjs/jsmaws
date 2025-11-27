@@ -19,13 +19,9 @@ export const MessageType = {
 	ROUTE_REQUEST: 'RREQ',
 	ROUTE_RESPONSE: 'RRES',
 	WEB_REQUEST: 'WREQ',
-	WEB_RESPONSE: 'WRES',
-	WEB_CHUNK: 'WCHK',        // Chunked response data
-	WEB_STREAM: 'WSTR',       // Streaming data (SSE, etc.)
-	WEB_STREAM_CLOSE: 'WSCL', // Stream close
-	WS_UPGRADE: 'WSUP',       // WebSocket upgrade
-	WS_DATA: 'WSDT',          // WebSocket data
-	WS_CLOSE: 'WSCL',         // WebSocket close
+	WEB_RESPONSE: 'WRES',     // HTTP response headers (operator → client)
+	WEB_FRAME: 'WFRM',        // Unified frame protocol (all layers)
+	WEB_ERROR: 'WERR',        // Error responses
 	CONFIG_UPDATE: 'CFG',
 	SHUTDOWN: 'HALT',
 	SCALE_DOWN: 'RIF',
@@ -41,11 +37,11 @@ export function generateMessageId (prefix = 'MSG') {
 }
 
 /**
- * Create a SLID-formatted IPC message
+ * Create a NANOS-structured IPC message
  * @param {string} type Message type
  * @param {string} id Message id
  * @param {Object} fields Message fields
- * @returns {NANOS} SLID message
+ * @returns {NANOS} message
  */
 export function createMessage ({ type, id = generateMessageId(type) }, fields = {}) {
 	const message = new NANOS(type, { id });
@@ -62,7 +58,7 @@ export function createMessage ({ type, id = generateMessageId(type) }, fields = 
 export function parseMessage (slidText) {
 	const message = parseSLID(slidText);
 
-	if (message.length < 2) {
+	if (message.next < 2) {
 		throw new Error('Invalid IPC message format: missing type or fields');
 	}
 
@@ -79,7 +75,7 @@ export function parseMessage (slidText) {
 
 /**
  * Encode message with length prefix for transmission
- * @param {NANOS} message SLID message
+ * @param {NANOS} message NANOS-structured message
  * @param {Uint8Array|null} binaryData Optional binary data
  * @returns {Uint8Array} Encoded message with length prefix
  */
@@ -324,58 +320,57 @@ export function createHealthCheck () {
 }
 
 /**
- * Create chunk message
+ * Create frame message (unified protocol)
+ * @param {string} id Request/connection ID
+ * @param {Object} options Frame options
+ * @param {string} options.mode Connection mode: 'response' | 'stream' | 'bidi' (only in first frame)
+ * @param {number} options.status HTTP status code (only in first frame for response/stream modes)
+ * @param {NANOS} options.headers HTTP headers (only in first frame for response/stream modes)
+ * @param {Uint8Array|null} options.data Frame chunk data
+ * @param {boolean} options.final Last chunk of current frame
+ * @param {boolean} options.keepAlive Connection stays open (optional, sticky state)
+ * @param {number} options.initialCredits Bidi protocol parameter (only after status 101)
+ * @param {number} options.maxChunkSize Bidi protocol parameter (only after status 101)
+ * @param {number} options.maxBytesPerSecond Bidi protocol parameter (only after status 101)
+ * @param {number} options.idleTimeout Bidi protocol parameter (only after status 101)
+ * @param {number} options.maxBufferSize Bidi protocol parameter (only after status 101)
+ * @returns {NANOS} Frame message
  */
-export function createChunk (id, data, final = false) {
-	return createMessage({ type: MessageType.WEB_CHUNK, id }, {
-		dataSize: data ? data.length : 0,
-		final,
-	});
+export function createFrame (id, options = {}) {
+	const fields = {
+		dataSize: options.data ? options.data.length : 0,
+		final: options.final ?? false
+	};
+	
+	// Copy all optional fields that are defined
+	const optionalFields = [
+		'mode', 'status', 'headers', 'keepAlive',
+		'initialCredits', 'maxChunkSize', 'maxBytesPerSecond', 'idleTimeout', 'maxBufferSize'
+	];
+	
+	for (const field of optionalFields) {
+		if (options[field] !== undefined) {
+			fields[field] = options[field];
+		}
+	}
+	
+	return createMessage({ type: MessageType.WEB_FRAME, id }, fields);
 }
 
 /**
- * Create stream data message
+ * Create error message
+ * @param {string} id Request/connection ID
+ * @param {number} status HTTP status code
+ * @param {string} message Error message
+ * @param {string} details Additional error details (optional)
+ * @returns {NANOS} Error message
  */
-export function createStreamData (id, data) {
-	return createMessage({ type: MessageType.WEB_STREAM, id }, {
-		dataSize: data ? data.length : 0,
-	});
-}
-
-/**
- * Create stream close message
- */
-export function createStreamClose (id) {
-	return createMessage({ type: MessageType.WEB_STREAM_CLOSE, id }, {});
-}
-
-/**
- * Create WebSocket upgrade message
- */
-export function createWebSocketUpgrade (id, protocol = null) {
-	return createMessage({ type: MessageType.WS_UPGRADE, id }, {
-		protocol: protocol || '',
-	});
-}
-
-/**
- * Create WebSocket data message
- */
-export function createWebSocketData (id, opcode, data) {
-	return createMessage({ type: MessageType.WS_DATA, id }, {
-		opcode,
-		dataSize: data ? data.length : 0,
-	});
-}
-
-/**
- * Create WebSocket close message
- */
-export function createWebSocketClose (id, code = 1000, reason = '') {
-	return createMessage({ type: MessageType.WS_CLOSE, id }, {
-		code,
-		reason,
-	});
+export function createError (id, status, message, details) {
+	const fields = { status, message };
+	if (details !== undefined) {
+		fields.details = details;
+	}
+	return createMessage({ type: MessageType.WEB_ERROR, id }, fields);
 }
 
 /**

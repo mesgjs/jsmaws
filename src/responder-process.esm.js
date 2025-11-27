@@ -25,12 +25,8 @@ import { NANOS } from './vendor.esm.js';
 import {
 	MessageType,
 	createResponse,
-	createChunk,
-	createStreamData,
-	createStreamClose,
-	createWebSocketUpgrade,
-	createWebSocketData,
-	createWebSocketClose,
+	createFrame,
+	createError,
 	validateMessage,
 } from './ipc-protocol.esm.js';
 import { ServiceProcess } from './service-process.esm.js';
@@ -49,6 +45,9 @@ class ResponderProcess extends ServiceProcess {
 		this.activeWebSockets = new Map(); // requestId -> worker
 		this.requestCount = 0;
 		this.maxConcurrentRequests = 10; // Will be set from pool config
+		
+		// Track bidirectional connections
+		this.bidiConnections = new Map(); // id → connection state
 
 		// Response chunking configuration
 		this.chunkingConfig = {
@@ -154,6 +153,7 @@ class ResponderProcess extends ServiceProcess {
 			const method = fields.at('method');
 			const path = fields.at('path');
 			const app = fields.at('app');
+			const root = fields.at('root'); // Route-specific root (local or global)
 			const headers = fields.at('headers') || new NANOS();
 			const params = fields.at('params') || new NANOS();
 			const query = fields.at('query') || new NANOS();
@@ -210,8 +210,18 @@ class ResponderProcess extends ServiceProcess {
 				Object.assign(queryObj, query.toObject());
 			}
 
+			// Check for built-in applets and prepare configuration
+			let builtinConfig = null;
+			if (app === '@static') {
+				const mimeTypes = this.config.mimeTypes;
+				builtinConfig = {
+					root: root || this.config.routing.root, // Use route root or fall back to global
+					mimeTypes: mimeTypes.toSLID(), // Serialize NANOS to SLID for worker
+				};
+			}
+	
 			// Send request to applet worker
-			worker.postMessage({
+			const requestMsg = {
 				type: 'request',
 				id,
 				method: method.toUpperCase(),
@@ -221,7 +231,15 @@ class ResponderProcess extends ServiceProcess {
 				query: queryObj,
 				tail,
 				body: binaryData,
-			});
+				maxChunkSize: this.chunkingConfig.chunkSize, // Hard security limit
+			};
+			
+			// Add config for built-in applets only
+			if (builtinConfig) {
+				requestMsg.config = builtinConfig;
+			}
+			
+			worker.postMessage(requestMsg);
 
 		} catch (error) {
 			console.error(`[${this.processId}] Request handling error:`, error);
@@ -234,76 +252,29 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleAppletMessage (id, data) {
 		const { type } = data;
-		const requestInfo = this.activeRequests.get(id);
 		
+		if (type !== 'frame' && type !== 'error') {
+			console.warn(`[${this.processId}] Unknown message type: ${type}`);
+			return;
+		}
+		
+		const requestInfo = this.activeRequests.get(id);
 		if (!requestInfo) {
 			console.warn(`[${this.processId}] Received message for unknown request ${id}`);
 			return;
 		}
 
 		try {
-			switch (type) {
-				case 'response':
-					await this.handleAppletResponse(id, data, requestInfo);
-					break;
-					
-				case 'error':
-					await this.handleAppletError(id, data, requestInfo);
-					break;
-					
-				case 'chunk':
-					await this.handleAppletChunk(id, data, requestInfo);
-					break;
-					
-				case 'stream-data':
-					await this.handleAppletStreamData(id, data, requestInfo);
-					break;
-					
-				case 'stream-close':
-					await this.handleAppletStreamClose(id, requestInfo);
-					break;
-					
-				case 'ws-upgrade':
-					await this.handleAppletWebSocketUpgrade(id, data, requestInfo);
-					break;
-					
-				case 'ws-send':
-					await this.handleAppletWebSocketSend(id, data);
-					break;
-					
-				case 'ws-close':
-					await this.handleAppletWebSocketClose(id, data, requestInfo);
-					break;
-					
-				default:
-					console.warn(`[${this.processId}] Unknown applet message type: ${type}`);
+			if (type === 'error') {
+				await this.handleAppletError(id, data, requestInfo);
+			} else {
+				await this.handleFrame(id, data, requestInfo);
 			}
 		} catch (error) {
 			console.error(`[${this.processId}] Error handling applet message:`, error);
 			await this.sendErrorResponse(id, 500, 'Internal Server Error');
 			this.cleanupRequest(id);
 		}
-	}
-
-	/**
-	 * Handle regular HTTP response from applet
-	 */
-	async handleAppletResponse (id, data, requestInfo) {
-		const { status, statusText, headers, body, chunked, keepAlive } = data;
-		
-		// If this is a chunked or streaming response, mark as streaming
-		if (chunked || keepAlive) {
-			requestInfo.isStreaming = true;
-			// Don't cleanup yet - more data coming
-		} else {
-			// Regular response - cleanup after sending
-			clearTimeout(requestInfo.timeout);
-			this.activeRequests.delete(id);
-			requestInfo.worker.terminate();
-		}
-
-		// Send response to operator
-		await this.sendResponse(id, { status, statusText, headers, body }, !chunked && !keepAlive);
 	}
 
 	/**
@@ -322,95 +293,327 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Handle chunk from applet (for chunked responses)
+	 * Handle frame from applet (unified frame protocol)
 	 */
-	async handleAppletChunk (id, data, requestInfo) {
-		const { data: chunkData, final } = data;
+	async handleFrame (id, data, requestInfo) {
+		const { mode, status, headers, data: frameData, final, keepAlive } = data;
 		
-		// Send chunk via IPC
-		const chunkMsg = createChunk(id, chunkData, final);
-		await this.ipcConn.writeMessage(chunkMsg, chunkData);
+		// First frame - establish connection
+		if (mode !== undefined) {
+			await this.handleFirstFrame(id, data, requestInfo);
+			return;
+		}
 		
-		if (final || chunkData === null) {
-			// Last chunk - cleanup
-			clearTimeout(requestInfo.timeout);
-			this.activeRequests.delete(id);
-			requestInfo.worker.terminate();
+		// Enforce maxChunkSize limit (DoS protection)
+		if (frameData && frameData.length > this.chunkingConfig.chunkSize) {
+			console.warn(`[${this.processId}] Frame chunk exceeds maxChunkSize (${frameData.length} > ${this.chunkingConfig.chunkSize}), terminating applet`);
+			this.cleanupRequest(id);
+			await this.sendErrorResponse(id, 500, 'Internal Server Error');
+			return;
+		}
+		
+		// Handle based on mode
+		if (requestInfo.mode === 'bidi') {
+			await this.handleBidiFrame(id, frameData, final, keepAlive, requestInfo);
+			return;
+		}
+		
+		// Handle response/stream modes (accumulate and forward)
+		if (frameData) {
+			requestInfo.frameBuffer.push(frameData);
+			requestInfo.totalBuffered += frameData.length;
+		}
+		
+		// If accumulated data exceeds autoChunkThresh, start forwarding immediately
+		if (requestInfo.totalBuffered >= this.chunkingConfig.autoChunkThresh) {
+			await this.flushFrameBuffer(id, requestInfo, false);
+		}
+		
+		// If final frame, flush remaining buffer
+		if (final) {
+			await this.flushFrameBuffer(id, requestInfo, true);
+			
+			// Update keepAlive status if specified
+			if (keepAlive !== undefined) {
+				requestInfo.keepAlive = keepAlive;
+			}
+			
+			// Cleanup if not keepAlive
+			if (!requestInfo.keepAlive) {
+				clearTimeout(requestInfo.timeout);
+				this.activeRequests.delete(id);
+				requestInfo.worker.terminate();
+			}
 		}
 	}
-
+	
 	/**
-	 * Handle streaming data from applet (SSE, etc.)
+	 * Handle first frame (establishes connection)
 	 */
-	async handleAppletStreamData (id, data) {
-		const { data: streamData } = data;
+	async handleFirstFrame (id, data, requestInfo) {
+		const { mode, status, headers, keepAlive, data: frameData, final } = data;
 		
-		// Send stream data via IPC
-		if (streamData) {
-			const streamMsg = createStreamData(id, streamData);
-			await this.ipcConn.writeMessage(streamMsg, streamData);
+		// Store connection state
+		requestInfo.mode = mode;
+		requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
+		requestInfo.frameBuffer = [];
+		requestInfo.totalBuffered = 0;
+		
+		// Send HTTP response headers to operator
+		await this.sendResponse(id, { status, headers, body: null });
+		
+		// Handle bidi mode initialization
+		if (mode === 'bidi' && status === 101) {
+			await this.initializeBidiConnection(id, requestInfo);
+		}
+		
+		// Process any data in first frame
+		if (frameData || final) {
+			await this.handleFrame(id, { data: frameData, final, keepAlive }, requestInfo);
 		}
 	}
-
+	
 	/**
-	 * Handle stream close from applet
+	 * Handle bidirectional frame (mode: 'bidi')
 	 */
-	async handleAppletStreamClose (id, requestInfo) {
-		// Send stream close via IPC
-		const closeMsg = createStreamClose(id);
-		await this.ipcConn.writeMessage(closeMsg);
+	async handleBidiFrame (id, frameData, final, keepAlive, requestInfo) {
+		let conn = this.bidiConnections.get(id);
 		
-		clearTimeout(requestInfo.timeout);
-		this.activeRequests.delete(id);
-		requestInfo.worker.terminate();
+		// First bidi frame - initialize connection
+		if (!conn) {
+			await this.initializeBidiConnection(id, requestInfo);
+			conn = this.bidiConnections.get(id);
+		}
+		
+		const chunkSize = frameData?.length || 0;
+		
+		// Check if applet has sufficient credits
+		if (conn.outboundCredits < chunkSize) {
+			// Insufficient credits - buffer the chunk
+			conn.outboundBuffer.push({ frameData, final, keepAlive });
+			conn.totalBuffered.outbound += chunkSize;
+			
+			// Check buffer limit (DoS protection)
+			if (conn.totalBuffered.outbound > conn.maxBufferSize) {
+				console.warn(`[${this.processId}] Bidi ${id} outbound buffer exceeded, terminating`);
+				this.closeBidiConnection(id, 'Buffer overflow');
+				return;
+			}
+			
+			return; // Don't forward yet
+		}
+		
+		// Consume credits (byte-based)
+		conn.outboundCredits -= chunkSize;
+		
+		// Forward chunk to operator using unified frame protocol
+		const frameMsg = createFrame(id, {
+			data: frameData,
+			final,
+			...(keepAlive !== undefined && { keepAlive })
+		});
+		await this.ipcConn.writeMessage(frameMsg, frameData);
+		
+		// Update last activity
+		conn.lastActivity = Date.now();
+		
+		// Handle connection close
+		if (final && keepAlive === false) {
+			this.closeBidiConnection(id, 'Normal closure');
+		}
 	}
-
+	
 	/**
-	 * Handle WebSocket upgrade from applet
+	 * Initialize bidirectional connection
 	 */
-	async handleAppletWebSocketUpgrade (id, data, requestInfo) {
-		const { protocol } = data;
+	async initializeBidiConnection (id, requestInfo) {
+		const maxChunkSize = this.chunkingConfig.chunkSize;
+		const bidiConfig = this.config.bidiFlowControl || {};
+		const initialCredits = (bidiConfig.initialCredits || 10) * maxChunkSize;
 		
-		// Mark as WebSocket connection (long-lived)
-		requestInfo.isStreaming = true;
-		this.activeWebSockets.set(id, requestInfo.worker);
+		const connState = {
+			worker: requestInfo.worker,
+			outboundCredits: initialCredits,
+			inboundCredits: initialCredits,
+			outboundBuffer: [],
+			inboundBuffer: [],
+			maxBufferSize: bidiConfig.maxBufferSize || 1048576,
+			totalBuffered: { outbound: 0, inbound: 0 },
+			maxCredits: initialCredits,
+			maxBytesPerSecond: bidiConfig.maxBytesPerSecond || 10485760,
+			idleTimeout: bidiConfig.idleTimeout || 60,
+			lastActivity: Date.now()
+		};
 		
-		// Send WebSocket upgrade via IPC
-		const upgradeMsg = createWebSocketUpgrade(id, protocol);
-		await this.ipcConn.writeMessage(upgradeMsg);
+		this.bidiConnections.set(id, connState);
 		
-		console.log(`[${this.processId}] WebSocket upgrade for request ${id}, protocol: ${protocol}`);
+		// Send protocol parameters to applet (first frame from responder)
+		requestInfo.worker.postMessage({
+			type: 'frame',
+			id,
+			mode: 'bidi',
+			initialCredits,
+			maxChunkSize,
+			maxBytesPerSecond: connState.maxBytesPerSecond,
+			idleTimeout: connState.idleTimeout,
+			maxBufferSize: connState.maxBufferSize,
+			data: null,
+			final: false,
+			keepAlive: true
+		});
+		
+		// Send protocol parameters to operator (via IPC) - second frame after status 101
+		const frameMsg = createFrame(id, {
+			final: false,
+			keepAlive: true,
+			initialCredits,
+			maxChunkSize,
+			maxBytesPerSecond: connState.maxBytesPerSecond,
+			idleTimeout: connState.idleTimeout,
+			maxBufferSize: connState.maxBufferSize
+		});
+		await this.ipcConn.writeMessage(frameMsg);
 	}
-
+	
 	/**
-	 * Handle WebSocket send from applet
+	 * Close bidirectional connection
 	 */
-	async handleAppletWebSocketSend (id, data) {
-		const { opcode, data: wsData } = data;
+	closeBidiConnection (id, reason) {
+		const conn = this.bidiConnections.get(id);
+		if (!conn) return;
 		
-		// Send WebSocket data via IPC
-		const wsMsg = createWebSocketData(id, opcode, wsData);
-		await this.ipcConn.writeMessage(wsMsg, wsData);
+		console.log(`[${this.processId}] Closing bidi connection ${id}: ${reason}`);
 		
-		console.log(`[${this.processId}] WebSocket send for ${id}, opcode: ${opcode}`);
-	}
-
-	/**
-	 * Handle WebSocket close from applet
-	 */
-	async handleAppletWebSocketClose (id, data, requestInfo) {
-		const { code, reason } = data;
+		// Terminate worker
+		conn.worker.terminate();
 		
-		// Send WebSocket close via IPC
-		const closeMsg = createWebSocketClose(id, code, reason);
-		await this.ipcConn.writeMessage(closeMsg);
-		
-		clearTimeout(requestInfo.timeout);
+		// Cleanup
+		this.bidiConnections.delete(id);
 		this.activeRequests.delete(id);
 		this.activeWebSockets.delete(id);
-		requestInfo.worker.terminate();
+	}
+	
+	/**
+	 * Handle inbound frame from operator (client → applet)
+	 */
+	async handleOperatorBidiFrame (id, frameData, final) {
+		const conn = this.bidiConnections.get(id);
+		if (!conn) return;
 		
-		console.log(`[${this.processId}] WebSocket close for ${id}, code: ${code}, reason: ${reason}`);
+		const chunkSize = frameData?.length || 0;
+		
+		// Check if client has sufficient credits to send to applet
+		if (conn.inboundCredits < chunkSize) {
+			// Insufficient credits - buffer the chunk
+			conn.inboundBuffer.push({ frameData, final });
+			conn.totalBuffered.inbound += chunkSize;
+			
+			// Check buffer limit
+			if (conn.totalBuffered.inbound > conn.maxBufferSize) {
+				console.warn(`[${this.processId}] Bidi ${id} inbound buffer exceeded, terminating`);
+				this.closeBidiConnection(id, 'Buffer overflow');
+				return;
+			}
+			
+			return;
+		}
+		
+		// Consume credits (byte-based)
+		conn.inboundCredits -= chunkSize;
+		
+		// Forward to applet
+		conn.worker.postMessage({
+			type: 'frame',
+			id,
+			mode: 'bidi',
+			data: frameData,
+			final,
+			keepAlive: true
+		});
+		
+		// Applet implicitly grants credits by processing chunk
+		// Grant credits back when applet finishes processing
+		conn.inboundCredits = Math.min(
+			conn.inboundCredits + chunkSize,
+			conn.maxCredits
+		);
+		
+		// Update last activity
+		conn.lastActivity = Date.now();
+	}
+	
+	/**
+	 * Flush frame buffer to operator with chunking optimization
+	 */
+	async flushFrameBuffer (id, requestInfo, final) {
+		if (!requestInfo.frameBuffer || requestInfo.frameBuffer.length === 0) {
+			if (final) {
+				// Send final frame signal even if no data
+				const frameMsg = createFrame(id, { data: null, final: true });
+				await this.ipcConn.writeMessage(frameMsg);
+			}
+			return;
+		}
+		
+		// Concatenate accumulated frame chunks
+		const totalSize = requestInfo.totalBuffered;
+		const combined = new Uint8Array(totalSize);
+		let offset = 0;
+		
+		for (const chunk of requestInfo.frameBuffer) {
+			combined.set(chunk, offset);
+			offset += chunk.length;
+		}
+		
+		// Clear buffer
+		requestInfo.frameBuffer = [];
+		requestInfo.totalBuffered = 0;
+		
+		// Apply responder's chunking logic to forward to operator
+		if (totalSize < this.chunkingConfig.maxDirectWrite) {
+			// Small: Direct write
+			const frameMsg = createFrame(id, { data: combined, final });
+			const startTime = performance.now();
+			await this.ipcConn.writeMessage(frameMsg, combined);
+			const writeDuration = performance.now() - startTime;
+			this.detectBackpressure(writeDuration);
+		} else if (totalSize < this.chunkingConfig.autoChunkThresh) {
+			// Medium: Direct write with backpressure detection
+			const frameMsg = createFrame(id, { data: combined, final });
+			const startTime = performance.now();
+			await this.ipcConn.writeMessage(frameMsg, combined);
+			const writeDuration = performance.now() - startTime;
+			this.detectBackpressure(writeDuration);
+		} else {
+			// Large: Send in chunks to operator
+			await this.sendInChunks(id, combined, final);
+		}
+	}
+	
+	/**
+	 * Send data in chunks to operator
+	 */
+	async sendInChunks (id, data, final) {
+		const { chunkSize } = this.chunkingConfig;
+		let offset = 0;
+		
+		while (offset < data.length) {
+			const end = Math.min(offset + chunkSize, data.length);
+			const chunk = data.slice(offset, end);
+			const isLast = (end === data.length) && final;
+			
+			const frameMsg = createFrame(id, { data: chunk, final: isLast });
+			const startTime = performance.now();
+			await this.ipcConn.writeMessage(frameMsg, chunk);
+			const writeDuration = performance.now() - startTime;
+			
+			this.detectBackpressure(writeDuration);
+			
+			offset = end;
+			
+			// Yield to event loop
+			await new Promise(resolve => setTimeout(resolve, 0));
+		}
 	}
 
 	/**
