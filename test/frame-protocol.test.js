@@ -17,10 +17,10 @@ Deno.test('createFrame - first frame with mode, status, headers', () => {
 		final: false,
 		keepAlive: false
 	});
-	
+
 	assertEquals(frame.at(0), MessageType.WEB_FRAME);
 	assertEquals(frame.at('id'), 'req-123');
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), 'response');
 	assertEquals(fields.at('status'), 200);
@@ -35,10 +35,10 @@ Deno.test('createFrame - subsequent frame without mode/status/headers', () => {
 		data: new Uint8Array([4, 5, 6]),
 		final: false
 	});
-	
+
 	assertEquals(frame.at(0), MessageType.WEB_FRAME);
 	assertEquals(frame.at('id'), 'req-123');
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), undefined);
 	assertEquals(fields.at('status'), undefined);
@@ -54,7 +54,7 @@ Deno.test('createFrame - final frame with keepAlive change', () => {
 		final: true,
 		keepAlive: false
 	});
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('final'), true);
 	assertEquals(fields.at('keepAlive'), false);
@@ -69,7 +69,7 @@ Deno.test('createFrame - bidi mode with protocol parameters', () => {
 		final: false,
 		keepAlive: true
 	});
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), 'bidi');
 	assertEquals(fields.at('status'), 101);
@@ -87,7 +87,7 @@ Deno.test('createFrame - protocol parameters frame', () => {
 		idleTimeout: 60,
 		maxBufferSize: 1048576
 	});
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('initialCredits'), 655360);
 	assertEquals(fields.at('maxChunkSize'), 65536);
@@ -105,7 +105,7 @@ Deno.test('createFrame - stream mode first frame', () => {
 		final: false,
 		keepAlive: true
 	});
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), 'stream');
 	assertEquals(fields.at('keepAlive'), true);
@@ -117,7 +117,7 @@ Deno.test('createFrame - null data with final true', () => {
 		data: null,
 		final: true
 	});
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('dataSize'), 0);
 	assertEquals(fields.at('final'), true);
@@ -125,10 +125,10 @@ Deno.test('createFrame - null data with final true', () => {
 
 Deno.test('createError - basic error message', () => {
 	const error = createError('req-123', 500, 'Internal Server Error');
-	
+
 	assertEquals(error.at(0), MessageType.WEB_ERROR);
 	assertEquals(error.at('id'), 'req-123');
-	
+
 	const fields = error.at(1);
 	assertEquals(fields.at('status'), 500);
 	assertEquals(fields.at('message'), 'Internal Server Error');
@@ -137,7 +137,7 @@ Deno.test('createError - basic error message', () => {
 
 Deno.test('createError - error with details', () => {
 	const error = createError('req-123', 404, 'Not Found', 'File does not exist');
-	
+
 	const fields = error.at(1);
 	assertEquals(fields.at('status'), 404);
 	assertEquals(fields.at('message'), 'Not Found');
@@ -146,7 +146,7 @@ Deno.test('createError - error with details', () => {
 
 Deno.test('createFrame - options object defaults', () => {
 	const frame = createFrame('req-123', {});
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('dataSize'), 0);
 	assertEquals(fields.at('final'), false);
@@ -157,12 +157,12 @@ Deno.test('createFrame - options object defaults', () => {
 Deno.test('createFrame - large data chunk', () => {
 	const largeData = new Uint8Array(65536); // 64KB
 	largeData.fill(42);
-	
+
 	const frame = createFrame('req-123', {
 		data: largeData,
 		final: true
 	});
-	
+
 	const fields = frame.at(1);
 	assertEquals(fields.at('dataSize'), 65536);
 	assertEquals(fields.at('final'), true);

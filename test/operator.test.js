@@ -126,32 +126,32 @@ Deno.test("OperatorProcess - creates instance", () => {
 Deno.test("OperatorProcess - initializes logger", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	
+
 	operator.initializeLogger();
-	
+
 	assertExists(operator.logger);
 });
 
 Deno.test("OperatorProcess - initializes router", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	
+
 	// Set up minimal config data
 	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeRouter();
-	
+
 	assertExists(operator.router);
 });
 
 Deno.test("OperatorProcess - initializes process manager", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	
+
 	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeProcessManager();
-	
+
 	assertExists(operator.processManager);
 });
 
@@ -299,7 +299,7 @@ Deno.test("OperatorProcess - converts multi-valued NANOS headers", () => {
 	const headers = operator.convertHeaders(nanosHeaders);
 
 	assertEquals(headers.get('content-type'), 'application/json');
-	
+
 	// Get all Set-Cookie values
 	const setCookieValues = headers.getSetCookie();
 	assertEquals(setCookieValues.length, 2);
@@ -337,7 +337,7 @@ Deno.test("OperatorProcess - handleFrameResponse creates proper Response", async
 		id: 'test-request',
 		fields: new NANOS({ mode: 'response', status: 200 }),
 	};
-	
+
 	const headers = new NANOS({ 'content-type': 'text/plain' });
 	firstFrame.fields.push({ headers: headers, final: true, keepAlive: false });
 
@@ -347,7 +347,7 @@ Deno.test("OperatorProcess - handleFrameResponse creates proper Response", async
 
 	assertEquals(response.status, 200);
 	assertEquals(response.headers.get('content-type'), 'text/plain');
-	
+
 	const body = await response.text();
 	assertEquals(body, 'Hello, World!');
 });
@@ -365,9 +365,9 @@ Deno.test("OperatorProcess - shutdown sets flag", async () => {
 
 	// Start shutdown (will fail without servers running, but flag should be set)
 	const shutdownPromise = operator.shutdown();
-	
+
 	assertEquals(operator.isShuttingDown, true);
-	
+
 	await shutdownPromise;
 });
 

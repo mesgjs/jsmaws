@@ -25,10 +25,10 @@ export class Configuration {
 			this.config.setOpts({ transform: true });
 			this.config.push(config);
 		}
-		
+
 		this.processType = null; // 'operator', 'router', 'responder'
 		this.processId = null;
-		
+
 		// Cached/computed values (invalidated on config update)
 		this._routing = null;
 		this._pools = null;
@@ -47,7 +47,7 @@ export class Configuration {
 			const rootSpec = this.config.at('root', '');
 			const appRootSpec = this.config.at('appRoot', '');
 			const extensionsSpec = this.config.at('extensions', new NANOS(['.esm.js', '.js']));
-			
+
 			this._routing = {
 				root: rootSpec.endsWith('/') ? rootSpec : (rootSpec ? rootSpec + '/' : ''),
 				appRoot: appRootSpec.endsWith('/') ? appRootSpec : (appRootSpec ? appRootSpec + '/' : ''),
@@ -171,7 +171,7 @@ export class Configuration {
 			this.config.setOpts({ transform: true });
 			this.config.push(newConfig);
 		}
-		
+
 		// Invalidate all cached values
 		this._routing = null;
 		this._pools = null;
@@ -188,7 +188,7 @@ export class Configuration {
 	mergeConfig (configUpdate) {
 		// Merge fields from update into existing config
 		this.config.fromEntries(configUpdate.namedEntries());
-		
+
 		// Invalidate all cached values
 		this._routing = null;
 		this._pools = null;
@@ -215,7 +215,7 @@ export class Configuration {
 	 */
 	set (name, value) {
 		this.config.set(name, value);
-		
+
 		// Invalidate caches that might be affected
 		// (Could be more granular, but simple invalidation is safer)
 		this._routing = null;

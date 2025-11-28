@@ -62,7 +62,7 @@ class ConfigMonitor {
 				if (!this.isMonitoring) {
 					break;
 				}
-				
+
 				// Only process modify events
 				if (event.kind === 'modify') {
 					// Debounce rapid changes

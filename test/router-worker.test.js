@@ -419,14 +419,14 @@ Deno.test("Route - match includes filesystem verification", async () => {
 	await Deno.mkdir(testDir);
 	const testFile = `${testDir}/myapp.esm.js`;
 	await Deno.writeTextFile(testFile, '// test');
-	
+
 	try {
 		const config = new Configuration(new NANOS({
 			root: tempDir,
 			fsRouting: true
 		}));
 		const route = new Route(spec, config);
-		
+
 		const match = await route.match('/test/myapp', 'GET');
 		assertExists(match);
 		// Should return full absolute path for responder to load
@@ -439,14 +439,14 @@ Deno.test("Route - match includes filesystem verification", async () => {
 Deno.test("Route - match returns null for non-existent file", async () => {
 	const spec = new NANOS({ path: 'test/@*' });
 	const tempDir = await Deno.makeTempDir();
-	
+
 	try {
 		const config = new Configuration(new NANOS({ 
 			root: tempDir,
 			fsRouting: true 
 		}));
 		const route = new Route(spec, config);
-		
+
 		const match = await route.match('/test/nonexistent', 'GET');
 		assertEquals(match, null);
 	} finally {
@@ -462,7 +462,7 @@ Deno.test("Route - match tries extensions in order", async () => {
 	await Deno.mkdir(testDir);
 	const testFile = `${testDir}/myapp.js`; // Only .js exists
 	await Deno.writeTextFile(testFile, '// test');
-	
+
 	try {
 		const config = new Configuration(new NANOS({
 			root: tempDir,
@@ -470,7 +470,7 @@ Deno.test("Route - match tries extensions in order", async () => {
 			fsRouting: true
 		}));
 		const route = new Route(spec, config);
-		
+
 		const match = await route.match('/test/myapp', 'GET');
 		assertExists(match);
 		// Should return full absolute path
@@ -488,14 +488,14 @@ Deno.test("Route - match skips directories", async () => {
 	await Deno.mkdir(testDir);
 	const dirPath = `${testDir}/myapp.esm.js`;
 	await Deno.mkdir(dirPath);
-	
+
 	try {
 		const config = new Configuration(new NANOS({
 			root: tempDir,
 			fsRouting: true
 		}));
 		const route = new Route(spec, config);
-		
+
 		const match = await route.match('/test/myapp', 'GET');
 		assertEquals(match, null); // Should not match directory
 	} finally {
@@ -510,14 +510,14 @@ Deno.test("Route - match uses local root if specified", async () => {
 	await Deno.mkdir(customRoot, { recursive: true });
 	const testFile = `${customRoot}/myapp.esm.js`;
 	await Deno.writeTextFile(testFile, '// test');
-	
+
 	try {
 		const config = new Configuration(new NANOS({
 			root: tempDir,
 			fsRouting: true
 		}));
 		const route = new Route(spec, config);
-		
+
 		const match = await route.match('/test/myapp', 'GET');
 		// TEST IS FAILING (match is null - probably (incorrectly) trying to FS verify with a pre-path on a local root (not the defined behavior))
 		assertExists(match);
@@ -577,7 +577,7 @@ Deno.test("Router - findRoute finds matching route", async () => {
 	]);
 	const config = new Configuration(new NANOS({ routes }));
 	const router = new Router(config);
-	
+
 	const result = await router.findRoute('/api/users', 'GET');
 
 	assertExists(result);
@@ -592,7 +592,7 @@ Deno.test("Router - findRoute returns first matching route", async () => {
 	]);
 	const config = new Configuration(new NANOS({ routes }));
 	const router = new Router(config);
-	
+
 	const result = await router.findRoute('/api/123', 'GET');
 
 	assertExists(result);
@@ -605,7 +605,7 @@ Deno.test("Router - findRoute returns null for no match", async () => {
 	]);
 	const config = new Configuration(new NANOS({ routes }));
 	const router = new Router(config);
-	
+
 	const result = await router.findRoute('/api/posts', 'GET');
 
 	assertEquals(result, null);
@@ -617,7 +617,7 @@ Deno.test("Router - findRoute resolves relative virtual app paths", async () => 
 	]);
 	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
 	const router = new Router(config);
-	
+
 	const result = await router.findRoute('/api/users', 'GET');
 
 	assertExists(result);
@@ -630,7 +630,7 @@ Deno.test("Router - findRoute does not modify absolute paths", async () => {
 	]);
 	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
 	const router = new Router(config);
-	
+
 	const result = await router.findRoute('/api/users', 'GET');
 
 	assertExists(result);
@@ -643,7 +643,7 @@ Deno.test("Router - findRoute does not modify @static", async () => {
 	]);
 	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
 	const router = new Router(config);
-	
+
 	const result = await router.findRoute('/static/file.txt', 'GET');
 
 	assertExists(result);
@@ -656,7 +656,7 @@ Deno.test("Router - findRoute does not modify URL paths", async () => {
 	]);
 	const config = new Configuration(new NANOS({ routes, appRoot: '/apps' }));
 	const router = new Router(config);
-	
+
 	const result = await router.findRoute('/api/users', 'GET');
 
 	assertExists(result);
@@ -699,14 +699,14 @@ Deno.test("Router - findRoute verifies filesystem routes", async () => {
 	await Deno.mkdir(testDir);
 	const testFile = `${testDir}/myapp.esm.js`;
 	await Deno.writeTextFile(testFile, '// test');
-	
+
 	try {
 		const routes = new NANOS([
 			new NANOS({ path: 'test/@*' })
 		]);
 		const config = new Configuration(new NANOS({ routes, root: tempDir, fsRouting: true }));
 		const router = new Router(config);
-		
+
 		const result = await router.findRoute('/test/myapp', 'GET');
 
 		assertExists(result);
@@ -719,14 +719,14 @@ Deno.test("Router - findRoute verifies filesystem routes", async () => {
 
 Deno.test("Router - findRoute returns null for non-existent filesystem route", async () => {
 	const tempDir = await Deno.makeTempDir();
-	
+
 	try {
 		const routes = new NANOS([
 			new NANOS({ path: 'test/@*' })
 		]);
 		const config = new Configuration(new NANOS({ routes, root: tempDir, fsRouting: true }));
 		const router = new Router(config);
-		
+
 		const result = await router.findRoute('/test/nonexistent', 'GET');
 
 		assertEquals(result, null);
@@ -739,7 +739,7 @@ Deno.test("Router - findRoute continues to next route if filesystem verification
 	const tempDir = await Deno.makeTempDir();
 	const testFile = `${tempDir}/fallback.esm.js`;
 	await Deno.writeTextFile(testFile, '// test');
-	
+
 	try {
 		const routes = new NANOS([
 			new NANOS({ path: 'test/@*' }), // Filesystem route
@@ -752,7 +752,7 @@ Deno.test("Router - findRoute continues to next route if filesystem verification
 			fsRouting: true 
 		}));
 		const router = new Router(config);
-		
+
 		const result = await router.findRoute('/test/nonexistent', 'GET');
 
 		assertExists(result);

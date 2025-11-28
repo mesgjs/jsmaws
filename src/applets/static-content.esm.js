@@ -1,0 +1,315 @@
+/**
+ * JSMAWS Built-in Static File Applet
+ * Serves static files from the configured root directory
+ * 
+ * Features:
+ * - Path traversal prevention via Deno.realPath() validation
+ * - HTTP Range request support for resumable downloads
+ * - Proper MIME type detection from file extension
+ * - Chunked responses for large files with backpressure handling
+ * - Security: Ensures resolved path stays within configured root
+ * 
+ * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ */
+
+/**
+ * Send 403 Forbidden response
+ */
+function send403 (id) {
+	self.postMessage({
+		type: 'frame',
+		id,
+		mode: 'response',
+		status: 403,
+		headers: { 'Content-Type': 'text/plain' },
+		data: new TextEncoder().encode('Access denied'),
+		final: true,
+		keepAlive: false
+	});
+	self.close();
+}
+
+/**
+ * Send 404 Not Found response
+ */
+function send404 (id) {
+	self.postMessage({
+		type: 'frame',
+		id,
+		mode: 'response',
+		status: 404,
+		headers: { 'Content-Type': 'text/plain' },
+		data: new TextEncoder().encode('File not found'),
+		final: true,
+		keepAlive: false
+	});
+	self.close();
+}
+
+/**
+ * Send 416 Range Not Satisfiable response
+ */
+function send416 (id, fileSize) {
+	self.postMessage({
+		type: 'frame',
+		id,
+		mode: 'response',
+		status: 416,
+		headers: {
+			'Content-Range': `bytes */${fileSize}`
+		},
+		data: null,
+		final: true,
+		keepAlive: false
+	});
+	self.close();
+}
+
+/**
+ * Determine MIME type from file extension using first-match strategy
+ */
+function getMimeType (filePath, mimeTypes, explicitMimeType) {
+	// Use explicit MIME type if provided
+	if (explicitMimeType) {
+		return explicitMimeType;
+	}
+
+	// First-match strategy: check each extension in order
+	for (const [ext, mimeType] of Object.entries(mimeTypes)) {
+		if (filePath.endsWith(ext)) {
+			return mimeType;
+		}
+	}
+
+	// Default fallback
+	return 'application/octet-stream';
+}
+
+/**
+ * Handle full file request (no Range header)
+ */
+async function handleFullRequest (id, resolvedPath, fileSize, contentType, chunkSize) {
+	const file = await Deno.open(resolvedPath, { read: true });
+
+	// For small files (< chunkSize), send complete frame in single message
+	if (fileSize < chunkSize) {
+		const buffer = new Uint8Array(fileSize);
+		await file.read(buffer);
+		file.close();
+
+		self.postMessage({
+			type: 'frame',
+			id,
+			mode: 'response',
+			status: 200,
+			headers: {
+				'Content-Type': contentType,
+				'Content-Length': fileSize.toString(),
+				'Accept-Ranges': 'bytes'
+			},
+			data: buffer,
+			final: true,
+			keepAlive: false
+		});
+		self.close();
+		return;
+	}
+
+	// For larger files, send first frame message with headers
+	self.postMessage({
+		type: 'frame',
+		id,
+		mode: 'response',
+		status: 200,
+		headers: {
+			'Content-Type': contentType,
+			'Content-Length': fileSize.toString(),
+			'Accept-Ranges': 'bytes'
+		},
+		data: null,
+		keepAlive: false
+		// final omitted (defaults to false)
+	});
+
+	// Send file data chunks via frame messages
+	const buffer = new Uint8Array(chunkSize);
+
+	while (true) {
+		const bytesRead = await file.read(buffer);
+		if (bytesRead === null) break;
+
+		const chunk = buffer.slice(0, bytesRead);
+		const isLastChunk = bytesRead < chunkSize;
+
+		self.postMessage({
+			type: 'frame',
+			id,
+			data: chunk,
+			...(isLastChunk && { final: true })
+			// mode omitted (already established)
+			// keepAlive omitted (sticky from first frame)
+			// final omitted unless last chunk (defaults to false)
+		});
+
+		if (isLastChunk) break;
+
+		// Yield to event loop
+		await new Promise(resolve => setTimeout(resolve, 0));
+	}
+
+	// Send final frame message if file size was exact multiple of chunkSize
+	if (fileSize % chunkSize === 0) {
+		self.postMessage({
+			type: 'frame',
+			id,
+			data: null,
+			final: true
+		});
+	}
+
+	file.close();
+	self.close();
+}
+
+/**
+ * Handle Range request for resumable downloads
+ */
+async function handleRangeRequest (id, resolvedPath, fileSize, rangeHeader, contentType, chunkSize) {
+	// Parse Range header: "bytes=start-end"
+	const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+	if (!match) {
+		send416(id, fileSize);
+		return;
+	}
+
+	const start = parseInt(match[1]);
+	const end = match[2] ? parseInt(match[2]) : fileSize - 1;
+
+	if (start >= fileSize || end >= fileSize || start > end) {
+		send416(id, fileSize);
+		return;
+	}
+
+	const rangeSize = end - start + 1;
+	const file = await Deno.open(resolvedPath, { read: true });
+	await file.seek(start, Deno.SeekMode.Start);
+
+	// Send first frame message with partial content headers
+	self.postMessage({
+		type: 'frame',
+		id,
+		mode: 'response',
+		status: 206,
+		headers: {
+			'Content-Type': contentType,
+			'Content-Length': rangeSize.toString(),
+			'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+			'Accept-Ranges': 'bytes'
+		},
+		data: null,
+		keepAlive: false
+		// final omitted (defaults to false)
+	});
+
+	// Send range data chunks via frame messages
+	const buffer = new Uint8Array(chunkSize);
+	let remaining = rangeSize;
+
+	while (remaining > 0) {
+		const toRead = Math.min(chunkSize, remaining);
+		const bytesRead = await file.read(buffer.subarray(0, toRead));
+		if (bytesRead === null) break;
+
+		const chunk = buffer.slice(0, bytesRead);
+		remaining -= bytesRead;
+		const isLastChunk = remaining === 0;
+
+		self.postMessage({
+			type: 'frame',
+			id,
+			data: chunk,
+			...(isLastChunk && { final: true })
+			// mode omitted (already established)
+			// keepAlive omitted (sticky from first frame)
+			// final omitted unless last chunk (defaults to false)
+		});
+
+		if (isLastChunk) break;
+
+		await new Promise(resolve => setTimeout(resolve, 0));
+	}
+
+	// Send final frame message if needed
+	if (rangeSize % chunkSize === 0) {
+		self.postMessage({
+			type: 'frame',
+			id,
+			data: null,
+			final: true
+		});
+	}
+
+	file.close();
+	self.close();
+}
+
+/**
+ * Main message handler
+ */
+self.onmessage = async (event) => {
+	const { type, id, path, headers, params, tail, config } = event.data;
+
+	if (type !== 'request') return;
+
+	try {
+		// Validate that root was provided
+		const root = config?.root;
+		if (!root) {
+			send404(id);
+			return;
+		}
+
+		// Get configuration
+		const mimeTypes = config?.mimeTypes || {};
+		const explicitMimeType = config?.mimeType || null;
+		const chunkSize = event.data.maxChunkSize || 65536; // Use maxChunkSize from request
+
+		// Construct file path from tail
+		const filePath = `${root}${tail}`;
+
+		// Security: Prevent directory traversal
+		const resolvedPath = await Deno.realPath(filePath).catch(() => null);
+		if (!resolvedPath || !resolvedPath.startsWith(root)) {
+			send403(id);
+			return;
+		}
+
+		// Check if file exists and is readable
+		const stat = await Deno.stat(resolvedPath).catch(() => null);
+
+		if (!stat || !stat.isFile) {
+			send404(id);
+			return;
+		}
+
+		// Determine MIME type from extension (first-match strategy)
+		const contentType = getMimeType(filePath, mimeTypes, explicitMimeType);
+
+		// Handle Range requests for resumable downloads
+		const rangeHeader = headers['Range'] || headers['range'];
+		if (rangeHeader) {
+			await handleRangeRequest(id, resolvedPath, stat.size, rangeHeader, contentType, chunkSize);
+		} else {
+			await handleFullRequest(id, resolvedPath, stat.size, contentType, chunkSize);
+		}
+
+	} catch (error) {
+		self.postMessage({
+			type: 'error',
+			id,
+			error: error.message,
+			stack: error.stack
+		});
+		self.close();
+	}
+};

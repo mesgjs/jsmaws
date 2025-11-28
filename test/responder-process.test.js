@@ -149,7 +149,7 @@ function createMockConfig () {
  */
 Deno.test('ResponderProcess - initialization', () => {
 	const process = new ResponderProcess('test-proc-1', 'standard');
-	
+
 	assertEquals(process.processId, 'test-proc-1');
 	assertEquals(process.poolName, 'standard');
 	assertExists(process.activeRequests);
@@ -163,14 +163,14 @@ Deno.test('ResponderProcess - initialization', () => {
 Deno.test('ResponderProcess - configuration update', async () => {
 	const process = new ResponderProcess('test-proc-2', 'standard');
 	process.config = createMockConfig();
-	
+
 	const configFields = new NANOS({
 		maxDirectWrite: 32768,
 		autoChunkThresh: 5242880
 	});
-	
+
 	await process.handleConfigUpdate(configFields);
-	
+
 	assertEquals(process.chunkingConfig.maxDirectWrite, 65536); // From config object
 	assertEquals(process.maxConcurrentRequests, 10); // From pool config
 });
@@ -180,10 +180,10 @@ Deno.test('ResponderProcess - configuration update', async () => {
  */
 Deno.test('ResponderProcess - spawn applet worker', () => {
 	const process = new ResponderProcess('test-proc-3', 'standard');
-	
+
 	const originalWorker = globalThis.Worker;
 	globalThis.Worker = MockWorker;
-	
+
 	try {
 		const worker = process.spawnAppletWorker('/path/to/applet.esm.js');
 		assertExists(worker);
@@ -202,13 +202,13 @@ Deno.test('ResponderProcess - handle first frame', async () => {
 	const process = new ResponderProcess('test-proc-4', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const requestInfo = {
 		worker: new MockWorker('/test.js', {}),
 		timeout: setTimeout(() => {}, 1000)
 	};
 	process.activeRequests.set('req-1', requestInfo);
-	
+
 	const firstFrame = {
 		mode: 'response',
 		status: 200,
@@ -217,19 +217,19 @@ Deno.test('ResponderProcess - handle first frame', async () => {
 		final: false,
 		keepAlive: false
 	};
-	
+
 	await process.handleFirstFrame('req-1', firstFrame, requestInfo);
-	
+
 	assertEquals(requestInfo.mode, 'response');
 	assertEquals(requestInfo.keepAlive, false);
 	assertExists(requestInfo.frameBuffer);
-	
+
 	// Should have sent response headers to operator
 	const lastMsg = process.ipcConn.getLastMessage();
 	assertExists(lastMsg);
 	// Message structure: [(WRES id=req-1 [status=200 ...])]
 	assertEquals(lastMsg.msg.at([1, 'status']), 200);
-	
+
 	clearTimeout(requestInfo.timeout);
 });
 
@@ -240,7 +240,7 @@ Deno.test('ResponderProcess - handle subsequent frames', async () => {
 	const process = new ResponderProcess('test-proc-5', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const requestInfo = {
 		worker: new MockWorker('/test.js', {}),
 		timeout: setTimeout(() => {}, 1000),
@@ -250,22 +250,22 @@ Deno.test('ResponderProcess - handle subsequent frames', async () => {
 		totalBuffered: 0
 	};
 	process.activeRequests.set('req-2', requestInfo);
-	
+
 	// Send data chunk
 	const chunk1 = new TextEncoder().encode('chunk1');
 	await process.handleFrame('req-2', { data: chunk1, final: false }, requestInfo);
-	
+
 	assertEquals(requestInfo.frameBuffer.length, 1);
 	assertEquals(requestInfo.totalBuffered, chunk1.length);
-	
+
 	// Send final chunk
 	const chunk2 = new TextEncoder().encode('chunk2');
 	await process.handleFrame('req-2', { data: chunk2, final: true }, requestInfo);
-	
+
 	// Should have flushed buffer and cleaned up
 	assertEquals(process.activeRequests.has('req-2'), false);
 	assert(requestInfo.worker.terminated);
-	
+
 	clearTimeout(requestInfo.timeout);
 });
 
@@ -276,7 +276,7 @@ Deno.test('ResponderProcess - sticky keepAlive state', async () => {
 	const process = new ResponderProcess('test-proc-6', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const requestInfo = {
 		worker: new MockWorker('/test.js', {}),
 		timeout: setTimeout(() => {}, 1000),
@@ -286,21 +286,21 @@ Deno.test('ResponderProcess - sticky keepAlive state', async () => {
 		totalBuffered: 0
 	};
 	process.activeRequests.set('req-3', requestInfo);
-	
+
 	// Send frame without keepAlive (should inherit sticky state)
 	const chunk = new TextEncoder().encode('data');
 	await process.handleFrame('req-3', { data: chunk, final: true }, requestInfo);
-	
+
 	// Should still be alive (keepAlive: true is sticky)
 	assertEquals(process.activeRequests.has('req-3'), true);
 	assertEquals(requestInfo.worker.terminated, false);
-	
+
 	// Now explicitly close
 	await process.handleFrame('req-3', { data: null, final: true, keepAlive: false }, requestInfo);
-	
+
 	// Should be cleaned up
 	assertEquals(process.activeRequests.has('req-3'), false);
-	
+
 	clearTimeout(requestInfo.timeout);
 });
 
@@ -311,7 +311,7 @@ Deno.test('ResponderProcess - reject oversized chunks', async () => {
 	const process = new ResponderProcess('test-proc-7', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const requestInfo = {
 		worker: new MockWorker('/test.js', {}),
 		timeout: setTimeout(() => {}, 1000),
@@ -321,17 +321,17 @@ Deno.test('ResponderProcess - reject oversized chunks', async () => {
 		totalBuffered: 0
 	};
 	process.activeRequests.set('req-4', requestInfo);
-	
+
 	// Send oversized chunk (> maxChunkSize)
 	const oversizedChunk = new Uint8Array(process.chunkingConfig.chunkSize + 1);
 	await process.handleFrame('req-4', { data: oversizedChunk, final: false }, requestInfo);
-	
+
 	// Should have terminated applet and sent error
 	assertEquals(process.activeRequests.has('req-4'), false);
-	
+
 	const lastMsg = process.ipcConn.getLastMessage();
 	assertEquals(lastMsg.msg.at([1, 'status']), 500);
-	
+
 	clearTimeout(requestInfo.timeout);
 });
 
@@ -342,7 +342,7 @@ Deno.test('ResponderProcess - auto-flush on threshold', async () => {
 	const process = new ResponderProcess('test-proc-8', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const requestInfo = {
 		worker: new MockWorker('/test.js', {}),
 		timeout: setTimeout(() => {}, 1000),
@@ -352,19 +352,19 @@ Deno.test('ResponderProcess - auto-flush on threshold', async () => {
 		totalBuffered: 0
 	};
 	process.activeRequests.set('req-5', requestInfo);
-	
+
 	// Send chunk that exceeds autoChunkThresh
 	const largeChunk = new Uint8Array(process.chunkingConfig.autoChunkThresh + 1);
 	await process.handleFrame('req-5', { data: largeChunk, final: false }, requestInfo);
-	
+
 	// Should have flushed buffer
 	assertEquals(requestInfo.frameBuffer.length, 0);
 	assertEquals(requestInfo.totalBuffered, 0);
-	
+
 	// Should have sent frame to operator
 	const messages = process.ipcConn.messages;
 	assert(messages.length > 0);
-	
+
 	clearTimeout(requestInfo.timeout);
 	process.activeRequests.delete('req-5');
 });
@@ -376,7 +376,7 @@ Deno.test('ResponderProcess - initialize bidi connection', async () => {
 	const process = new ResponderProcess('test-proc-9', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const worker = new MockWorker('/test.js', {});
 	const requestInfo = {
 		worker,
@@ -385,26 +385,26 @@ Deno.test('ResponderProcess - initialize bidi connection', async () => {
 		keepAlive: true
 	};
 	process.activeRequests.set('req-6', requestInfo);
-	
+
 	await process.initializeBidiConnection('req-6', requestInfo);
-	
+
 	// Should have created connection state
 	const conn = process.bidiConnections.get('req-6');
 	assertExists(conn);
 	assertEquals(conn.outboundCredits, 10 * 65536); // initialCredits * maxChunkSize
 	assertEquals(conn.inboundCredits, 10 * 65536);
-	
+
 	// Should have sent protocol parameters to applet
 	const appletMsg = worker.messages[worker.messages.length - 1];
 	assertEquals(appletMsg.type, 'frame');
 	assertEquals(appletMsg.mode, 'bidi');
 	assertExists(appletMsg.initialCredits);
 	assertExists(appletMsg.maxChunkSize);
-	
+
 	// Should have sent protocol parameters to operator
 	const operatorMsg = process.ipcConn.getLastMessage();
 	assertExists(operatorMsg);
-	
+
 	clearTimeout(requestInfo.timeout);
 	process.bidiConnections.delete('req-6');
 });
@@ -416,7 +416,7 @@ Deno.test('ResponderProcess - bidi frame with credits', async () => {
 	const process = new ResponderProcess('test-proc-10', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const worker = new MockWorker('/test.js', {});
 	const requestInfo = {
 		worker,
@@ -424,7 +424,7 @@ Deno.test('ResponderProcess - bidi frame with credits', async () => {
 		mode: 'bidi',
 		keepAlive: true
 	};
-	
+
 	const conn = {
 		worker,
 		outboundCredits: 65536,
@@ -437,17 +437,17 @@ Deno.test('ResponderProcess - bidi frame with credits', async () => {
 		lastActivity: Date.now()
 	};
 	process.bidiConnections.set('req-7', conn);
-	
+
 	const data = new TextEncoder().encode('test data');
 	await process.handleBidiFrame('req-7', data, true, undefined, requestInfo);
-	
+
 	// Should have consumed credits
 	assertEquals(conn.outboundCredits, 65536 - data.length);
-	
+
 	// Should have forwarded to operator
 	const lastMsg = process.ipcConn.getLastMessage();
 	assertExists(lastMsg);
-	
+
 	clearTimeout(requestInfo.timeout);
 	process.bidiConnections.delete('req-7');
 });
@@ -459,7 +459,7 @@ Deno.test('ResponderProcess - bidi frame buffering', async () => {
 	const process = new ResponderProcess('test-proc-11', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const worker = new MockWorker('/test.js', {});
 	const requestInfo = {
 		worker,
@@ -467,7 +467,7 @@ Deno.test('ResponderProcess - bidi frame buffering', async () => {
 		mode: 'bidi',
 		keepAlive: true
 	};
-	
+
 	const conn = {
 		worker,
 		outboundCredits: 10, // Very low credits
@@ -480,17 +480,17 @@ Deno.test('ResponderProcess - bidi frame buffering', async () => {
 		lastActivity: Date.now()
 	};
 	process.bidiConnections.set('req-8', conn);
-	
+
 	const data = new TextEncoder().encode('test data that exceeds credits');
 	const initialMsgCount = process.ipcConn.messages.length;
-	
+
 	await process.handleBidiFrame('req-8', data, true, undefined, requestInfo);
-	
+
 	// Should have buffered (not forwarded)
 	assertEquals(conn.outboundBuffer.length, 1);
 	assertEquals(conn.totalBuffered.outbound, data.length);
 	assertEquals(process.ipcConn.messages.length, initialMsgCount); // No new messages
-	
+
 	clearTimeout(requestInfo.timeout);
 	process.bidiConnections.delete('req-8');
 });
@@ -501,13 +501,13 @@ Deno.test('ResponderProcess - bidi frame buffering', async () => {
 Deno.test('ResponderProcess - backpressure detection', () => {
 	const process = new ResponderProcess('test-proc-12', 'standard');
 	process.config = createMockConfig();
-	
+
 	// Fast writes (no backpressure)
 	process.detectBackpressure(5);
 	process.detectBackpressure(8);
 	process.detectBackpressure(6);
 	assertEquals(process.isBackpressured, false);
-	
+
 	// Slow writes (backpressure)
 	process.detectBackpressure(100);
 	process.detectBackpressure(120);
@@ -524,11 +524,11 @@ Deno.test('ResponderProcess - backpressure affects capacity', () => {
 	const process = new ResponderProcess('test-proc-13', 'standard');
 	process.config = createMockConfig();
 	process.maxConcurrentRequests = 10;
-	
+
 	// No backpressure
 	process.isBackpressured = false;
 	assertEquals(process.bpAvailWorkers(), 10);
-	
+
 	// With backpressure
 	process.isBackpressured = true;
 	assertEquals(process.bpAvailWorkers(), 0);
@@ -541,25 +541,25 @@ Deno.test('ResponderProcess - handle applet error', async () => {
 	const process = new ResponderProcess('test-proc-14', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const worker = new MockWorker('/test.js', {});
 	const requestInfo = {
 		worker,
 		timeout: setTimeout(() => {}, 1000)
 	};
 	process.activeRequests.set('req-9', requestInfo);
-	
+
 	const errorData = {
 		error: 'Test error',
 		stack: 'Error stack trace'
 	};
-	
+
 	await process.handleAppletError('req-9', errorData, requestInfo);
-	
+
 	// Should have cleaned up
 	assertEquals(process.activeRequests.has('req-9'), false);
 	assert(worker.terminated);
-	
+
 	// Should have sent error response
 	const lastMsg = process.ipcConn.getLastMessage();
 	assertEquals(lastMsg.msg.at([1, 'status']), 500);
@@ -572,10 +572,10 @@ Deno.test('ResponderProcess - built-in applet config', async () => {
 	const process = new ResponderProcess('test-proc-15', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const originalWorker = globalThis.Worker;
 	globalThis.Worker = MockWorker;
-	
+
 	try {
 		const fields = new NANOS({
 			method: 'GET',
@@ -588,15 +588,15 @@ Deno.test('ResponderProcess - built-in applet config', async () => {
 			query: new NANOS(),
 			tail: '/test.html'
 		});
-		
+
 		await process.handleWebRequest('req-10', fields, null);
-		
+
 		// Give worker time to be created
 		await new Promise(resolve => setTimeout(resolve, 50));
-		
+
 		// Should have created worker
 		assertEquals(process.activeRequests.has('req-10'), true);
-		
+
 		// Cleanup
 		const requestInfo = process.activeRequests.get('req-10');
 		if (requestInfo) {
@@ -616,7 +616,7 @@ Deno.test('ResponderProcess - request timeout', async () => {
 	const process = new ResponderProcess('test-proc-16', 'standard');
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
-	
+
 	const worker = new MockWorker('/test.js', {});
 	const timeout = setTimeout(() => {
 		// Simulate timeout
@@ -626,17 +626,17 @@ Deno.test('ResponderProcess - request timeout', async () => {
 			process.sendErrorResponse('req-11', 504, 'Gateway Timeout').catch(console.error);
 		}
 	}, 100);
-	
+
 	const requestInfo = { worker, timeout };
 	process.activeRequests.set('req-11', requestInfo);
-	
+
 	// Wait for timeout
 	await new Promise(resolve => setTimeout(resolve, 150));
-	
+
 	// Should have cleaned up
 	assertEquals(process.activeRequests.has('req-11'), false);
 	assert(worker.terminated);
-	
+
 	// Should have sent timeout error
 	const lastMsg = process.ipcConn.getLastMessage();
 	assertEquals(lastMsg.msg.at([1, 'status']), 504);
@@ -650,12 +650,12 @@ Deno.test('ResponderProcess - health check', async () => {
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
 	process.maxConcurrentRequests = 10;
-	
+
 	const fields = new NANOS();
 	fields.set('timestamp', Date.now());
-	
+
 	await process.handleHealthCheck('health-1', fields);
-	
+
 	const lastMsg = process.ipcConn.getLastMessage();
 	assertExists(lastMsg);
 	assertEquals(lastMsg.msg.at(0), MessageType.HEALTH_CHECK);
@@ -672,24 +672,24 @@ Deno.test('ResponderProcess - at capacity', async () => {
 	process.config = createMockConfig();
 	process.ipcConn = new MockIPCConnection();
 	process.maxConcurrentRequests = 2;
-	
+
 	// Fill capacity
 	process.activeRequests.set('req-12', { worker: new MockWorker('/test.js', {}), timeout: setTimeout(() => {}, 1000) });
 	process.activeRequests.set('req-13', { worker: new MockWorker('/test.js', {}), timeout: setTimeout(() => {}, 1000) });
-	
+
 	const fields = new NANOS({
 		method: 'GET',
 		path: '/test',
 		app: 'test-app',
 		pool: 'standard'
 	});
-	
+
 	await process.handleWebRequest('req-14', fields, null);
-	
+
 	// Should have returned 503
 	const lastMsg = process.ipcConn.getLastMessage();
 	assertEquals(lastMsg.msg.at([1, 'status']), 503);
-	
+
 	// Cleanup
 	for (const [id, info] of process.activeRequests.entries()) {
 		clearTimeout(info.timeout);

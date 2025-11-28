@@ -127,12 +127,12 @@ class RouterProcess extends ServiceProcess {
 	 */
 	getMessageHandlers () {
 		const baseHandlers = super.getMessageHandlers();
-		
+
 		// Add router-specific handler
 		baseHandlers.set(MessageType.ROUTE_REQUEST, async (id, fields) => {
 			await this.handleRouteRequest(id, fields);
 		});
-		
+
 		return baseHandlers;
 	}
 

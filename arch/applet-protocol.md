@@ -931,7 +931,7 @@ class ResponderProcess {
       appletWorker.postMessage({
         type: 'request',
         id,
-        ...fields.toObject(),
+        ...Object.fromEntries(fields.namedEntries()),
         body: binaryData
       });
     });

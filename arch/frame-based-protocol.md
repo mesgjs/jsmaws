@@ -4,15 +4,15 @@
 
 ## Overview
 
-This document describes the unified frame-based protocol for communication between applets and the responder process. The key insight is that **everything is a frame** - there is only one message type (`frame`) with context-sensitive fields.
+This document describes the unified frame-based protocol for *communication between applets and the responder process*. The key insight is that **everything is a frame message** - there is only one message type (`frame`) with context-sensitive fields.
 
 ## Core Concept
 
 ### The Unified Frame Model
 
 1. **Single Message Type**: All communication uses `frame` messages
-2. **Context-Sensitive Fields**: First frame includes connection setup (mode, status, headers), subsequent frames are minimal
-3. **Sticky State**: `keepAlive` and `mode` persist across frames (don't repeat unless changing)
+2. **Context-Sensitive Fields**: First frame messages includes connection setup (mode, status, headers), subsequent messages are minimal
+3. **Sticky State**: `keepAlive`, `mode`, and `final` (defaults to false) persist across frames
 4. **Separation of Concerns**: Applets generate data, responder handles transmission optimization
 
 ### Benefits
@@ -141,14 +141,14 @@ After the first frame, subsequent frames are minimal:
 self.postMessage({
   type: 'frame',
   id: 'req-12345',
-  data: Uint8Array,      // Up to maxChunkSize bytes
-  final: false           // More chunks coming
+  data: Uint8Array      // Up to maxChunkSize bytes
   // mode omitted (already established)
   // status/headers omitted (not needed)
   // keepAlive omitted (uses previous value - sticky)
+  // final omitted (defaults to false - more chunks coming)
 });
 
-// Final chunk
+// Final chunk - explicitly mark as final
 self.postMessage({
   type: 'frame',
   id: 'req-12345',
@@ -169,7 +169,7 @@ self.postMessage({
 **Key Fields (Subsequent Frames)**:
 - `id`: Request/connection ID (required)
 - `data`: Frame payload (up to `maxChunkSize` bytes)
-- `final`: Boolean indicating last chunk of current frame
+- `final`: Optional - only include `final: true` to mark end of frame (defaults to `false` if omitted)
 - `keepAlive`: Optional - only include if changing state (e.g., closing a stream)
 
 #### Changing keepAlive State
@@ -526,7 +526,7 @@ async handleWebRequest(id, fields, binaryData) {
   if (appletPath === '@static') {
     builtinConfig = {
       root: this.config.routing.root,
-      mimeTypes: this.config.mimeTypes.toObject()
+      mimeTypes: Object.fromEntries(this.config.mimeTypes.namedEntries())
     };
   }
   

@@ -101,7 +101,7 @@ Deno.test('ServiceProcess - constructor generates ID if not provided', () => {
 Deno.test('ServiceProcess - getMessageHandlers returns base handlers', () => {
 	const process = new MockServiceProcess('test-123');
 	const handlers = process.getMessageHandlers();
-	
+
 	assertEquals(handlers.has(MessageType.CONFIG_UPDATE), true);
 	assertEquals(handlers.has(MessageType.HEALTH_CHECK), true);
 	assertEquals(handlers.has(MessageType.SHUTDOWN), true);
@@ -110,23 +110,23 @@ Deno.test('ServiceProcess - getMessageHandlers returns base handlers', () => {
 Deno.test('ServiceProcess - processMessages handles CONFIG_UPDATE', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-	
+
 	// Add config update message - fields should be a NANOS with the data
 	const fields = new NANOS({ test: 'value' });
 	mockConn.addMessage(MessageType.CONFIG_UPDATE, 'cfg-1', fields);
-	
+
 	process.ipcConn = mockConn;
-	
+
 	// Process one message
 	const processPromise = process.processMessages();
-	
+
 	// Wait a bit for message processing
 	await new Promise(resolve => setTimeout(resolve, 100));
-	
+
 	// Trigger shutdown to exit loop
 	process.isShuttingDown = true;
 	await processPromise;
-	
+
 	assertEquals(process.configUpdateCalled, true);
 	assertEquals(process.config.get('test'), 'value');
 });
@@ -134,23 +134,23 @@ Deno.test('ServiceProcess - processMessages handles CONFIG_UPDATE', async () => 
 Deno.test('ServiceProcess - processMessages handles HEALTH_CHECK', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-	
+
 	// Add health check message
 	const fields = new NANOS({ timestamp: Date.now() });
 	mockConn.addMessage(MessageType.HEALTH_CHECK, 'hc-1', fields);
-	
+
 	process.ipcConn = mockConn;
-	
+
 	// Process one message
 	const processPromise = process.processMessages();
-	
+
 	// Wait a bit for message processing
 	await new Promise(resolve => setTimeout(resolve, 100));
-	
+
 	// Trigger shutdown to exit loop
 	process.isShuttingDown = true;
 	await processPromise;
-	
+
 	assertEquals(process.healthCheckCalled, true);
 	assertEquals(mockConn.writtenMessages.length, 1);
 	assertEquals(mockConn.writtenMessages[0].message.at(0), MessageType.HEALTH_CHECK);
@@ -159,16 +159,16 @@ Deno.test('ServiceProcess - processMessages handles HEALTH_CHECK', async () => {
 Deno.test('ServiceProcess - processMessages handles SHUTDOWN', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-	
+
 	// Add shutdown message
 	const fields = new NANOS({ timeout: 30 });
 	mockConn.addMessage(MessageType.SHUTDOWN, 'halt-1', fields);
-	
+
 	process.ipcConn = mockConn;
-	
+
 	// Process messages
 	await process.processMessages();
-	
+
 	assertEquals(process.shutdownCalled, true);
 	assertEquals(process.isShuttingDown, true);
 	assertEquals(mockConn.closed, true);
@@ -177,23 +177,23 @@ Deno.test('ServiceProcess - processMessages handles SHUTDOWN', async () => {
 Deno.test('ServiceProcess - processMessages handles unknown message type', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-	
+
 	// Add unknown message type
 	const fields = new NANOS();
 	mockConn.addMessage('UNKNOWN_TYPE', 'unk-1', fields);
-	
+
 	process.ipcConn = mockConn;
-	
+
 	// Process one message
 	const processPromise = process.processMessages();
-	
+
 	// Wait a bit for message processing
 	await new Promise(resolve => setTimeout(resolve, 100));
-	
+
 	// Trigger shutdown to exit loop
 	process.isShuttingDown = true;
 	await processPromise;
-	
+
 	// Should not crash, just log warning
 	assertEquals(process.configUpdateCalled, false);
 	assertEquals(process.healthCheckCalled, false);
@@ -203,13 +203,13 @@ Deno.test('ServiceProcess - processMessages handles unknown message type', async
 Deno.test('ServiceProcess - processMessages exits on connection close', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-	
+
 	// No messages - readMessage will return null
 	process.ipcConn = mockConn;
-	
+
 	// Process messages - should exit immediately
 	await process.processMessages();
-	
+
 	// Should exit cleanly without calling handlers
 	assertEquals(process.configUpdateCalled, false);
 });
@@ -220,7 +220,7 @@ Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async (
 			super('incomplete', 'test-123');
 		}
 	}
-	
+
 	const process = new IncompleteProcess();
 	await assertRejects(
 		() => process.handleConfigUpdate(new NANOS()),
@@ -235,7 +235,7 @@ Deno.test('ServiceProcess - subclass must implement handleHealthCheck', async ()
 			super('incomplete', 'test-123');
 		}
 	}
-	
+
 	const process = new IncompleteProcess();
 	await assertRejects(
 		() => process.handleHealthCheck('id', new NANOS()),
@@ -250,7 +250,7 @@ Deno.test('ServiceProcess - subclass must implement handleShutdown', async () =>
 			super('incomplete', 'test-123');
 		}
 	}
-	
+
 	const process = new IncompleteProcess();
 	await assertRejects(
 		() => process.handleShutdown(new NANOS()),

@@ -341,19 +341,19 @@ export function createFrame (id, options = {}) {
 		dataSize: options.data ? options.data.length : 0,
 		final: options.final ?? false
 	};
-	
+
 	// Copy all optional fields that are defined
 	const optionalFields = [
 		'mode', 'status', 'headers', 'keepAlive',
 		'initialCredits', 'maxChunkSize', 'maxBytesPerSecond', 'idleTimeout', 'maxBufferSize'
 	];
-	
+
 	for (const field of optionalFields) {
 		if (options[field] !== undefined) {
 			fields[field] = options[field];
 		}
 	}
-	
+
 	return createMessage({ type: MessageType.WEB_FRAME, id }, fields);
 }
 

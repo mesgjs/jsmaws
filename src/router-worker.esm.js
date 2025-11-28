@@ -387,15 +387,15 @@ class Route {
 
 		// Use local root if specified, otherwise global root from config
 		let basePath = this.root || this.config.routing.root;
-		
+
 		// Ensure basePath ends with / for consistent path construction
 		if (basePath && !basePath.endsWith('/')) {
 			basePath += '/';
 		}
-		
+
 		const extensions = this.config.routing.extensions;
 		const appPath = matchResult.app;
-		
+
 		// If appPath already has a .js extension, check it directly
 		if (appPath.endsWith('.js')) {
 			const fullPath = `${basePath}${appPath}`;
@@ -411,7 +411,7 @@ class Route {
 				return null;
 			}
 		}
-		
+
 		// Try each extension in order
 		// Note: Even if appPath exists as a directory, we still check for appPath.esm.js, appPath.js
 		for (const ext of extensions) {
@@ -483,7 +483,7 @@ class Router {
 				if (route.isVirtual && app && app !== '@static' && !app.startsWith('https://') && !app.startsWith('http://') && !app.startsWith('/')) {
 					match.app = `${this.config.routing.appRoot}${match.app}`;
 				}
-				
+
 				return {
 					route,
 					match,

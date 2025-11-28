@@ -39,13 +39,12 @@ class ResponderProcess extends ServiceProcess {
 	constructor (processId, poolName) {
 		super('responder', processId);
 		this.poolName = poolName || Deno.env.get('JSMAWS_POOL') || 'standard';
-		
+
 		// Track active requests and workers
 		this.activeRequests = new Map(); // requestId -> { worker, timeout, isStreaming }
-		this.activeWebSockets = new Map(); // requestId -> worker
 		this.requestCount = 0;
 		this.maxConcurrentRequests = 10; // Will be set from pool config
-		
+
 		// Track bidirectional connections
 		this.bidiConnections = new Map(); // id → connection state
 
@@ -62,7 +61,7 @@ class ResponderProcess extends ServiceProcess {
 		this.recentWriteTimes = []; // Track recent write durations
 		this.maxRecentWrites = 5;
 	}
-	
+
 	/**
 	 * Backpressure-context-aware available workers
 	 */
@@ -103,7 +102,7 @@ class ResponderProcess extends ServiceProcess {
 	spawnAppletWorker (appletPath) {
 		// Determine permissions based on applet path
 		const isUrlBased = appletPath.startsWith('https://') || appletPath.startsWith('http://');
-		
+
 		const permissions = {
 			read: isUrlBased ? false : [appletPath],
 			net: true, // Always allow network for module loading
@@ -126,12 +125,12 @@ class ResponderProcess extends ServiceProcess {
 		*/
 	getMessageHandlers () {
 		const baseHandlers = super.getMessageHandlers();
-		
+
 		// Add responder-specific handler
 		baseHandlers.set(MessageType.WEB_REQUEST, async (id, fields, binaryData) => {
 			await this.handleWebRequest(id, fields, binaryData);
 		});
-		
+
 		return baseHandlers;
 	}
 
@@ -163,11 +162,11 @@ class ResponderProcess extends ServiceProcess {
 
 			// Spawn applet worker
 			const worker = this.spawnAppletWorker(app);
-			
+
 			// Get request timeout from pool config
 			const poolConfig = this.config.getPoolConfig(this.poolName);
 			const reqTimeout = poolConfig?.at('reqTimeout', 30) || 30;
-			
+
 			// Set up timeout
 			const timeout = setTimeout(() => {
 				if (this.activeRequests.has(id)) {
@@ -195,20 +194,17 @@ class ResponderProcess extends ServiceProcess {
 			};
 
 			// Convert headers and params to plain objects for applet
-			const headersObj = {};
-			if (headers && typeof headers.toObject === 'function') {
-				Object.assign(headersObj, headers.toObject());
-			}
-			
-			const paramsObj = {};
-			if (params && typeof params.toObject === 'function') {
-				Object.assign(paramsObj, params.toObject());
-			}
-			
-			const queryObj = {};
-			if (query && typeof query.toObject === 'function') {
-				Object.assign(queryObj, query.toObject());
-			}
+			const headersObj = headers instanceof NANOS
+				? Object.fromEntries(headers.namedEntries())
+				: {};
+
+			const paramsObj = params instanceof NANOS
+				? Object.fromEntries(params.namedEntries())
+				: {};
+
+			const queryObj = query instanceof NANOS
+				? Object.fromEntries(query.namedEntries())
+				: {};
 
 			// Check for built-in applets and prepare configuration
 			let builtinConfig = null;
@@ -219,7 +215,7 @@ class ResponderProcess extends ServiceProcess {
 					mimeTypes: mimeTypes.toSLID(), // Serialize NANOS to SLID for worker
 				};
 			}
-	
+
 			// Send request to applet worker
 			const requestMsg = {
 				type: 'request',
@@ -233,12 +229,12 @@ class ResponderProcess extends ServiceProcess {
 				body: binaryData,
 				maxChunkSize: this.chunkingConfig.chunkSize, // Hard security limit
 			};
-			
+
 			// Add config for built-in applets only
 			if (builtinConfig) {
 				requestMsg.config = builtinConfig;
 			}
-			
+
 			worker.postMessage(requestMsg);
 
 		} catch (error) {
@@ -252,12 +248,12 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleAppletMessage (id, data) {
 		const { type } = data;
-		
+
 		if (type !== 'frame' && type !== 'error') {
 			console.warn(`[${this.processId}] Unknown message type: ${type}`);
 			return;
 		}
-		
+
 		const requestInfo = this.activeRequests.get(id);
 		if (!requestInfo) {
 			console.warn(`[${this.processId}] Received message for unknown request ${id}`);
@@ -284,26 +280,27 @@ class ResponderProcess extends ServiceProcess {
 		const { error, stack } = data;
 		console.error(`[${this.processId}] Applet error for request ${id}:`, error);
 		if (stack) console.error(stack);
-		
+
 		clearTimeout(requestInfo.timeout);
 		this.activeRequests.delete(id);
 		requestInfo.worker.terminate();
-		
+
 		await this.sendErrorResponse(id, 500, 'Internal Server Error');
 	}
 
 	/**
 	 * Handle frame from applet (unified frame protocol)
+	 * Note: final defaults to false if omitted - only final: true triggers frame completion
 	 */
 	async handleFrame (id, data, requestInfo) {
 		const { mode, status, headers, data: frameData, final, keepAlive } = data;
-		
+
 		// First frame - establish connection
 		if (mode !== undefined) {
 			await this.handleFirstFrame(id, data, requestInfo);
 			return;
 		}
-		
+
 		// Enforce maxChunkSize limit (DoS protection)
 		if (frameData && frameData.length > this.chunkingConfig.chunkSize) {
 			console.warn(`[${this.processId}] Frame chunk exceeds maxChunkSize (${frameData.length} > ${this.chunkingConfig.chunkSize}), terminating applet`);
@@ -311,33 +308,34 @@ class ResponderProcess extends ServiceProcess {
 			await this.sendErrorResponse(id, 500, 'Internal Server Error');
 			return;
 		}
-		
+
 		// Handle based on mode
 		if (requestInfo.mode === 'bidi') {
 			await this.handleBidiFrame(id, frameData, final, keepAlive, requestInfo);
 			return;
 		}
-		
+
 		// Handle response/stream modes (accumulate and forward)
 		if (frameData) {
 			requestInfo.frameBuffer.push(frameData);
 			requestInfo.totalBuffered += frameData.length;
 		}
-		
+
 		// If accumulated data exceeds autoChunkThresh, start forwarding immediately
 		if (requestInfo.totalBuffered >= this.chunkingConfig.autoChunkThresh) {
 			await this.flushFrameBuffer(id, requestInfo, false);
 		}
-		
-		// If final frame, flush remaining buffer
+
+		// If final frame message (final is truthy), flush remaining buffer
+		// It defaults to false, allowing applets to send multiple chunks without specifying final: false each time
 		if (final) {
 			await this.flushFrameBuffer(id, requestInfo, true);
-			
+
 			// Update keepAlive status if specified
 			if (keepAlive !== undefined) {
 				requestInfo.keepAlive = keepAlive;
 			}
-			
+
 			// Cleanup if not keepAlive
 			if (!requestInfo.keepAlive) {
 				clearTimeout(requestInfo.timeout);
@@ -346,66 +344,66 @@ class ResponderProcess extends ServiceProcess {
 			}
 		}
 	}
-	
+
 	/**
 	 * Handle first frame (establishes connection)
 	 */
 	async handleFirstFrame (id, data, requestInfo) {
 		const { mode, status, headers, keepAlive, data: frameData, final } = data;
-		
+
 		// Store connection state
 		requestInfo.mode = mode;
 		requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
 		requestInfo.frameBuffer = [];
 		requestInfo.totalBuffered = 0;
-		
+
 		// Send HTTP response headers to operator
 		await this.sendResponse(id, { status, headers, body: null });
-		
+
 		// Handle bidi mode initialization
 		if (mode === 'bidi' && status === 101) {
 			await this.initializeBidiConnection(id, requestInfo);
 		}
-		
+
 		// Process any data in first frame
 		if (frameData || final) {
 			await this.handleFrame(id, { data: frameData, final, keepAlive }, requestInfo);
 		}
 	}
-	
+
 	/**
 	 * Handle bidirectional frame (mode: 'bidi')
 	 */
 	async handleBidiFrame (id, frameData, final, keepAlive, requestInfo) {
 		let conn = this.bidiConnections.get(id);
-		
+
 		// First bidi frame - initialize connection
 		if (!conn) {
 			await this.initializeBidiConnection(id, requestInfo);
 			conn = this.bidiConnections.get(id);
 		}
-		
+
 		const chunkSize = frameData?.length || 0;
-		
+
 		// Check if applet has sufficient credits
 		if (conn.outboundCredits < chunkSize) {
 			// Insufficient credits - buffer the chunk
 			conn.outboundBuffer.push({ frameData, final, keepAlive });
 			conn.totalBuffered.outbound += chunkSize;
-			
+
 			// Check buffer limit (DoS protection)
 			if (conn.totalBuffered.outbound > conn.maxBufferSize) {
 				console.warn(`[${this.processId}] Bidi ${id} outbound buffer exceeded, terminating`);
 				this.closeBidiConnection(id, 'Buffer overflow');
 				return;
 			}
-			
+
 			return; // Don't forward yet
 		}
-		
+
 		// Consume credits (byte-based)
 		conn.outboundCredits -= chunkSize;
-		
+
 		// Forward chunk to operator using unified frame protocol
 		const frameMsg = createFrame(id, {
 			data: frameData,
@@ -413,16 +411,16 @@ class ResponderProcess extends ServiceProcess {
 			...(keepAlive !== undefined && { keepAlive })
 		});
 		await this.ipcConn.writeMessage(frameMsg, frameData);
-		
+
 		// Update last activity
 		conn.lastActivity = Date.now();
-		
+
 		// Handle connection close
 		if (final && keepAlive === false) {
 			this.closeBidiConnection(id, 'Normal closure');
 		}
 	}
-	
+
 	/**
 	 * Initialize bidirectional connection
 	 */
@@ -430,7 +428,7 @@ class ResponderProcess extends ServiceProcess {
 		const maxChunkSize = this.chunkingConfig.chunkSize;
 		const bidiConfig = this.config.bidiFlowControl || {};
 		const initialCredits = (bidiConfig.initialCredits || 10) * maxChunkSize;
-		
+
 		const connState = {
 			worker: requestInfo.worker,
 			outboundCredits: initialCredits,
@@ -444,9 +442,9 @@ class ResponderProcess extends ServiceProcess {
 			idleTimeout: bidiConfig.idleTimeout || 60,
 			lastActivity: Date.now()
 		};
-		
+
 		this.bidiConnections.set(id, connState);
-		
+
 		// Send protocol parameters to applet (first frame from responder)
 		requestInfo.worker.postMessage({
 			type: 'frame',
@@ -461,7 +459,7 @@ class ResponderProcess extends ServiceProcess {
 			final: false,
 			keepAlive: true
 		});
-		
+
 		// Send protocol parameters to operator (via IPC) - second frame after status 101
 		const frameMsg = createFrame(id, {
 			final: false,
@@ -474,53 +472,52 @@ class ResponderProcess extends ServiceProcess {
 		});
 		await this.ipcConn.writeMessage(frameMsg);
 	}
-	
+
 	/**
 	 * Close bidirectional connection
 	 */
 	closeBidiConnection (id, reason) {
 		const conn = this.bidiConnections.get(id);
 		if (!conn) return;
-		
+
 		console.log(`[${this.processId}] Closing bidi connection ${id}: ${reason}`);
-		
+
 		// Terminate worker
 		conn.worker.terminate();
-		
+
 		// Cleanup
 		this.bidiConnections.delete(id);
 		this.activeRequests.delete(id);
-		this.activeWebSockets.delete(id);
 	}
-	
+
 	/**
 	 * Handle inbound frame from operator (client → applet)
 	 */
 	async handleOperatorBidiFrame (id, frameData, final) {
 		const conn = this.bidiConnections.get(id);
 		if (!conn) return;
-		
+
 		const chunkSize = frameData?.length || 0;
-		
+
 		// Check if client has sufficient credits to send to applet
 		if (conn.inboundCredits < chunkSize) {
 			// Insufficient credits - buffer the chunk
 			conn.inboundBuffer.push({ frameData, final });
 			conn.totalBuffered.inbound += chunkSize;
-			
+
 			// Check buffer limit
 			if (conn.totalBuffered.inbound > conn.maxBufferSize) {
 				console.warn(`[${this.processId}] Bidi ${id} inbound buffer exceeded, terminating`);
 				this.closeBidiConnection(id, 'Buffer overflow');
 				return;
 			}
-			
+
 			return;
 		}
-		
+
 		// Consume credits (byte-based)
 		conn.inboundCredits -= chunkSize;
-		
+
 		// Forward to applet
 		conn.worker.postMessage({
 			type: 'frame',
@@ -530,18 +527,18 @@ class ResponderProcess extends ServiceProcess {
 			final,
 			keepAlive: true
 		});
-		
+
 		// Applet implicitly grants credits by processing chunk
 		// Grant credits back when applet finishes processing
 		conn.inboundCredits = Math.min(
 			conn.inboundCredits + chunkSize,
 			conn.maxCredits
 		);
-		
+
 		// Update last activity
 		conn.lastActivity = Date.now();
 	}
-	
+
 	/**
 	 * Flush frame buffer to operator with chunking optimization
 	 */
@@ -554,21 +551,21 @@ class ResponderProcess extends ServiceProcess {
 			}
 			return;
 		}
-		
+
 		// Concatenate accumulated frame chunks
 		const totalSize = requestInfo.totalBuffered;
 		const combined = new Uint8Array(totalSize);
 		let offset = 0;
-		
+
 		for (const chunk of requestInfo.frameBuffer) {
 			combined.set(chunk, offset);
 			offset += chunk.length;
 		}
-		
+
 		// Clear buffer
 		requestInfo.frameBuffer = [];
 		requestInfo.totalBuffered = 0;
-		
+
 		// Apply responder's chunking logic to forward to operator
 		if (totalSize < this.chunkingConfig.maxDirectWrite) {
 			// Small: Direct write
@@ -589,28 +586,28 @@ class ResponderProcess extends ServiceProcess {
 			await this.sendInChunks(id, combined, final);
 		}
 	}
-	
+
 	/**
 	 * Send data in chunks to operator
 	 */
 	async sendInChunks (id, data, final) {
 		const { chunkSize } = this.chunkingConfig;
 		let offset = 0;
-		
+
 		while (offset < data.length) {
 			const end = Math.min(offset + chunkSize, data.length);
 			const chunk = data.slice(offset, end);
 			const isLast = (end === data.length) && final;
-			
+
 			const frameMsg = createFrame(id, { data: chunk, final: isLast });
 			const startTime = performance.now();
 			await this.ipcConn.writeMessage(frameMsg, chunk);
 			const writeDuration = performance.now() - startTime;
-			
+
 			this.detectBackpressure(writeDuration);
-			
+
 			offset = end;
-			
+
 			// Yield to event loop
 			await new Promise(resolve => setTimeout(resolve, 0));
 		}
@@ -626,7 +623,6 @@ class ResponderProcess extends ServiceProcess {
 			requestInfo.worker.terminate();
 			this.activeRequests.delete(id);
 		}
-		this.activeWebSockets.delete(id);
 	}
 
 	/**
@@ -656,7 +652,7 @@ class ResponderProcess extends ServiceProcess {
 			const startTime = performance.now();
 			await this.ipcConn.writeMessage(response, body);
 			const writeDuration = performance.now() - startTime;
-			
+
 			// Update backpressure state based on write timing
 			this.detectBackpressure(writeDuration);
 			return;
@@ -750,7 +746,7 @@ class ResponderProcess extends ServiceProcess {
 		const startTime = performance.now();
 		await this.ipcConn.writeMessage(response, errorBody);
 		const writeDuration = performance.now() - startTime;
-		
+
 		// Update backpressure state based on write timing
 		this.detectBackpressure(writeDuration);
 	}
@@ -774,7 +770,7 @@ class ResponderProcess extends ServiceProcess {
 			totalWorkers: this.maxConcurrentRequests,
 			requestsQueued: 0, // No queue in this architecture
 			activeRequests: this.activeRequests.size,
-			activeWebSockets: this.activeWebSockets.size,
+			activeBidiConns: this.bidiConnections.size,
 			uptime: Math.floor(performance.now() / 1000),
 			backpressured: this.isBackpressured,
 		}]);
@@ -805,7 +801,7 @@ class ResponderProcess extends ServiceProcess {
 			requestInfo.worker.terminate();
 		}
 		this.activeRequests.clear();
-		this.activeWebSockets.clear();
+		this.bidiConnections.clear();
 
 		// Close IPC connection
 		if (this.ipcConn) {

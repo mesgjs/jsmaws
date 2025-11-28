@@ -275,7 +275,7 @@ class OperatorProcess {
 			// Use router to find matching route
 			if (this.router) {
 				const routeMatch = await this.router.findRoute(url.pathname, req.method);
-	
+
 				if (routeMatch) {
 					const { route, match } = routeMatch;
 
@@ -465,21 +465,21 @@ class OperatorProcess {
 		const headers = this.convertHeaders(firstFrame.fields.at('headers'));
 		const keepAlive = firstFrame.fields.at('keepAlive', false);
 		const final = firstFrame.fields.at('final', false);
-		
+
 		// Handle bidirectional upgrade
 		if (mode === 'bidi' && status === 101) {
 			return await this.handleBidiUpgrade(requestId, firstFrame, process, req);
 		}
-		
+
 		// Handle response/stream modes
 		if (mode === 'response' || mode === 'stream') {
 			return await this.handleResponseStream(requestId, status, headers, keepAlive, final, firstData, process);
 		}
-		
+
 		// Unknown mode
 		throw new Error(`Unknown frame mode: ${mode}`);
 	}
-	
+
 	/**
 	 * Handle response or stream mode frames
 	 */
@@ -492,26 +492,26 @@ class OperatorProcess {
 					if (firstData && firstData.length > 0) {
 						controller.enqueue(firstData);
 					}
-					
+
 					// If first frame is final and not keepAlive, close immediately
 					if (firstFinal && !keepAlive) {
 						controller.close();
 						return;
 					}
-					
+
 					// Read subsequent frame messages
 					while (true) {
 						const { message: frameMsg, binaryData: frameData } = await process.ipcConn.readMessage();
-						
+
 						if (frameMsg.type !== MessageType.WEB_FRAME) {
 							throw new Error(`Expected WEB_FRAME, got ${frameMsg.type}`);
 						}
-						
+
 						// Send frame data chunk if present
 						if (frameData && frameData.length > 0) {
 							controller.enqueue(frameData);
 						}
-						
+
 						// Check if final chunk
 						const final = frameMsg.fields.at('final', false);
 						if (final) {
@@ -529,13 +529,13 @@ class OperatorProcess {
 				}
 			},
 		});
-		
+
 		return new Response(stream, {
 			status,
 			headers,
 		});
 	}
-	
+
 	/**
 	 * Handle bidirectional connection upgrade (transport-agnostic)
 	 */
@@ -543,21 +543,21 @@ class OperatorProcess {
 		try {
 			// Read protocol parameters from next frame (sent by responder after status 101)
 			const { message: paramsMsg } = await process.ipcConn.readMessage();
-			
+
 			if (paramsMsg.type !== MessageType.WEB_FRAME) {
 				throw new Error(`Expected WEB_FRAME with protocol params, got ${paramsMsg.type}`);
 			}
-			
+
 			// Extract protocol parameters (transport-independent)
 			const initialCredits = paramsMsg.fields.at('initialCredits', 655360);
 			const maxChunkSize = paramsMsg.fields.at('maxChunkSize', 65536);
 			const maxBytesPerSecond = paramsMsg.fields.at('maxBytesPerSecond', 10485760);
 			const idleTimeout = paramsMsg.fields.at('idleTimeout', 60);
 			const maxBufferSize = paramsMsg.fields.at('maxBufferSize', 1048576);
-			
+
 			// Determine transport type from request headers
 			const upgradeHeader = req.headers.get('upgrade');
-			
+
 			if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
 				// WebSocket transport
 				return await this.handleWebSocketUpgrade(
@@ -565,15 +565,15 @@ class OperatorProcess {
 					initialCredits, maxChunkSize, maxBytesPerSecond, idleTimeout, maxBufferSize
 				);
 			}
-			
+
 			// Future: Add other bidirectional transports here
 			// else if (upgradeHeader && upgradeHeader.toLowerCase() === 'h2') {
 			//   return await this.handleHTTP2Upgrade(...);
 			// }
-			
+
 			// Unsupported transport
 			throw new Error(`Unsupported bidirectional transport: ${upgradeHeader || 'none'}`);
-			
+
 		} catch (error) {
 			this.logger.error(`Bidi upgrade error: ${error.message}`);
 			return new Response('Bidirectional upgrade failed', {
@@ -582,7 +582,7 @@ class OperatorProcess {
 			});
 		}
 	}
-	
+
 	/**
 	 * Handle WebSocket-specific upgrade (transport-specific helper)
 	 */
@@ -596,10 +596,10 @@ class OperatorProcess {
 				headers: { 'Content-Type': 'text/plain' },
 			});
 		}
-		
+
 		// Upgrade to WebSocket
 		const { socket, response } = Deno.upgradeWebSocket(req);
-		
+
 		// Track connection state
 		const connState = {
 			socket,
@@ -614,9 +614,9 @@ class OperatorProcess {
 			maxBufferSize,
 			lastActivity: Date.now(),
 		};
-		
+
 		this.bidiConnections.set(requestId, connState);
-		
+
 		// Handle WebSocket messages from client
 		socket.onmessage = async (event) => {
 			try {
@@ -627,22 +627,22 @@ class OperatorProcess {
 				this.bidiConnections.delete(requestId);
 			}
 		};
-		
+
 		// Handle WebSocket close from client
 		socket.onclose = () => {
 			this.logger.debug(`Bidi connection ${requestId} closed by client`);
 			this.bidiConnections.delete(requestId);
 		};
-		
+
 		// Handle WebSocket errors
 		socket.onerror = (error) => {
 			this.logger.error(`Bidi connection ${requestId} error: ${error}`);
 			this.bidiConnections.delete(requestId);
 		};
-		
+
 		// Start reading frames from responder process
 		this.readBidiFrames(requestId, connState);
-		
+
 		return response;
 	}
 
@@ -662,9 +662,9 @@ class OperatorProcess {
 			this.logger.warn(`Unexpected WebSocket data type: ${typeof data}`);
 			return;
 		}
-		
+
 		const chunkSize = frameData.length;
-		
+
 		// Check credits (flow control)
 		if (connState.inboundCredits < chunkSize) {
 			this.logger.warn(`Client ${requestId} exceeded inbound credits`);
@@ -672,27 +672,27 @@ class OperatorProcess {
 			this.bidiConnections.delete(requestId);
 			return;
 		}
-		
+
 		// Consume credits
 		connState.inboundCredits -= chunkSize;
-		
+
 		// Forward to responder process via IPC using frame protocol
 		const frameMsg = createFrame(requestId, {
 			data: frameData,
 			final: false
 		});
 		await connState.process.ipcConn.writeMessage(frameMsg, frameData);
-		
+
 		// Implicit credit grant (applet processes the data)
 		connState.inboundCredits = Math.min(
 			connState.inboundCredits + chunkSize,
 			connState.maxCredits
 		);
-		
+
 		// Update activity timestamp
 		connState.lastActivity = Date.now();
 	}
-	
+
 	/**
 	 * Read bidirectional frames from responder process
 	 */
@@ -700,25 +700,25 @@ class OperatorProcess {
 		try {
 			while (this.bidiConnections.has(requestId)) {
 				const { message, binaryData } = await connState.process.ipcConn.readMessage();
-				
+
 				if (message.type !== MessageType.WEB_FRAME) {
 					this.logger.warn(`Expected WEB_FRAME for bidi ${requestId}, got ${message.type}`);
 					continue;
 				}
-				
+
 				const mode = message.fields.at('mode');
 				if (mode !== 'bidi') {
 					this.logger.warn(`Expected mode='bidi' for ${requestId}, got ${mode}`);
 					continue;
 				}
-				
+
 				const final = message.fields.at('final', false);
 				const keepAlive = message.fields.at('keepAlive', true);
-				
+
 				// Send data to WebSocket client
 				if (binaryData && binaryData.length > 0) {
 					const chunkSize = binaryData.length;
-					
+
 					// Check credits
 					if (connState.outboundCredits < chunkSize) {
 						this.logger.warn(`Responder ${requestId} exceeded outbound credits`);
@@ -726,27 +726,27 @@ class OperatorProcess {
 						this.bidiConnections.delete(requestId);
 						return;
 					}
-					
+
 					// Consume credits
 					connState.outboundCredits -= chunkSize;
-					
+
 					// Send to client
 					connState.socket.send(binaryData);
-					
+
 					// Implicit credit grant
 					connState.outboundCredits = Math.min(
 						connState.outboundCredits + chunkSize,
 						connState.maxCredits
 					);
 				}
-				
+
 				// Handle connection close
 				if (final && !keepAlive) {
 					connState.socket.close(1000, 'Normal closure');
 					this.bidiConnections.delete(requestId);
 					return;
 				}
-				
+
 				// Update activity timestamp
 				connState.lastActivity = Date.now();
 			}
