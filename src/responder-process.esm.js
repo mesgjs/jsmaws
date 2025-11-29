@@ -171,8 +171,7 @@ class ResponderProcess extends ServiceProcess {
 			const timeout = setTimeout(() => {
 				if (this.activeRequests.has(id)) {
 					console.warn(`[${this.processId}] Request ${id} timed out`);
-					worker.terminate();
-					this.activeRequests.delete(id);
+					this.cleanupRequest(id);
 					this.sendErrorResponse(id, 504, 'Gateway Timeout').catch(console.error);
 				}
 			}, reqTimeout * 1000);
@@ -181,16 +180,15 @@ class ResponderProcess extends ServiceProcess {
 			this.activeRequests.set(id, { worker, timeout, isStreaming: false });
 
 			// Handle messages from applet worker
-			worker.onmessage = async (event) => {
-				await this.handleAppletMessage(id, event.data);
+			worker.onmessage = (event) => {
+				this.handleAppletMessage(id, event.data);
 			};
 
 			// Handle worker errors
-			worker.onerror = async (error) => {
+			worker.onerror = (error) => {
 				console.error(`[${this.processId}] Worker error for request ${id}:`, error);
-				clearTimeout(timeout);
-				this.activeRequests.delete(id);
-				await this.sendErrorResponse(id, 500, 'Internal Server Error');
+				this.cleanupRequest(id);
+				this.sendErrorResponse(id, 500, 'Internal Server Error');
 			};
 
 			// Convert headers and params to plain objects for applet
@@ -281,10 +279,7 @@ class ResponderProcess extends ServiceProcess {
 		console.error(`[${this.processId}] Applet error for request ${id}:`, error);
 		if (stack) console.error(stack);
 
-		clearTimeout(requestInfo.timeout);
-		this.activeRequests.delete(id);
-		requestInfo.worker.terminate();
-
+		this.cleanupRequest(id);
 		await this.sendErrorResponse(id, 500, 'Internal Server Error');
 	}
 
@@ -338,9 +333,7 @@ class ResponderProcess extends ServiceProcess {
 
 			// Cleanup if not keepAlive
 			if (!requestInfo.keepAlive) {
-				clearTimeout(requestInfo.timeout);
-				this.activeRequests.delete(id);
-				requestInfo.worker.terminate();
+				this.cleanupRequest(id);
 			}
 		}
 	}
@@ -615,14 +608,18 @@ class ResponderProcess extends ServiceProcess {
 
 	/**
 	 * Cleanup request resources
+	 * Centralized cleanup for all request-related state
 	 */
 	cleanupRequest (id) {
 		const requestInfo = this.activeRequests.get(id);
 		if (requestInfo) {
 			clearTimeout(requestInfo.timeout);
 			requestInfo.worker.terminate();
-			this.activeRequests.delete(id);
 		}
+
+		// Clean up all request-related state
+		this.activeRequests.delete(id);
+		this.bidiConnections.delete(id);
 	}
 
 	/**

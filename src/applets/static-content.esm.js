@@ -133,37 +133,38 @@ async function handleFullRequest (id, resolvedPath, fileSize, contentType, chunk
 
 	// Send file data chunks via frame messages
 	const buffer = new Uint8Array(chunkSize);
+	let final = false;
 
-	while (true) {
+	for (;;) {
 		const bytesRead = await file.read(buffer);
 		if (bytesRead === null) break;
 
 		const chunk = buffer.slice(0, bytesRead);
-		const isLastChunk = bytesRead < chunkSize;
+		final = bytesRead < chunkSize;
 
 		self.postMessage({
 			type: 'frame',
 			id,
 			data: chunk,
-			...(isLastChunk && { final: true })
+			...(final && { final })
 			// mode omitted (already established)
-			// keepAlive omitted (sticky from first frame)
+			// keepAlive omitted (sticky from first frame message)
 			// final omitted unless last chunk (defaults to false)
 		});
 
-		if (isLastChunk) break;
+		if (final) break;
 
 		// Yield to event loop
 		await new Promise(resolve => setTimeout(resolve, 0));
 	}
 
-	// Send final frame message if file size was exact multiple of chunkSize
-	if (fileSize % chunkSize === 0) {
+	// Send "final" if not sent before (e.g. if fileSize % chunkSize === 0)
+	if (!final) {
 		self.postMessage({
 			type: 'frame',
 			id,
 			data: null,
-			final: true
+			final
 		});
 	}
 

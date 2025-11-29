@@ -210,11 +210,11 @@ export class Configuration {
 
 	/**
 	 * Set configuration value
-	 * @param {string} name Name of configuration value
+	 * @param {string|Array} path Path to configuration value
 	 * @param {*} value Value to set
 	 */
-	set (name, value) {
-		this.config.set(name, value);
+	set (path, value) {
+		this.config.pathSet(path, { to: value });
 
 		// Invalidate caches that might be affected
 		// (Could be more granular, but simple invalidation is safer)
