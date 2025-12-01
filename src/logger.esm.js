@@ -190,6 +190,14 @@ export class Logger {
         }
     }
 
+	// Allow logging as another component
+    asComponent (component, fn) {
+        const previous = this.component;
+        this.component = component;
+        fn();
+        this.component = previous;
+    }
+
     /**
      * Generate a unique request ID for tracking
      */
@@ -256,6 +264,18 @@ export class Logger {
      * Internal log method
      */
     log (level, message, context = {}) {
+        switch (level) {
+        case LOG_LEVELS.DEBUG:
+        case LOG_LEVELS.INFO:
+        case LOG_LEVELS.WARN:
+        case LOG_LEVELS.ERROR:
+            break;
+        case 'debug': level = LOG_LEVELS.DEBUG; break;
+        case 'warn': level = LOG_LEVELS.WARN; break;
+        case 'error': level = LOG_LEVELS.ERROR; break;
+        default:
+            level = LOG_LEVELS.INFO; break;
+        }
         const entry = {
             timestamp: Date.now(),
             level,

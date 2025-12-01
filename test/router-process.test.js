@@ -416,7 +416,6 @@ Deno.test('RouterProcess - handleHealthCheck returns worker metrics', async () =
 	assertEquals(fields.at('status'), 'ok');
 	assertEquals(fields.at('availableWorkers'), 2);
 	assertEquals(fields.at('totalWorkers'), 3);
-	assertEquals(fields.at('requestsQueued'), 0);
 	assertExists(fields.at('uptime'));
 });
 

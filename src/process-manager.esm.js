@@ -50,7 +50,6 @@ class ManagedProcess {
 		this.lastHealthCheck = null;
 		this.availableWorkers = 0;
 		this.totalWorkers = 0;
-		this.requestsQueued = 0;
 		this.affinity = new Set(); // Applet paths this process has loaded
 	}
 
@@ -59,13 +58,6 @@ class ManagedProcess {
 	 */
 	getUptime () {
 		return Math.floor((Date.now() - this.startTime) / 1000);
-	}
-
-	/**
-	 * Check if process is idle
-	 */
-	isIdle () {
-		return this.state === ProcessState.IDLE && this.requestsQueued === 0;
 	}
 
 	/**
@@ -78,18 +70,17 @@ class ManagedProcess {
 	/**
 	 * Update worker capacity from response
 	 */
-	updateCapacity (availableWorkers, totalWorkers, requestsQueued) {
+	updateCapacity (availableWorkers, totalWorkers) {
 		this.availableWorkers = availableWorkers;
 		this.totalWorkers = totalWorkers;
-		this.requestsQueued = requestsQueued;
 
 		// Update state based on capacity
-		if (availableWorkers === 0 && requestsQueued > 0) {
-			this.state = ProcessState.BUSY;
-		} else if (availableWorkers > 0) {
+		// READY: Has available workers (can accept requests)
+		// BUSY: No available workers (at capacity)
+		if (availableWorkers > 0) {
 			this.state = ProcessState.READY;
-		} else if (requestsQueued === 0) {
-			this.state = ProcessState.IDLE;
+		} else {
+			this.state = ProcessState.BUSY;
 		}
 	}
 
@@ -140,12 +131,14 @@ export class ProcessManager {
 			? 'src/responder-process.esm.js'
 			: 'src/router-process.esm.js';
 
-		// Get UID/GID from pool config
-		const uid = poolConfig.at('uid');
-		const gid = poolConfig.at('gid');
+		// Get UID/GID from global config (not pool-specific)
+		const uid = Number(this.config.at('uid'));
+		const gid = Number(this.config.at('gid'));
 
-		if (!uid || !gid) {
-			throw new Error(`Pool ${poolName} missing uid/gid configuration`);
+		// Only validate if we're running as root (validation already done in operator)
+		// This is a safety check in case process manager is used standalone
+		if (Deno.uid() === 0 && (!uid || !gid)) {
+			throw new Error(`uid and gid must be configured when running as root`);
 		}
 
 		// Spawn process with privilege dropping
@@ -156,10 +149,10 @@ export class ProcessManager {
 				'--allow-write',
 				'--allow-net',
 				'--allow-env',
+				'--unstable-worker-options',
 				scriptPath,
 			],
-			uid: Number(uid),
-			gid: Number(gid),
+			...(uid && gid && { uid, gid }),
 			stdin: 'piped',
 			stdout: 'piped',
 			stderr: 'piped',
@@ -170,8 +163,65 @@ export class ProcessManager {
 
 		const process = command.spawn();
 
-		// Create IPC connection
-		const ipcConn = new IPCConnection(process.stdout);
+		// Create IPC connection for stdout (handles IPC messages)
+		const stdinWriter = process.stdin.getWriter();
+		const stdoutReader = process.stdout.getReader();
+		
+		const ipcConn = new IPCConnection({
+			read: () => stdoutReader.read(),
+			write: (data) => stdinWriter.write(data),
+			close: async () => {
+				try {
+					await stdoutReader.cancel();
+					await process.stdin.close();
+				} catch (e) {
+					// Ignore close errors
+				}
+			},
+		});
+
+		// Set console output handler for stdout
+		ipcConn.setConsoleOutputHandler((text, logLevel) => {
+			const localText = text.replace(new RegExp('^\\[' + processId + '\\]\\s*'), ''), logger = this.logger;
+			logger.asComponent(processId, () => logger.log(logLevel, localText));
+		});
+
+		// Set capacity update callback
+		ipcConn.onCapacityUpdate = (capacity) => {
+			const availableWorkers = capacity?.at('availableWorkers');
+			const totalWorkers = capacity?.at('totalWorkers');
+			if (totalWorkers) {
+				managedProc.updateCapacity(availableWorkers, totalWorkers);
+			}
+		};
+
+		// Register global handlers for unsolicited messages
+		ipcConn.onMessage(MessageType.HEALTH_CHECK, async (message, binaryData) => {
+			// Capacity already updated via onCapacityUpdate callback
+			// Just log health status
+			const status = message.fields.at('status', 'unknown');
+			this.logger.debug(`${processId} health check response: ${status}`);
+		});
+
+		// Create separate reader for stderr (console output only)
+		const stderrReader = process.stderr.getReader();
+		const stderrConn = new IPCConnection({
+			read: () => stderrReader.read(),
+			write: () => { throw new Error('Cannot write to stderr'); },
+			close: async () => {
+				try {
+					await stderrReader.cancel();
+				} catch (e) {
+					// Ignore close errors
+				}
+			},
+		});
+
+		// Set console output handler for stderr
+		stderrConn.setConsoleOutputHandler((text, logLevel) => {
+			const localText = text.replace(new RegExp('^\\[' + processId + '\\]\\s*'), ''), logger = this.logger;
+			logger.asComponent(processId, () => logger.log(logLevel, localText));
+		});
 
 		// Create managed process
 		const managedProc = new ManagedProcess(
@@ -194,13 +244,21 @@ export class ProcessManager {
 		// Send initial configuration
 		await this.sendConfigUpdate(managedProc);
 
+		// Start continuous monitoring (background task)
+		ipcConn.startMonitoring();
+
 		// Start monitoring process
-		this.monitorProcess(managedProc);
+		this.monitorProcess(managedProc, stderrConn);
+
+		// Initialize capacity from pool config
+		const maxWorkers = poolConfig.at('maxWorkers', 10);
+		managedProc.totalWorkers = maxWorkers;
+		managedProc.availableWorkers = maxWorkers;
 
 		// Mark as ready after startup
 		managedProc.state = ProcessState.READY;
 
-		this.logger.info(`Process ${processId} spawned and ready`);
+		this.logger.info(`Process ${processId} spawned and ready (capacity: ${maxWorkers})`);
 
 		return managedProc;
 	}
@@ -216,13 +274,22 @@ export class ProcessManager {
 	/**
 	 * Monitor process for errors and exit
 	 */
-	async monitorProcess (managedProc) {
-		// Monitor stderr
+	async monitorProcess (managedProc, stderrConn) {
+		// Monitor stderr for console output
 		(async () => {
-			const decoder = new TextDecoder();
-			for await (const chunk of managedProc.process.stderr) {
-				const text = decoder.decode(chunk);
-				this.logger.error(`[${managedProc.id}] ${text.trim()}`);
+			try {
+				// Keep reading from stderr (will only get console output)
+				while (true) {
+					const result = await stderrConn.readMessage();
+					if (!result) break; // Stream closed
+					
+					// Stderr should never have IPC messages, but if it does, log error
+					this.logger.error(`[${managedProc.id}] Unexpected IPC message on stderr: ${result.message.type}`);
+				}
+			} catch (error) {
+				if (!this.isShuttingDown) {
+					this.logger.error(`[${managedProc.id}] stderr monitoring error: ${error.message}`);
+				}
 			}
 		})();
 
@@ -342,7 +409,6 @@ export class ProcessManager {
 				busyCount: 0,
 				totalWorkers: 0,
 				availableWorkers: 0,
-				queuedRequests: 0,
 			};
 		}
 
@@ -350,7 +416,6 @@ export class ProcessManager {
 		let busyCount = 0;
 		let totalWorkers = 0;
 		let availableWorkers = 0;
-		let queuedRequests = 0;
 
 		for (const processId of poolSet) {
 			const proc = this.processes.get(processId);
@@ -361,7 +426,6 @@ export class ProcessManager {
 
 			totalWorkers += proc.totalWorkers;
 			availableWorkers += proc.availableWorkers;
-			queuedRequests += proc.requestsQueued;
 		}
 
 		return {
@@ -370,7 +434,6 @@ export class ProcessManager {
 			busyCount,
 			totalWorkers,
 			availableWorkers,
-			queuedRequests,
 		};
 	}
 

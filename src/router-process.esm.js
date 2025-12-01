@@ -153,7 +153,6 @@ class RouterProcess extends ServiceProcess {
 			status: 'ok',
 			availableWorkers: metrics.availableItems,
 			totalWorkers: metrics.totalItems,
-			requestsQueued: metrics.queuedRequests,
 			uptime: Math.floor(performance.now() / 1000),
 		}]);
 

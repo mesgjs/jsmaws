@@ -24,7 +24,6 @@
 import { NANOS } from './vendor.esm.js';
 import {
 	MessageType,
-	createResponse,
 	createFrame,
 	createError,
 	validateMessage,
@@ -112,10 +111,12 @@ class ResponderProcess extends ServiceProcess {
 		};
 
 		// Create Web Worker for applet
-		const worker = new Worker(appletPath, {
+		const worker = new Worker(new URL(appletPath, import.meta.url).href, {
 			type: 'module',
 			deno: { permissions },
 		});
+		if (worker) console.log(`Created worker for applet "${appletPath}"`);
+		if (!worker) console.error(`Failed to create worker for applet "${appletPath}"`);
 
 		return worker;
 	}
@@ -181,6 +182,7 @@ class ResponderProcess extends ServiceProcess {
 
 			// Handle messages from applet worker
 			worker.onmessage = (event) => {
+				console.log(`[${this.processId}] Worker onmessage fired for request ${id}`);
 				this.handleAppletMessage(id, event.data);
 			};
 
@@ -246,6 +248,8 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleAppletMessage (id, data) {
 		const { type } = data;
+
+		console.log(`[${this.processId}] Received message from applet: type=${type}, id=${id}`);
 
 		if (type !== 'frame' && type !== 'error') {
 			console.warn(`[${this.processId}] Unknown message type: ${type}`);
@@ -344,23 +348,42 @@ class ResponderProcess extends ServiceProcess {
 	async handleFirstFrame (id, data, requestInfo) {
 		const { mode, status, headers, keepAlive, data: frameData, final } = data;
 
+		console.log(`[${this.processId}] First frame: mode=${mode}, status=${status}, final=${final}, keepAlive=${keepAlive}, dataSize=${frameData?.length || 0}`);
+
 		// Store connection state
 		requestInfo.mode = mode;
 		requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
 		requestInfo.frameBuffer = [];
 		requestInfo.totalBuffered = 0;
 
-		// Send HTTP response headers to operator
-		await this.sendResponse(id, { status, headers, body: null });
+		// Calculate available capacity for operator (backpressure-aware)
+		const availableWorkers = this.bpAvailWorkers();
+
+		// Send first frame to operator (unified protocol with capacity info)
+		const firstFrameMsg = createFrame(id, {
+			mode,
+			status,
+			headers,
+			data: frameData,
+			final: final ?? false,
+			keepAlive,
+			availableWorkers,
+			totalWorkers: this.maxConcurrentRequests
+		});
+		
+		console.log(`[${this.processId}] Sending first frame to operator...`);
+		await this.ipcConn.writeMessage(firstFrameMsg, frameData);
+		console.log(`[${this.processId}] First frame sent successfully`);
 
 		// Handle bidi mode initialization
 		if (mode === 'bidi' && status === 101) {
 			await this.initializeBidiConnection(id, requestInfo);
+			return; // Bidi initialization handles subsequent frames
 		}
 
-		// Process any data in first frame
-		if (frameData || final) {
-			await this.handleFrame(id, { data: frameData, final, keepAlive }, requestInfo);
+		// For response/stream modes, if first frame is final and not keepAlive, cleanup
+		if (final && !requestInfo.keepAlive) {
+			this.cleanupRequest(id);
 		}
 	}
 
@@ -622,42 +645,6 @@ class ResponderProcess extends ServiceProcess {
 		this.bidiConnections.delete(id);
 	}
 
-	/**
-	 * Send response with tiered chunking
-	 */
-	async sendResponse (id, result) {
-		const { status, headers, body } = result;
-		const bodySize = body ? body.length : 0;
-
-		// Calculate available capacity
-		// Report backpressure state at process level
-		const availableWorkers = this.bpAvailWorkers();
-
-		// Create response message
-		const response = createResponse(
-			id,
-			status,
-			headers,
-			bodySize,
-			availableWorkers,
-			this.maxConcurrentRequests,
-			0 // No queue in this architecture
-		);
-
-		// Tier 1: Small responses (< maxDirectWrite)
-		if (bodySize < this.chunkingConfig.maxDirectWrite) {
-			const startTime = performance.now();
-			await this.ipcConn.writeMessage(response, body);
-			const writeDuration = performance.now() - startTime;
-
-			// Update backpressure state based on write timing
-			this.detectBackpressure(writeDuration);
-			return;
-		}
-
-		// Tier 2/3: Larger responses with flow-control
-		await this.respondWithFlowControl(response, body);
-	}
 
 	/**
 	 * Detect backpressure based on write timing
@@ -678,70 +665,25 @@ class ResponderProcess extends ServiceProcess {
 		this.isBackpressured = avgWriteTime > this.chunkingConfig.bpWriteTimeThresh;
 	}
 
-	/**
-	 * Respond with flow-control (backpressure detection or chunking)
-	 */
-	async respondWithFlowControl (response, body) {
-		const bodySize = body.length;
-		const { autoChunkThresh, chunkSize } = this.chunkingConfig;
-
-		// Tier 2: Medium responses (maxDirectWrite - autoChunkThresh)
-		// Write directly but monitor timing for backpressure detection
-		if (bodySize < autoChunkThresh) {
-			const startTime = performance.now();
-			await this.ipcConn.writeMessage(response, body);
-			const writeDuration = performance.now() - startTime;
-
-			// Update backpressure state based on write timing
-			this.detectBackpressure(writeDuration);
-
-			return;
-		}
-
-		// Tier 3: Large responses (>= autoChunkThresh)
-		// Stream in chunks with event loop yielding
-		await this.ipcConn.writeMessage(response, null);
-
-		let offset = 0;
-		while (offset < bodySize) {
-			const end = Math.min(offset + chunkSize, bodySize);
-			const chunk = body.slice(offset, end);
-
-			// Time the write operation
-			const startTime = performance.now();
-			await this.ipcConn.conn.write(chunk);
-			const writeDuration = performance.now() - startTime;
-
-			// Update backpressure state based on write timing
-			this.detectBackpressure(writeDuration);
-
-			offset = end;
-
-			// Yield to event loop to process other requests
-			await new Promise((resolve) => setTimeout(resolve, 0));
-		}
-	}
 
 	/**
-	 * Send error response
+	 * Send error response using unified frame protocol
 	 */
 	async sendErrorResponse (id, status, message) {
-		// Report backpressure state at process level
-		const availableWorkers = this.bpAvailWorkers();
-
 		const errorBody = new TextEncoder().encode(JSON.stringify({ error: message }));
-		const response = createResponse(
-			id,
+		
+		// Send error as a single frame
+		const frameMsg = createFrame(id, {
+			mode: 'response',
 			status,
-			{ 'Content-Type': 'application/json' },
-			errorBody.length,
-			availableWorkers,
-			this.maxConcurrentRequests,
-			0 // No queue in this architecture
-		);
-
+			headers: { 'Content-Type': 'application/json' },
+			data: errorBody,
+			final: true,
+			keepAlive: false
+		});
+		
 		const startTime = performance.now();
-		await this.ipcConn.writeMessage(response, errorBody);
+		await this.ipcConn.writeMessage(frameMsg, errorBody);
 		const writeDuration = performance.now() - startTime;
 
 		// Update backpressure state based on write timing
@@ -765,7 +707,6 @@ class ResponderProcess extends ServiceProcess {
 			status: 'ok',
 			availableWorkers,
 			totalWorkers: this.maxConcurrentRequests,
-			requestsQueued: 0, // No queue in this architecture
 			activeRequests: this.activeRequests.size,
 			activeBidiConns: this.bidiConnections.size,
 			uptime: Math.floor(performance.now() / 1000),
@@ -800,12 +741,14 @@ class ResponderProcess extends ServiceProcess {
 		this.activeRequests.clear();
 		this.bidiConnections.clear();
 
-		// Close IPC connection
+		// Log shutdown complete BEFORE closing IPC (which closes stdout)
+		console.log(`[${this.processId}] Shutdown complete`);
+
+		// Close IPC connection (this closes stdout, so no more console.log after this)
 		if (this.ipcConn) {
 			await this.ipcConn.close();
 		}
 
-		console.log(`[${this.processId}] Shutdown complete`);
 		Deno.exit(0);
 	}
 
@@ -823,6 +766,7 @@ class ResponderProcess extends ServiceProcess {
 async function main () {
 	const processId = Deno.env.get('JSMAWS_PID'); // process id string
 	const poolName = Deno.env.get('JSMAWS_POOL');
+	console.log(`Responder main pid ${processId} pool ${poolName}`);
 	await ServiceProcess.run(ResponderProcess, processId, poolName);
 }
 
@@ -833,6 +777,7 @@ if (import.meta.main) {
 		Deno.exit(1);
 	});
 }
+console.log('Responder loaded');
 
 // Export for testing
 export { ResponderProcess };

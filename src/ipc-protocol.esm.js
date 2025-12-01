@@ -1,16 +1,21 @@
 /**
  * JSMAWS IPC Protocol Handler
  * Handles inter-process communication between operator, router, and responder processes
- * 
+ *
  * Message format:
- * - 4-byte length prefix (big-endian)
- * - SLID header with metadata
- * - Binary data (if bodySize > 0)
- * 
+ * - SOH character (\x01) prefix
+ * - SLID message with boundary markers [(...)]\n
+ * - Optional binary data (if dataSize > 0)
+ *
+ * Console messages are prefixed with SOH + [(log level)]\n to distinguish from regular output
+ *
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { NANOS, parseSLID } from './vendor.esm.js';
+
+// SOH character (ASCII 1) - Start of Heading
+const SOH = '\x01';
 
 /**
  * IPC message types
@@ -19,7 +24,6 @@ export const MessageType = {
 	ROUTE_REQUEST: 'RREQ',
 	ROUTE_RESPONSE: 'RRES',
 	WEB_REQUEST: 'WREQ',
-	WEB_RESPONSE: 'WRES',     // HTTP response headers (operator → client)
 	WEB_FRAME: 'WFRM',        // Unified frame protocol (all layers)
 	WEB_ERROR: 'WERR',        // Error responses
 	CONFIG_UPDATE: 'CFG',
@@ -53,7 +57,7 @@ export function createMessage ({ type, id = generateMessageId(type) }, fields = 
 /**
  * Parse a SLID-formatted IPC message
  * @param {string} slidText SLID message text
- * @returns {Object} Parsed message with type and fields
+ * @returns {Object} Parsed message with type, id, capacity, and fields
  */
 export function parseMessage (slidText) {
 	const message = parseSLID(slidText);
@@ -64,45 +68,110 @@ export function parseMessage (slidText) {
 
 	const type = message.at(0);
 	const id = message.at('id');
+	const capacity = message.at('capacity'); // Extract capacity metadata
 	const fields = message.at(1);
 
 	if (!(fields instanceof NANOS)) {
 		throw new Error('Invalid IPC message format: fields must be NANOS');
 	}
 
-	return { type, id, fields };
+	return { type, id, capacity, fields };
 }
 
 /**
- * Encode message with length prefix for transmission
+ * Encode message with SOH prefix for transmission
  * @param {NANOS} message NANOS-structured message
  * @param {Uint8Array|null} binaryData Optional binary data
- * @returns {Uint8Array} Encoded message with length prefix
+ * @returns {Uint8Array} Encoded message with SOH prefix
  */
 export function encodeMessage (message, binaryData = null) {
+	const encoder = new TextEncoder();
+	
+	// Add dataSize to message if binary data present
+	if (binaryData && binaryData.length > 0) {
+		message.push({ dataSize: binaryData.length });
+	}
+	
 	// Convert SLID message to string with boundary markers
 	const slidText = message.toSLID();
-	const slidBytes = new TextEncoder().encode(slidText);
+	const slidBytes = encoder.encode(`${SOH}${slidText}\n`);
 
-	// Calculate total length
-	const totalLength = slidBytes.length + (binaryData ? binaryData.length : 0);
-
-	// Create buffer with length prefix
-	const buffer = new Uint8Array(4 + totalLength);
-	const view = new DataView(buffer.buffer);
-
-	// Write length prefix (big-endian)
-	view.setUint32(0, totalLength, false);
-
-	// Write SLID header
-	buffer.set(slidBytes, 4);
-
-	// Write binary data if present
-	if (binaryData) {
-		buffer.set(binaryData, 4 + slidBytes.length);
+	// If no binary data, return just the SLID message
+	if (!binaryData || binaryData.length === 0) {
+		return slidBytes;
 	}
 
+	// Combine SLID message and binary data
+	const buffer = new Uint8Array(slidBytes.length + binaryData.length);
+	buffer.set(slidBytes, 0);
+	buffer.set(binaryData, slidBytes.length);
+
 	return buffer;
+}
+
+/**
+ * Encode log level prefix for console interception
+ * @param {string} level Log level (debug, info, log, warn, error)
+ * @returns {Uint8Array} Encoded log level prefix
+ */
+export function encodeLogLevel (level) {
+	const message = new NANOS('log');
+	message.setOpts({ transform: true });
+	message.push([level]);
+	const slidText = message.toSLID();
+	return new TextEncoder().encode(`${SOH}${slidText}\n`);
+}
+
+/**
+ * Parse IPC message from line
+ * @param {string} line Input line
+ * @returns {Object|null} Parsed message or null if not IPC
+ */
+export function parseIPCMessage (line) {
+	// Check for SOH + [( prefix
+	if (!line.startsWith(SOH + '[(')) {
+		return null;
+	}
+
+	try {
+		// Parse SLID between boundary markers
+		const message = parseSLID(line);
+		const type = message.at(0);
+		const id = message.at('id');
+		const fields = message.at(1);
+		const dataSize = message.at('dataSize', 0);
+
+		if (!(fields instanceof NANOS)) {
+			throw new Error('Invalid IPC message format: fields must be NANOS');
+		}
+
+		return { type, id, fields, dataSize };
+	} catch (error) {
+		throw new Error(`Failed to parse IPC message: ${error.message}`);
+	}
+}
+
+/**
+ * Parse log level message
+ * @param {string} line Input line
+ * @returns {string|null} Log level or null if not a log message
+ */
+export function parseLogMessage (line) {
+	// Check for SOH + [(log prefix
+	if (!line.startsWith(SOH + '[(log ')) {
+		return null;
+	}
+
+	try {
+		const message = parseSLID(line);
+		if (message.at(0) === 'log') {
+			return message.at(1); // debug, info, log, warn, error
+		}
+	} catch (error) {
+		// Not a valid log message
+	}
+
+	return null;
 }
 
 /**
@@ -111,8 +180,104 @@ export function encodeMessage (message, binaryData = null) {
 export class IPCConnection {
 	constructor (conn) {
 		this.conn = conn;
-		this.readBuffer = new Uint8Array(0);
+		this.buffer = new Uint8Array(0);  // UNIFIED buffer (all bytes)
+		this.decoder = new TextDecoder();
 		this.closed = false;
+		
+		// State for message parsing
+		this.pendingMessage = null;  // Message waiting for binary data
+		this.binaryBytesNeeded = 0;  // How many binary bytes to extract
+		
+		// Callbacks for non-IPC content
+		this.onConsoleOutput = null;  // (text, logLevel) => void
+		this.currentLogLevel = 'log'; // Track most recent log level
+		
+		// Event-driven stream handlers
+		this.streamHandlers = new Map(); // requestId -> { handler, timeout, startTime }
+		this.globalHandlers = new Map(); // messageType -> handler function
+		this.monitoring = false;
+		this.onCapacityUpdate = null; // (capacity) => void
+	}
+
+	/**
+	 * Read bytes from connection, accumulating in buffer until we have enough
+	 * @param {number} count Number of bytes to read
+	 * @returns {Promise<Uint8Array|null>} Bytes read, or null if connection closed
+	 */
+	async readBytes (count) {
+		while (this.buffer.length < count) {
+			const { done, value } = await this.conn.read();
+			if (done) {
+				if (this.buffer.length === 0) return null;
+				throw new Error(`Connection closed while reading binary data (need ${count}, have ${this.buffer.length})`);
+			}
+			
+			// Append to buffer
+			const newBuffer = new Uint8Array(this.buffer.length + value.length);
+			newBuffer.set(this.buffer);
+			newBuffer.set(value, this.buffer.length);
+			this.buffer = newBuffer;
+		}
+		
+		// Extract requested bytes
+		const result = this.buffer.slice(0, count);
+		this.buffer = this.buffer.slice(count);
+		return result;
+	}
+
+	/**
+	 * Read a line from connection (up to \n), handling partial UTF-8 sequences
+	 * @returns {Promise<string|null>} Line read (without \n), or null if connection closed
+	 */
+	async readLine () {
+		while (true) {
+			// Try to decode buffer to text, handling partial UTF-8 at end
+			let text;
+			let validBytes = this.buffer.length;
+			
+			while (validBytes > 0) {
+				try {
+					text = this.decoder.decode(this.buffer.slice(0, validBytes), { stream: false });
+					break;
+				} catch (e) {
+					// Partial UTF-8 sequence at end
+					validBytes--;
+				}
+			}
+			
+			// Check for newline in decoded text
+			if (validBytes > 0) {
+				const newlineIndex = text.indexOf('\n');
+				if (newlineIndex !== -1) {
+					// Found complete line
+					const line = text.substring(0, newlineIndex);
+					
+					// Calculate bytes consumed (including \n)
+					const consumedBytes = new TextEncoder().encode(text.substring(0, newlineIndex + 1)).length;
+					this.buffer = this.buffer.slice(consumedBytes);
+					
+					return line;
+				}
+			}
+			
+			// Need more data
+			const { done, value } = await this.conn.read();
+			if (done) {
+				// Connection closed - return any remaining data as final line
+				if (validBytes > 0) {
+					const line = text;
+					this.buffer = new Uint8Array(0);
+					return line;
+				}
+				return null;
+			}
+			
+			// Append to buffer
+			const newBuffer = new Uint8Array(this.buffer.length + value.length);
+			newBuffer.set(this.buffer);
+			newBuffer.set(value, this.buffer.length);
+			this.buffer = newBuffer;
+		}
 	}
 
 	/**
@@ -120,48 +285,102 @@ export class IPCConnection {
 	 * @returns {Promise<{message: Object, binaryData: Uint8Array|null}>}
 	 */
 	async readMessage () {
-		// Read length prefix (4 bytes)
-		const lengthBytes = await this.readExactly(4);
-		if (!lengthBytes) {
-			return null; // Connection closed
+		while (true) {
+			// Read a line
+			const line = await this.readLine();
+			if (line === null) {
+				return null; // Connection closed
+			}
+			
+			// Check if line starts with SOH (IPC or log message)
+			if (!line.startsWith(SOH + '[(')) {
+				// Console output - forward to handler
+				if (this.onConsoleOutput && line.trim()) {
+					this.onConsoleOutput(line, this.currentLogLevel);
+				}
+				continue;
+			}
+			
+			// Check if it's a complete SLID block (ends with ')]')
+			let slidBlock = line;
+			if (!line.endsWith(')]')) {
+				// Multi-line SLID block - accumulate lines until we find ')]'
+				while (true) {
+					const nextLine = await this.readLine();
+					if (nextLine === null) {
+						throw new Error('Connection closed while reading multi-line SLID block');
+					}
+					slidBlock += '\n' + nextLine;
+					if (nextLine.endsWith(')]')) {
+						break;
+					}
+				}
+			}
+			
+			// Single-line SLID block
+			const result = await this.parseSlidMessage(slidBlock);
+			if (result) return result;
 		}
+	}
 
-		const view = new DataView(lengthBytes.buffer);
-		const messageLength = view.getUint32(0, false);
-
-		// Read message data
-		const messageBytes = await this.readExactly(messageLength);
-		if (!messageBytes) {
-			throw new Error('Connection closed while reading message');
+	/**
+	 * Parse a complete SLID message and handle it
+	 * @param {string} slidText Complete SLID text (including \n)
+	 * @returns {Promise<Object|null>} Message result or null to continue
+	 */
+	async parseSlidMessage (slidText) {
+		// Parse SLID
+		let message;
+		try {
+			message = parseSLID(slidText);
+		} catch (error) {
+			console.warn('Failed to parse SLID message:', error.message);
+			return null;
 		}
-
-		// Find SLID boundary markers
-		const messageText = new TextDecoder().decode(messageBytes);
-		const startMarker = messageText.indexOf('[(');
-		const endMarker = messageText.lastIndexOf(')]');
-
-		if (startMarker === -1 || endMarker === -1) {
-			throw new Error('Invalid message format: missing SLID boundary markers');
+		
+		const type = message.at(0);
+		
+		// Check for log level message
+		if (type === 'log') {
+			const logLevel = message.at(1);
+			if (logLevel) {
+				this.currentLogLevel = logLevel;
+			}
+			return null; // Continue reading
 		}
-
-		// Extract SLID header
-		const slidText = messageText.substring(startMarker, endMarker + 2);
-		const message = parseMessage(slidText);
-
-		// Extract binary data if present
-		const bodySize = message.fields.at('bodySize', 0);
+		
+		// IPC message
+		const id = message.at('id');
+		const capacity = message.at('capacity'); // Extract capacity metadata
+		const fields = message.at(1);
+		const dataSize = message.at('dataSize', 0);
+		
+		if (!(fields instanceof NANOS)) {
+			console.warn('Invalid IPC message format: fields must be NANOS');
+			return null;
+		}
+		
+		// Read binary data if present
 		let binaryData = null;
-
-		if (bodySize > 0) {
-			const slidLength = new TextEncoder().encode(slidText).length;
-			binaryData = messageBytes.slice(slidLength);
-
-			if (binaryData.length !== bodySize) {
-				throw new Error(`Binary data size mismatch: expected ${bodySize}, got ${binaryData.length}`);
+		if (dataSize > 0) {
+			binaryData = await this.readBytes(dataSize);
+			if (binaryData === null) {
+				throw new Error('Connection closed while reading binary data');
 			}
 		}
+		
+		return {
+			message: { type, id, capacity, fields },
+			binaryData
+		};
+	}
 
-		return { message, binaryData };
+	/**
+	 * Set callback for console output (non-IPC content)
+	 * @param {Function} callback (text, logLevel) => void
+	 */
+	setConsoleOutputHandler (callback) {
+		this.onConsoleOutput = callback;
 	}
 
 	/**
@@ -172,37 +391,6 @@ export class IPCConnection {
 	async writeMessage (message, binaryData = null) {
 		const encoded = encodeMessage(message, binaryData);
 		await this.conn.write(encoded);
-	}
-
-	/**
-	 * Read exactly n bytes from connection
-	 * @param {number} n Number of bytes to read
-	 * @returns {Promise<Uint8Array|null>}
-	 */
-	async readExactly (n) {
-		while (this.readBuffer.length < n) {
-			const chunk = new Uint8Array(8192);
-			const bytesRead = await this.conn.read(chunk);
-
-			if (bytesRead === null) {
-				// Connection closed
-				if (this.readBuffer.length === 0) {
-					return null;
-				}
-				throw new Error('Connection closed while reading');
-			}
-
-			// Append to buffer
-			const newBuffer = new Uint8Array(this.readBuffer.length + bytesRead);
-			newBuffer.set(this.readBuffer);
-			newBuffer.set(chunk.slice(0, bytesRead), this.readBuffer.length);
-			this.readBuffer = newBuffer;
-		}
-
-		// Extract requested bytes
-		const result = this.readBuffer.slice(0, n);
-		this.readBuffer = this.readBuffer.slice(n);
-		return result;
 	}
 
 	/**
@@ -224,6 +412,114 @@ export class IPCConnection {
 	 */
 	isClosed () {
 		return this.closed;
+	}
+
+	/**
+	 * Register handler for specific request stream
+	 * Handler receives multiple frames until stream completes
+	 * @param {string} requestId Request ID
+	 * @param {Function} handler (message, binaryData) => void | Promise<void>
+	 * @param {number} timeout Timeout in milliseconds
+	 */
+	registerStreamHandler (requestId, handler, timeout = 30000) {
+		const timeoutHandle = setTimeout(() => {
+			this.streamHandlers.delete(requestId);
+			handler(new Error(`Request ${requestId} timed out`), null);
+		}, timeout);
+
+		this.streamHandlers.set(requestId, {
+			handler,
+			timeout: timeoutHandle,
+			startTime: Date.now()
+		});
+	}
+
+	/**
+	 * Unregister stream handler
+	 */
+	unregisterStreamHandler (requestId) {
+		const entry = this.streamHandlers.get(requestId);
+		if (entry) {
+			clearTimeout(entry.timeout);
+			this.streamHandlers.delete(requestId);
+		}
+	}
+
+	/**
+	 * Register global handler for message type
+	 * For unsolicited messages (health checks, etc.)
+	 * @param {string} type Message type
+	 * @param {Function} handler (message, binaryData) => void | Promise<void>
+	 */
+	onMessage (type, handler) {
+		this.globalHandlers.set(type, handler);
+	}
+
+	/**
+	 * Start continuous monitoring (background task)
+	 */
+	async startMonitoring () {
+		if (this.monitoring) return;
+		this.monitoring = true;
+
+		while (this.monitoring && !this.closed) {
+			try {
+				const result = await this.readMessage();
+				if (!result) break; // Connection closed
+
+				const { message, binaryData } = result;
+				
+				// Update capacity from message metadata (if present)
+				if (message.capacity && this.onCapacityUpdate) {
+					this.onCapacityUpdate(message.capacity);
+				}
+				
+				// Check if this is part of a registered stream
+				const streamEntry = this.streamHandlers.get(message.id);
+				if (streamEntry) {
+					try {
+						await streamEntry.handler(message, binaryData);
+						
+						// Check if stream is complete (final frame with no keepAlive)
+						const final = message.fields.at('final', false);
+						const keepAlive = message.fields.at('keepAlive', false);
+						if (final && !keepAlive) {
+							this.unregisterStreamHandler(message.id);
+						}
+					} catch (error) {
+						console.error(`Stream handler error for ${message.id}:`, error);
+						this.unregisterStreamHandler(message.id);
+					}
+					continue;
+				}
+
+				// Otherwise, dispatch to global handler
+				const handler = this.globalHandlers.get(message.type);
+				if (handler) {
+					await handler(message, binaryData);
+				} else {
+					console.warn(`No handler for message type: ${message.type} (id: ${message.id})`);
+				}
+			} catch (error) {
+				if (this.monitoring) {
+					console.error('Monitoring error:', error);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Stop monitoring
+	 */
+	stopMonitoring () {
+		this.monitoring = false;
+		
+		// Cleanup all pending streams
+		for (const [requestId, entry] of this.streamHandlers) {
+			clearTimeout(entry.timeout);
+			entry.handler(new Error('Connection closed'), null);
+		}
+		this.streamHandlers.clear();
 	}
 }
 
@@ -267,20 +563,6 @@ export function createRequest (method, path, app, pool, headers, bodySize, remot
 		remote,
 		params,
 		tail,
-	});
-}
-
-/**
- * Create response message
- */
-export function createResponse (id, status, headers, bodySize, availableWorkers, totalWorkers, requestsQueued) {
-	return createMessage({ type: MessageType.WEB_RESPONSE, id }, {
-		status,
-		headers,
-		bodySize,
-		availableWorkers,
-		totalWorkers,
-		requestsQueued,
 	});
 }
 
@@ -329,6 +611,8 @@ export function createHealthCheck () {
  * @param {Uint8Array|null} options.data Frame chunk data
  * @param {boolean} options.final Last chunk of current frame
  * @param {boolean} options.keepAlive Connection stays open (optional, sticky state)
+ * @param {number} options.availableWorkers Available workers (capacity reporting, only in first frame)
+ * @param {number} options.totalWorkers Total workers (capacity reporting, only in first frame)
  * @param {number} options.initialCredits Bidi protocol parameter (only after status 101)
  * @param {number} options.maxChunkSize Bidi protocol parameter (only after status 101)
  * @param {number} options.maxBytesPerSecond Bidi protocol parameter (only after status 101)
@@ -337,24 +621,38 @@ export function createHealthCheck () {
  * @returns {NANOS} Frame message
  */
 export function createFrame (id, options = {}) {
-	const fields = {
-		dataSize: options.data ? options.data.length : 0,
-		final: options.final ?? false
-	};
-
-	// Copy all optional fields that are defined
+	// Build capacity object if workers info provided
+	let capacity = null;
+	if (options.availableWorkers !== undefined || options.totalWorkers !== undefined) {
+		capacity = {
+			availableWorkers: options.availableWorkers,
+			totalWorkers: options.totalWorkers
+		};
+	}
+	
+	// Copy all optional fields that are defined (except capacity fields which go at message level)
 	const optionalFields = [
 		'mode', 'status', 'headers', 'keepAlive',
 		'initialCredits', 'maxChunkSize', 'maxBytesPerSecond', 'idleTimeout', 'maxBufferSize'
 	];
-
+	
+	const fields = {};
 	for (const field of optionalFields) {
 		if (options[field] !== undefined) {
 			fields[field] = options[field];
 		}
 	}
-
-	return createMessage({ type: MessageType.WEB_FRAME, id }, fields);
+	if (options.final) fields.final = true;
+	
+	// Create message with capacity at message level
+	const message = new NANOS(MessageType.WEB_FRAME, { id });
+	message.setOpts({ transform: true });
+	if (capacity) {
+		message.push({ capacity });  // Add as named parameter
+	}
+	message.push([fields]);
+	if (options.data?.length) message.set('dataSize', options.data.length);
+	return message;
 }
 
 /**

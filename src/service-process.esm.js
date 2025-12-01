@@ -22,6 +22,7 @@
 import { NANOS } from './vendor.esm.js';
 import { IPCConnection, MessageType } from './ipc-protocol.esm.js';
 import { Configuration } from './configuration.esm.js';
+import { interceptConsole } from './console-intercept.esm.js';
 
 /**
  * Base class for service processes
@@ -39,8 +40,9 @@ export class ServiceProcess {
 	 * Create IPC connection using stdin/stdout
 	 */
 	createIPCConnection () {
+		const stdinReader = Deno.stdin.readable.getReader();
 		this.ipcConn = new IPCConnection({
-			read: (buffer) => Deno.stdin.read(buffer),
+			read: () => stdinReader.read(),
 			write: (data) => Deno.stdout.write(data),
 			close: () => {
 				Deno.stdin.close();
@@ -95,8 +97,10 @@ export class ServiceProcess {
 	async processMessages () {
 		const handlers = this.getMessageHandlers();
 
+		console.log(`[${this.processId}] Starting message processing loop...`);
 		while (!this.isShuttingDown) {
 			try {
+				console.log(`[${this.processId}] Waiting for IPC message...`);
 				const result = await this.ipcConn.readMessage();
 
 				if (!result) {
@@ -106,10 +110,13 @@ export class ServiceProcess {
 				}
 
 				const { message, binaryData } = result;
+				console.log(`[${this.processId}] Received IPC message: type=${message.type}, id=${message.id}`);
 				const handler = handlers.get(message.type);
 
 				if (handler) {
+					console.log(`[${this.processId}] Calling handler for ${message.type}...`);
 					await handler(message.id, message.fields, binaryData);
+					console.log(`[${this.processId}] Handler completed for ${message.type}`);
 				} else {
 					console.warn(`[${this.processId}] Unknown message type: ${message.type}`);
 				}
@@ -120,6 +127,7 @@ export class ServiceProcess {
 				console.error(`[${this.processId}] Message processing error:`, error);
 			}
 		}
+		console.log(`[${this.processId}] Message processing loop ended`);
 	}
 
 	/**
@@ -127,6 +135,9 @@ export class ServiceProcess {
 	 * Template method that orchestrates the startup sequence
 	 */
 	async start () {
+		// Intercept console methods BEFORE any logging
+		interceptConsole();
+		
 		console.log(`[${this.processId}] Starting ${this.processType} process...`);
 
 		// Create IPC connection

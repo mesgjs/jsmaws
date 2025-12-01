@@ -385,10 +385,7 @@ class OperatorProcess {
 		const bodySize = bodyBytes.byteLength;
 
 		// Convert headers to NANOS format
-		const headersNanos = new NANOS();
-		for (const [key, value] of req.headers.entries()) {
-			headersNanos.set(key, value);
-		}
+		const headersNanos = new NANOS().fromEntries(req.headers.entries());
 
 		// Create IPC request message
 		const requestMsg = createRequest(
@@ -403,24 +400,47 @@ class OperatorProcess {
 			match.tail || ''
 		);
 
-		// Send request to process
+		// Send request to process using stream handler
 		try {
-			await process.ipcConn.writeMessage(requestMsg, new Uint8Array(bodyBytes));
+			this.logger.debug(`Sending WEB_REQUEST to ${process.id} for ${req.method} ${new URL(req.url).pathname}`);
 
 			// Update affinity
 			if (appletPath) {
 				this.processManager.updateAffinity(process.id, appletPath);
 			}
 
-			// Wait for initial response
-			const { message, binaryData } = await process.ipcConn.readMessage();
+			// Create promise to capture first frame
+			const firstFramePromise = new Promise((resolve, reject) => {
+				let firstFrame = null;
+				let firstData = null;
 
-			// Update process capacity from response
-			process.updateCapacity(
-				message.fields.at('availableWorkers', 0),
-				message.fields.at('totalWorkers', 0),
-				message.fields.at('requestsQueued', 0)
-			);
+				// Register stream handler for this request
+				process.ipcConn.registerStreamHandler(
+					requestMsg.at('id'),
+					async (message, binaryData) => {
+						// Handle error
+						if (message instanceof Error) {
+							reject(message);
+							return;
+						}
+
+						// Capture first frame and resolve
+						if (!firstFrame) {
+							firstFrame = message;
+							firstData = binaryData;
+							resolve({ message: firstFrame, binaryData: firstData });
+						}
+					},
+					30000 // 30 second timeout
+				);
+			});
+
+			// Send request
+			await process.ipcConn.writeMessage(requestMsg, new Uint8Array(bodyBytes));
+
+			// Wait for first frame
+			this.logger.debug('Sent; waiting for first frame...');
+			const { message, binaryData } = await firstFramePromise;
 
 			// Handle frame message (unified protocol)
 			if (message.type === MessageType.WEB_FRAME) {
@@ -496,34 +516,47 @@ class OperatorProcess {
 					// If first frame is final and not keepAlive, close immediately
 					if (firstFinal && !keepAlive) {
 						controller.close();
+						process.ipcConn.unregisterStreamHandler(requestId);
 						return;
 					}
 
-					// Read subsequent frame messages
-					while (true) {
-						const { message: frameMsg, binaryData: frameData } = await process.ipcConn.readMessage();
-
-						if (frameMsg.type !== MessageType.WEB_FRAME) {
-							throw new Error(`Expected WEB_FRAME, got ${frameMsg.type}`);
-						}
-
-						// Send frame data chunk if present
-						if (frameData && frameData.length > 0) {
-							controller.enqueue(frameData);
-						}
-
-						// Check if final chunk
-						const final = frameMsg.fields.at('final', false);
-						if (final) {
-							const frameKeepAlive = frameMsg.fields.at('keepAlive', keepAlive);
-							if (!frameKeepAlive) {
-								// Last frame - close stream
-								controller.close();
-								break;
+					// Update stream handler to process subsequent frames
+					// (handler was already registered in forwardToServiceProcess)
+					// We need to replace it with one that feeds the controller
+					process.ipcConn.unregisterStreamHandler(requestId);
+					process.ipcConn.registerStreamHandler(
+						requestId,
+						async (message, binaryData) => {
+							// Handle error
+							if (message instanceof Error) {
+								controller.error(message);
+								return;
 							}
-							// Otherwise, more frames coming later (streaming mode)
-						}
-					}
+
+							if (message.type !== MessageType.WEB_FRAME) {
+								controller.error(new Error(`Expected WEB_FRAME, got ${message.type}`));
+								return;
+							}
+
+							// Send frame data chunk if present
+							if (binaryData && binaryData.length > 0) {
+								controller.enqueue(binaryData);
+							}
+
+							// Check if final chunk
+							const final = message.fields.at('final', false);
+							if (final) {
+								const frameKeepAlive = message.fields.at('keepAlive', keepAlive);
+								if (!frameKeepAlive) {
+									// Last frame - close stream
+									controller.close();
+								}
+								// Otherwise, more frames coming later (streaming mode)
+							}
+						},
+						300000 // 5 minute timeout for streaming
+						// FEEDBACK: this should be based on a pool default timeout with an optional route override
+					);
 				} catch (error) {
 					controller.error(error);
 				}
@@ -541,8 +574,30 @@ class OperatorProcess {
 	 */
 	async handleBidiUpgrade (requestId, firstFrame, process, req) {
 		try {
-			// Read protocol parameters from next frame (sent by responder after status 101)
-			const { message: paramsMsg } = await process.ipcConn.readMessage();
+			// Wait for protocol parameters from next frame (sent by responder after status 101)
+			const paramsPromise = new Promise((resolve, reject) => {
+				let gotParams = false;
+
+				// Update stream handler to capture protocol parameters
+				process.ipcConn.unregisterStreamHandler(requestId);
+				process.ipcConn.registerStreamHandler(
+					requestId,
+					async (message, binaryData) => {
+						if (message instanceof Error) {
+							reject(message);
+							return;
+						}
+
+						if (!gotParams) {
+							gotParams = true;
+							resolve(message);
+						}
+					},
+					30000 // FEEDBACK: need a configurable
+				);
+			});
+
+			const paramsMsg = await paramsPromise;
 
 			if (paramsMsg.type !== MessageType.WEB_FRAME) {
 				throw new Error(`Expected WEB_FRAME with protocol params, got ${paramsMsg.type}`);
@@ -694,70 +749,83 @@ class OperatorProcess {
 	}
 
 	/**
-	 * Read bidirectional frames from responder process
+	 * Read bidirectional frames from responder process using stream handler
 	 */
 	async readBidiFrames (requestId, connState) {
-		try {
-			while (this.bidiConnections.has(requestId)) {
-				const { message, binaryData } = await connState.process.ipcConn.readMessage();
-
-				if (message.type !== MessageType.WEB_FRAME) {
-					this.logger.warn(`Expected WEB_FRAME for bidi ${requestId}, got ${message.type}`);
-					continue;
-				}
-
-				const mode = message.fields.at('mode');
-				if (mode !== 'bidi') {
-					this.logger.warn(`Expected mode='bidi' for ${requestId}, got ${mode}`);
-					continue;
-				}
-
-				const final = message.fields.at('final', false);
-				const keepAlive = message.fields.at('keepAlive', true);
-
-				// Send data to WebSocket client
-				if (binaryData && binaryData.length > 0) {
-					const chunkSize = binaryData.length;
-
-					// Check credits
-					if (connState.outboundCredits < chunkSize) {
-						this.logger.warn(`Responder ${requestId} exceeded outbound credits`);
-						connState.socket.close(1008, 'Flow control violation');
-						this.bidiConnections.delete(requestId);
+		// Replace stream handler to process bidi frames
+		connState.process.ipcConn.unregisterStreamHandler(requestId);
+		connState.process.ipcConn.registerStreamHandler(
+			requestId,
+			async (message, binaryData) => {
+				try {
+					// Handle error
+					if (message instanceof Error) {
+						this.logger.error(`Bidi frame error for ${requestId}: ${message.message}`);
+						if (this.bidiConnections.has(requestId)) {
+							connState.socket.close(1011, 'Internal error');
+							this.bidiConnections.delete(requestId);
+						}
 						return;
 					}
 
-					// Consume credits
-					connState.outboundCredits -= chunkSize;
+					if (message.type !== MessageType.WEB_FRAME) {
+						this.logger.warn(`Expected WEB_FRAME for bidi ${requestId}, got ${message.type}`);
+						return;
+					}
 
-					// Send to client
-					connState.socket.send(binaryData);
+					const mode = message.fields.at('mode');
+					if (mode && mode !== 'bidi') {
+						this.logger.warn(`Expected mode='bidi' for ${requestId}, got ${mode}`);
+						return;
+					}
 
-					// Implicit credit grant
-					connState.outboundCredits = Math.min(
-						connState.outboundCredits + chunkSize,
-						connState.maxCredits
-					);
+					const final = message.fields.at('final', false);
+					const keepAlive = message.fields.at('keepAlive', true);
+
+					// Send data to WebSocket client
+					if (binaryData && binaryData.length > 0) {
+						const chunkSize = binaryData.length;
+
+						// Check credits
+						if (connState.outboundCredits < chunkSize) {
+							this.logger.warn(`Responder ${requestId} exceeded outbound credits`);
+							connState.socket.close(1008, 'Flow control violation');
+							this.bidiConnections.delete(requestId);
+							return;
+						}
+
+						// Consume credits
+						connState.outboundCredits -= chunkSize;
+
+						// Send to client
+						connState.socket.send(binaryData);
+
+						// Implicit credit grant
+						connState.outboundCredits = Math.min(
+							connState.outboundCredits + chunkSize,
+							connState.maxCredits
+						);
+					}
+
+					// Handle connection close
+					if (final && !keepAlive) {
+						connState.socket.close(1000, 'Normal closure');
+						this.bidiConnections.delete(requestId);
+					}
+
+					// Update activity timestamp
+					connState.lastActivity = Date.now();
+				} catch (error) {
+					this.logger.error(`Bidi frame handler error for ${requestId}: ${error.message}`);
+					if (this.bidiConnections.has(requestId)) {
+						connState.socket.close(1011, 'Internal error');
+						this.bidiConnections.delete(requestId);
+					}
 				}
-
-				// Handle connection close
-				if (final && !keepAlive) {
-					connState.socket.close(1000, 'Normal closure');
-					this.bidiConnections.delete(requestId);
-					return;
-				}
-
-				// Update activity timestamp
-				connState.lastActivity = Date.now();
-			}
-		} catch (error) {
-			this.logger.error(`Bidi frame read error for ${requestId}: ${error.message}`);
-			if (this.bidiConnections.has(requestId)) {
-				const conn = this.bidiConnections.get(requestId);
-				conn.socket.close(1011, 'Internal error');
-				this.bidiConnections.delete(requestId);
-			}
-		}
+			},
+			300000 // 5 minute timeout for long-lived connections
+			// FEEDBACK: config like streaming (pool/route)
+		);
 	}
 
 	/**
@@ -813,6 +881,30 @@ class OperatorProcess {
 	}
 
 	/**
+	 * Validate uid/gid configuration based on current user privileges
+	 */
+	validatePrivilegeConfiguration () {
+		const isRoot = Deno.uid() === 0;
+		const uid = this.configData.at('uid');
+		const gid = this.configData.at('gid');
+
+		if (isRoot) {
+			// Running as root - uid/gid are REQUIRED
+			if (!uid || !gid) {
+				const message = 'Fatal: uid and gid must be configured when running as root. Service processes require privilege dropping for security.';
+				this.logger.error(message);
+				throw new Error(message);
+			}
+			this.logger.info(`Privilege dropping configured: uid=${uid}, gid=${gid}`);
+		} else {
+			// Not running as root - uid/gid should NOT be present
+			if (uid || gid) {
+				this.logger.warn(`Warning: uid/gid configuration present (uid=${uid}, gid=${gid}), but will not be set (operator is not running as root).`);
+			}
+		}
+	}
+
+	/**
 	 * Reload HTTPS server with updated certificates
 	 */
 	async reloadHttpsServer () {
@@ -847,6 +939,9 @@ class OperatorProcess {
 	 */
 	async start () {
 		this.logger.info('Starting JSMAWS operator process...');
+
+		// Validate uid/gid configuration based on current user
+		this.validatePrivilegeConfiguration();
 
 		// Initialize router with current configuration
 		this.initializeRouter();
@@ -961,11 +1056,11 @@ async function main () {
 	console.log(`  HTTP Port: ${config.httpPort}`);
 	console.log(`  HTTPS Port: ${config.httpsPort}`);
 	console.log(`  Hostname: ${config.hostname}`);
-	console.log(`  No SSL Mode: ${config.noSSL}`);
+	console.log(`  SSL Mode: ${config.noSSL ? 'disabled' : 'enabled'}`);
 	console.log(`  Cert File: ${config.certFile || '(not configured)'}`);
 	console.log(`  Key File: ${config.keyFile || '(not configured)'}`);
 	console.log(`  SSL Check Interval: ${config.sslCheckIntervalHours} hour(s)`);
-	console.log(`  ACME Challenge Dir: ${config.acmeChallengeDir || '(not configured'}`);
+	console.log(`  ACME Challenge Dir: ${config.acmeChallengeDir || '(not configured)'}`);
 
 	// Create and start operator
 	const operator = new OperatorProcess(config, configFile);

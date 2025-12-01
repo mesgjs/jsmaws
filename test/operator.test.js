@@ -327,7 +327,8 @@ Deno.test("OperatorProcess - handleFrameResponse creates proper Response", async
 					fields: new NANOS({ final: true, keepAlive: false }),
 				};
 				return { message: finalFrame, binaryData: new Uint8Array(0) };
-			}
+			},
+			unregisterStreamHandler: () => {}
 		}
 	};
 

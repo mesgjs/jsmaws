@@ -20,13 +20,13 @@ Deno.test('createFrame - first frame with mode, status, headers', () => {
 
 	assertEquals(frame.at(0), MessageType.WEB_FRAME);
 	assertEquals(frame.at('id'), 'req-123');
+	assertEquals(frame.at('dataSize'), 3);
 
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), 'response');
 	assertEquals(fields.at('status'), 200);
 	assertExists(fields.at('headers'));
-	assertEquals(fields.at('dataSize'), 3);
-	assertEquals(fields.at('final'), false);
+	assertEquals(fields.at('final', false), false);
 	assertEquals(fields.at('keepAlive'), false);
 });
 
@@ -38,13 +38,13 @@ Deno.test('createFrame - subsequent frame without mode/status/headers', () => {
 
 	assertEquals(frame.at(0), MessageType.WEB_FRAME);
 	assertEquals(frame.at('id'), 'req-123');
+	assertEquals(frame.at('dataSize'), 3);
 
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), undefined);
 	assertEquals(fields.at('status'), undefined);
 	assertEquals(fields.at('headers'), undefined);
-	assertEquals(fields.at('dataSize'), 3);
-	assertEquals(fields.at('final'), false);
+	assertEquals(fields.at('final', false), false);
 	assertEquals(fields.at('keepAlive'), undefined);
 });
 
@@ -70,11 +70,11 @@ Deno.test('createFrame - bidi mode with protocol parameters', () => {
 		keepAlive: true
 	});
 
+	assertEquals(frame.at('dataSize', 0), 0);
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), 'bidi');
 	assertEquals(fields.at('status'), 101);
 	assertEquals(fields.at('keepAlive'), true);
-	assertEquals(fields.at('dataSize'), 0);
 });
 
 Deno.test('createFrame - protocol parameters frame', () => {
@@ -106,10 +106,10 @@ Deno.test('createFrame - stream mode first frame', () => {
 		keepAlive: true
 	});
 
+	assertEquals(frame.at('dataSize', 0), 0);
 	const fields = frame.at(1);
 	assertEquals(fields.at('mode'), 'stream');
 	assertEquals(fields.at('keepAlive'), true);
-	assertEquals(fields.at('dataSize'), 0);
 });
 
 Deno.test('createFrame - null data with final true', () => {
@@ -119,7 +119,7 @@ Deno.test('createFrame - null data with final true', () => {
 	});
 
 	const fields = frame.at(1);
-	assertEquals(fields.at('dataSize'), 0);
+	assertEquals(fields.at('dataSize', 0), 0);
 	assertEquals(fields.at('final'), true);
 });
 
@@ -147,9 +147,9 @@ Deno.test('createError - error with details', () => {
 Deno.test('createFrame - options object defaults', () => {
 	const frame = createFrame('req-123', {});
 
+	assertEquals(frame.at('dataSize', 0), 0);
 	const fields = frame.at(1);
-	assertEquals(fields.at('dataSize'), 0);
-	assertEquals(fields.at('final'), false);
+	assertEquals(fields.at('final', false), false);
 	assertEquals(fields.at('mode'), undefined);
 	assertEquals(fields.at('keepAlive'), undefined);
 });
@@ -163,7 +163,7 @@ Deno.test('createFrame - large data chunk', () => {
 		final: true
 	});
 
+	assertEquals(frame.at('dataSize'), 65536);
 	const fields = frame.at(1);
-	assertEquals(fields.at('dataSize'), 65536);
 	assertEquals(fields.at('final'), true);
 });
