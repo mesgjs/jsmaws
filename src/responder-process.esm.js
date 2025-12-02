@@ -115,8 +115,8 @@ class ResponderProcess extends ServiceProcess {
 			type: 'module',
 			deno: { permissions },
 		});
-		if (worker) console.log(`Created worker for applet "${appletPath}"`);
-		if (!worker) console.error(`Failed to create worker for applet "${appletPath}"`);
+		if (worker) console.debug(`[${this.processId}] Created worker for applet "${appletPath}"`);
+		else console.error(`[${this.processId}] Failed to create worker for applet "${appletPath}"`);
 
 		return worker;
 	}
@@ -141,7 +141,7 @@ class ResponderProcess extends ServiceProcess {
 	async handleWebRequest (id, fields, binaryData) {
 		try {
 			// Validate required fields
-			validateMessage({ fields }, ['method', 'path', 'app', 'pool']);
+			validateMessage({ fields }, ['method', 'url', 'app', 'pool']);
 
 			// Check if we're at capacity
 			if (this.activeRequests.size >= this.maxConcurrentRequests) {
@@ -151,34 +151,42 @@ class ResponderProcess extends ServiceProcess {
 			}
 
 			const method = fields.at('method');
-			const path = fields.at('path');
+			const url = fields.at('url');           // Complete URL
 			const app = fields.at('app');
 			const root = fields.at('root'); // Route-specific root (local or global)
 			const headers = fields.at('headers') || new NANOS();
-			const params = fields.at('params') || new NANOS();
-			const query = fields.at('query') || new NANOS();
-			const tail = fields.at('tail', '');
+			const routeParams = fields.at('routeParams') || new NANOS();  // Renamed from params
+			const routeTail = fields.at('routeTail', '');                 // Renamed from tail
+			const routeSpec = fields.at('routeSpec');  // Route specification for timeout resolution
 
-			console.log(`[${this.processId}] Request: ${method.toUpperCase()} ${path} -> ${app}`);
+			const urlObj = new URL(url);
+			console.log(`[${this.processId}] Request: ${method.toUpperCase()} ${urlObj.pathname} -> ${app}`);
 
 			// Spawn applet worker
 			const worker = this.spawnAppletWorker(app);
 
-			// Get request timeout from pool config
-			const poolConfig = this.config.getPoolConfig(this.poolName);
-			const reqTimeout = poolConfig?.at('reqTimeout', 30) || 30;
+			// Resolve timeout configuration with hierarchy: route > pool > global
+			const timeouts = this.config.getTimeoutConfig(this.poolName, routeSpec);
+			const { reqTimeout, idleTimeout, conTimeout } = timeouts;
 
-			// Set up timeout
-			const timeout = setTimeout(() => {
+			console.log(`[${this.processId}] Timeouts: req=${reqTimeout}s, idle=${idleTimeout}s, con=${conTimeout}s`);
+
+			// Set up request timeout
+			const timeout = reqTimeout ? setTimeout(() => {
 				if (this.activeRequests.has(id)) {
-					console.warn(`[${this.processId}] Request ${id} timed out`);
+					console.warn(`[${this.processId}] Request ${id} timed out after ${reqTimeout}s`);
 					this.cleanupRequest(id);
 					this.sendErrorResponse(id, 504, 'Gateway Timeout').catch(console.error);
 				}
-			}, reqTimeout * 1000);
+			}, reqTimeout * 1000) : null;
 
-			// Track active request
-			this.activeRequests.set(id, { worker, timeout, isStreaming: false });
+			// Track active request with timeout configuration
+			this.activeRequests.set(id, {
+				worker,
+				timeout,
+				isStreaming: false,
+				timeouts: { reqTimeout, idleTimeout, conTimeout }
+			});
 
 			// Handle messages from applet worker
 			worker.onmessage = (event) => {
@@ -193,18 +201,9 @@ class ResponderProcess extends ServiceProcess {
 				this.sendErrorResponse(id, 500, 'Internal Server Error');
 			};
 
-			// Convert headers and params to plain objects for applet
-			const headersObj = headers instanceof NANOS
-				? Object.fromEntries(headers.namedEntries())
-				: {};
-
-			const paramsObj = params instanceof NANOS
-				? Object.fromEntries(params.namedEntries())
-				: {};
-
-			const queryObj = query instanceof NANOS
-				? Object.fromEntries(query.namedEntries())
-				: {};
+			// Convert headers and routeParams to plain objects for applet postMessage
+			const headersObj = headers?.size ? headers.toObject({ array: true }) : {};
+			const routeParamsObj = routeParams?.size ? routeParams.toObject() : {};
 
 			// Check for built-in applets and prepare configuration
 			let builtinConfig = null;
@@ -221,12 +220,16 @@ class ResponderProcess extends ServiceProcess {
 				type: 'request',
 				id,
 				method: method.toUpperCase(),
-				path,
+				url,                                    // Complete URL
 				headers: headersObj,
-				params: paramsObj,
-				query: queryObj,
-				tail,
+				routeParams: routeParamsObj,            // Renamed from params
+				routeTail,                              // Renamed from tail
 				body: binaryData,
+				timeouts: {                             // Pass all timeout values
+					request: reqTimeout,
+					idle: idleTimeout,
+					connection: conTimeout,
+				},
 				maxChunkSize: this.chunkingConfig.chunkSize, // Hard security limit
 			};
 
@@ -294,6 +297,11 @@ class ResponderProcess extends ServiceProcess {
 	async handleFrame (id, data, requestInfo) {
 		const { mode, status, headers, data: frameData, final, keepAlive } = data;
 
+		// Clear idle timeout when new frame arrives (processing starts)
+		if (requestInfo.idleTimeout) {
+			this.clearIdleTimeout(id);
+		}
+
 		// First frame - establish connection
 		if (mode !== undefined) {
 			await this.handleFirstFrame(id, data, requestInfo);
@@ -338,8 +346,55 @@ class ResponderProcess extends ServiceProcess {
 			// Cleanup if not keepAlive
 			if (!requestInfo.keepAlive) {
 				this.cleanupRequest(id);
+			} else if (requestInfo.timeouts.idleTimeout > 0) {
+				// Restart idle timeout after sending final frame (between frames)
+				requestInfo.idleTimeout = this.startIdleTimeout(id, requestInfo.timeouts.idleTimeout);
 			}
 		}
+	}
+
+	/**
+	 * Start idle timeout for streaming/bidi connections
+	 * Only active between frames, not during request processing
+	 */
+	startIdleTimeout (id, idleTimeout) {
+		if (idleTimeout <= 0) return null;  // Disabled
+
+		return setTimeout(() => {
+			const requestInfo = this.activeRequests.get(id);
+			if (requestInfo && requestInfo.keepAlive) {
+				console.warn(`[${this.processId}] Connection ${id} idle timeout after ${idleTimeout}s`);
+				this.cleanupRequest(id);
+				this.sendErrorResponse(id, 408, 'Request Timeout').catch(console.error);
+			}
+		}, idleTimeout * 1000);
+	}
+
+	/**
+	 * Clear idle timeout (called when new frame arrives)
+	 */
+	clearIdleTimeout (id) {
+		const requestInfo = this.activeRequests.get(id);
+		if (requestInfo && requestInfo.idleTimeout) {
+			clearTimeout(requestInfo.idleTimeout);
+			requestInfo.idleTimeout = null;
+		}
+	}
+
+	/**
+	 * Start connection timeout for streaming/bidi connections
+	 */
+	startConnectionTimeout (id, conTimeout) {
+		if (conTimeout <= 0) return null;  // Disabled
+
+		return setTimeout(() => {
+			const requestInfo = this.activeRequests.get(id);
+			if (requestInfo && requestInfo.keepAlive) {
+				console.warn(`[${this.processId}] Connection ${id} lifetime timeout after ${conTimeout}s`);
+				this.cleanupRequest(id);
+				this.sendErrorResponse(id, 408, 'Request Timeout').catch(console.error);
+			}
+		}, conTimeout * 1000);
 	}
 
 	/**
@@ -355,6 +410,14 @@ class ResponderProcess extends ServiceProcess {
 		requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
 		requestInfo.frameBuffer = [];
 		requestInfo.totalBuffered = 0;
+
+		// Start connection timeout for long-lived connections (runs for entire connection lifetime)
+		if (requestInfo.keepAlive && requestInfo.timeouts.conTimeout > 0) {
+			requestInfo.connectionTimeout = this.startConnectionTimeout(
+				id,
+				requestInfo.timeouts.conTimeout
+			);
+		}
 
 		// Calculate available capacity for operator (backpressure-aware)
 		const availableWorkers = this.bpAvailWorkers();
@@ -384,6 +447,9 @@ class ResponderProcess extends ServiceProcess {
 		// For response/stream modes, if first frame is final and not keepAlive, cleanup
 		if (final && !requestInfo.keepAlive) {
 			this.cleanupRequest(id);
+		} else if (requestInfo.keepAlive && final && requestInfo.timeouts.idleTimeout > 0) {
+			// Start idle timeout after sending final frame (between frames)
+			requestInfo.idleTimeout = this.startIdleTimeout(id, requestInfo.timeouts.idleTimeout);
 		}
 	}
 
@@ -636,7 +702,9 @@ class ResponderProcess extends ServiceProcess {
 	cleanupRequest (id) {
 		const requestInfo = this.activeRequests.get(id);
 		if (requestInfo) {
-			clearTimeout(requestInfo.timeout);
+			clearTimeout(requestInfo.timeout);           // Request timeout
+			clearTimeout(requestInfo.idleTimeout);       // Idle timeout
+			clearTimeout(requestInfo.connectionTimeout); // Connection timeout
 			requestInfo.worker.terminate();
 		}
 

@@ -68,12 +68,12 @@ Deno.test('IPCConnection - stream handler registration', async () => {
 	};
 
 	// Register handler
-	ipcConn.registerStreamHandler('test-123', handler, 1000);
-	assertEquals(ipcConn.streamHandlers.size, 1);
+	ipcConn.setRequestHandler('test-123', handler, 1000);
+	assertEquals(ipcConn.requestHandlers.size, 1);
 
 	// Unregister handler
-	ipcConn.unregisterStreamHandler('test-123');
-	assertEquals(ipcConn.streamHandlers.size, 0);
+	ipcConn.clearRequestHandler('test-123');
+	assertEquals(ipcConn.requestHandlers.size, 0);
 
 	await ipcConn.close();
 });
@@ -93,7 +93,7 @@ Deno.test('IPCConnection - stream handler timeout', async () => {
 	};
 
 	// Register handler with short timeout
-	ipcConn.registerStreamHandler('test-123', handler, 100);
+	ipcConn.setRequestHandler('test-123', handler, 100);
 
 	// Wait for timeout
 	await new Promise(resolve => setTimeout(resolve, 150));
@@ -101,7 +101,7 @@ Deno.test('IPCConnection - stream handler timeout', async () => {
 	// Handler should have been called with timeout error
 	assertEquals(errorReceived !== null, true);
 	assertEquals(errorReceived.message.includes('timed out'), true);
-	assertEquals(ipcConn.streamHandlers.size, 0);
+	assertEquals(ipcConn.requestHandlers.size, 0);
 
 	await ipcConn.close();
 });
@@ -121,7 +121,7 @@ Deno.test('IPCConnection - multiple frames to handler', async () => {
 	};
 
 	// Register handler
-	ipcConn.registerStreamHandler('req-123', handler, 5000);
+	ipcConn.setRequestHandler('req-123', handler, 5000);
 
 	// Start monitoring
 	ipcConn.startMonitoring();
@@ -171,7 +171,7 @@ Deno.test('IPCConnection - multiple frames to handler', async () => {
 	assertEquals(new TextDecoder().decode(receivedFrames[2].binaryData), 'chunk3');
 
 	// Handler should be auto-unregistered after final frame
-	assertEquals(ipcConn.streamHandlers.size, 0);
+	assertEquals(ipcConn.requestHandlers.size, 0);
 
 	ipcConn.stopMonitoring();
 	mock.close();
@@ -256,7 +256,7 @@ Deno.test('IPCConnection - capacity update callback', async () => {
 	};
 
 	// Register a stream handler to receive the frame
-	ipcConn.registerStreamHandler('req-123', async (message, binaryData) => {
+	ipcConn.setRequestHandler('req-123', async (message, binaryData) => {
 		// Handler receives the frame
 	}, 5000);
 
@@ -304,17 +304,17 @@ Deno.test('IPCConnection - cleanup on close', async () => {
 	};
 
 	// Register multiple handlers
-	ipcConn.registerStreamHandler('req-1', handler, 5000);
-	ipcConn.registerStreamHandler('req-2', handler, 5000);
-	ipcConn.registerStreamHandler('req-3', handler, 5000);
+	ipcConn.setRequestHandler('req-1', handler, 5000);
+	ipcConn.setRequestHandler('req-2', handler, 5000);
+	ipcConn.setRequestHandler('req-3', handler, 5000);
 
-	assertEquals(ipcConn.streamHandlers.size, 3);
+	assertEquals(ipcConn.requestHandlers.size, 3);
 
 	// Stop monitoring (simulates connection close)
 	ipcConn.stopMonitoring();
 
 	// All handlers should be cleaned up and called with error
-	assertEquals(ipcConn.streamHandlers.size, 0);
+	assertEquals(ipcConn.requestHandlers.size, 0);
 	assertEquals(errorCount, 3);
 
 	await ipcConn.close();
@@ -330,13 +330,13 @@ Deno.test('IPCConnection - concurrent stream handlers', async () => {
 	const req1Frames = [];
 	const req2Frames = [];
 
-	ipcConn.registerStreamHandler('req-1', async (message, binaryData) => {
+	ipcConn.setRequestHandler('req-1', async (message, binaryData) => {
 		if (!(message instanceof Error)) {
 			req1Frames.push(message);
 		}
 	}, 5000);
 
-	ipcConn.registerStreamHandler('req-2', async (message, binaryData) => {
+	ipcConn.setRequestHandler('req-2', async (message, binaryData) => {
 		if (!(message instanceof Error)) {
 			req2Frames.push(message);
 		}
@@ -393,7 +393,7 @@ Deno.test('IPCConnection - concurrent stream handlers', async () => {
 	assertEquals(req2Frames.length, 2);
 
 	// Both handlers should be auto-unregistered
-	assertEquals(ipcConn.streamHandlers.size, 0);
+	assertEquals(ipcConn.requestHandlers.size, 0);
 
 	// Cleanup
 	ipcConn.stopMonitoring();

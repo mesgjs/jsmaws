@@ -258,7 +258,7 @@ async function handleRangeRequest (id, resolvedPath, fileSize, rangeHeader, cont
  * Main message handler
  */
 self.onmessage = async (event) => {
-	const { type, id, path, headers, params, tail, config } = event.data;
+	const { type, id, url, headers, routeParams, routeTail, config } = event.data;
 
 	if (type !== 'request') return;
 
@@ -275,8 +275,8 @@ self.onmessage = async (event) => {
 		const explicitMimeType = config?.mimeType || null;
 		const chunkSize = event.data.maxChunkSize || 65536; // Use maxChunkSize from request
 
-		// Construct file path from tail
-		const filePath = `${root}${tail}`;
+		// Construct file path from routeTail
+		const filePath = `${root}${routeTail}`;
 
 		// Security: Prevent directory traversal
 		const resolvedPath = await Deno.realPath(filePath).catch(() => null);

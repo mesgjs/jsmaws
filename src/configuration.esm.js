@@ -142,6 +142,40 @@ export class Configuration {
 	}
 
 	/**
+	 * Get timeout configuration with hierarchy: route > pool > global
+	 * @param {string} poolName Pool name
+	 * @param {NANOS|null} routeSpec Route specification (optional)
+	 * @returns {Object} Timeout configuration with reqTimeout, idleTimeout, conTimeout
+	 */
+	getTimeoutConfig (poolName, routeSpec = null) {
+		// Global defaults (lowest priority)
+		const defaults = {
+			reqTimeout: this.config.at('reqTimeout', 30),
+			idleTimeout: this.config.at('idleTimeout', 0),
+			conTimeout: this.config.at('conTimeout', 0),
+		};
+
+		// Pool overrides (medium priority)
+		const poolConfig = this.getPoolConfig(poolName);
+		const poolTimeouts = {
+			reqTimeout: poolConfig?.at('reqTimeout', defaults.reqTimeout) ?? defaults.reqTimeout,
+			idleTimeout: poolConfig?.at('idleTimeout', defaults.idleTimeout) ?? defaults.idleTimeout,
+			conTimeout: poolConfig?.at('conTimeout', defaults.conTimeout) ?? defaults.conTimeout,
+		};
+
+		// Route overrides (highest priority)
+		if (routeSpec) {
+			return {
+				reqTimeout: routeSpec.at('reqTimeout', poolTimeouts.reqTimeout),
+				idleTimeout: routeSpec.at('idleTimeout', poolTimeouts.idleTimeout),
+				conTimeout: routeSpec.at('conTimeout', poolTimeouts.conTimeout),
+			};
+		}
+
+		return poolTimeouts;
+	}
+
+	/**
 	 * Get MIME types configuration
 	 * @returns {NANOS} MIME types mapping
 	 */

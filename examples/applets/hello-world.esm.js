@@ -6,19 +6,26 @@
  */
 
 self.onmessage = (event) => {
-	const { type, id, method, path, query } = event.data;
+	const { type, id, method, url, routeParams, routeTail } = event.data;
 	
 	if (type !== 'request') return;
 	
 	try {
+		// Parse URL to access query parameters
+		const urlObj = new URL(url);
+		const searchParams = new URLSearchParams(urlObj.search);
+		
 		// Get name from query parameter or use default
-		const name = query?.name || 'World';
+		const name = searchParams.get('name') || 'World';
 		
 		// Create response body
 		const responseBody = JSON.stringify({
 			message: `Hello, ${name}!`,
 			method,
-			path,
+			path: urlObj.pathname,
+			url,
+			routeParams,
+			routeTail,
 			timestamp: new Date().toISOString()
 		});
 		

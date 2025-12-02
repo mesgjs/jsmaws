@@ -74,16 +74,70 @@ Based on research into servlet containers and application servers (see [`service
 - **`idleTimeout`**: Seconds before idle process exits (default: 300)
   - Only applies when `scaling=dynamic` or `scaling=ondemand`
   - Processes beyond `minProcs` exit after being idle this long
+  - **Note**: This is process idle timeout, not connection idle timeout
+
+### Timeout Parameters
+
+JSMAWS implements a three-tier timeout hierarchy for request processing and connection management. These timeouts can be configured at global, pool, and route levels.
+
+- **`reqTimeout`**: Request processing timeout in seconds (default: 30)
+  - Maximum time for processing a single request or frame
+  - Applies during active request processing
+  - Value of `0` disables the timeout
+  - Hierarchy: Route > Pool > Global
   
-- **`reqTimeout`**: Per-request timeout in seconds (default: 30)
-  - Maximum time a single request can take
-  - Value of `0` means no timeout
-  - Useful for preventing runaway requests
+- **`idleTimeout`** (connection): Idle timeout between frames in seconds (default: 60)
+  - Maximum idle time between frames in streaming/bidirectional connections
+  - Only active BETWEEN frames, NOT during request processing
+  - Each idle period gets full configured duration
+  - Value of `0` disables the timeout
+  - Hierarchy: Route > Pool > Global
+  - **Note**: Different from process `idleTimeout` (see above)
   
-- **`conTimeout`**: Connection timeout in seconds (default: 60)
-  - For long-lived connections (WebSocket, SSE)
-  - Maximum idle time before connection closed
-  - Only relevant for streaming protocols
+- **`conTimeout`**: Connection lifetime timeout in seconds (default: 300)
+  - Maximum lifetime for entire connection in streaming/bidirectional modes
+  - Starts with first `keepAlive` frame
+  - Runs for entire connection duration
+  - Value of `0` disables the timeout
+  - Hierarchy: Route > Pool > Global
+  - Only relevant for streaming/bidirectional protocols
+
+**Timeout Hierarchy**: All three timeouts support configuration at three levels:
+1. **Route level**: Highest priority (overrides pool and global)
+2. **Pool level**: Medium priority (overrides global)
+3. **Global level**: Lowest priority (default values)
+
+**Example**:
+```slid
+[(
+  /* Global timeout defaults */
+  reqTimeout=30
+  idleTimeout=60
+  conTimeout=300
+  
+  pools=[
+    fast=[
+      reqTimeout=5      /* Override: fast pool has shorter timeout */
+      /* idleTimeout and conTimeout inherit global defaults */
+    ]
+    standard=[
+      minProcs=1
+      maxProcs=20
+      scaling=dynamic
+      reqTimeout=60     /* Override: longer timeout for standard pool */
+    ]
+    stream=[
+      reqTimeout=0      /* Override: no request timeout for streaming */
+      conTimeout=3600   /* Override: 1 hour connection timeout */
+      /* idleTimeout inherits global: 60 seconds */
+    ]
+  ]
+  
+  routes=[
+    [path=/api/slow pool=standard reqTimeout=120]  /* Override: 2 minute timeout */
+  ]
+)]
+```
 
 ### Response Chunking Parameters
 
@@ -201,13 +255,15 @@ standard=[
   maxReqs=100
   idleTimeout=600
   reqTimeout=60
+  conTimeout=300
 ]
 ```
 
 **Characteristics**:
 - Persistent processes with moderate request capacity
 - Moderate worker concurrency (up to 4 concurrent requests per process)
-- Longer timeout (60s) for general operations
+- Longer request timeout (60s) for general operations
+- Standard connection timeout (5 minutes)
 - Lower `maxReqs` for more frequent process recycling
 - Handles general JavaScript applet execution
 
@@ -219,15 +275,17 @@ stream=[
   scaling=ondemand
   maxWorkers=1
   maxReqs=1
-  conTimeout=3600
   reqTimeout=0
+  idleTimeout=60
+  conTimeout=3600
 ]
 ```
 
 **Characteristics**:
 - One connection per process (`maxReqs=1`, `maxWorkers=1`)
-- Long connection timeout (1 hour)
 - No request timeout (streaming can be indefinite)
+- Standard idle timeout (60s between frames)
+- Long connection timeout (1 hour)
 - Spawned on demand, killed when connection closes
 - Exactly one worker per process (enforced)
 

@@ -328,7 +328,7 @@ Deno.test("OperatorProcess - handleFrameResponse creates proper Response", async
 				};
 				return { message: finalFrame, binaryData: new Uint8Array(0) };
 			},
-			unregisterStreamHandler: () => {}
+			clearRequestHandler: () => {}
 		}
 	};
 

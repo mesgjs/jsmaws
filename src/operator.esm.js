@@ -380,6 +380,9 @@ class OperatorProcess {
 			);
 		}
 
+		// Capture route spec in closure scope (not on process object to avoid race conditions)
+		const routeSpec = route.spec || null;
+
 		// Read request body
 		const bodyBytes = req.body ? await req.arrayBuffer() : new ArrayBuffer(0);
 		const bodySize = bodyBytes.byteLength;
@@ -387,27 +390,33 @@ class OperatorProcess {
 		// Convert headers to NANOS format
 		const headersNanos = new NANOS().fromEntries(req.headers.entries());
 
-		// Create IPC request message
-		const requestMsg = createRequest(
-			req.method,
-			new URL(req.url).pathname,
-			appletPath,
-			poolName,
-			headersNanos,
+		// Create IPC request message with complete URL and route spec
+		const requestMsg = createRequest({
+			method: req.method,
+			url: req.url,                    // Complete URL
+			app: appletPath,
+			pool: poolName,
+			headers: headersNanos,
 			bodySize,
 			remote,
-			match.params || {},
-			match.tail || ''
-		);
+			routeParams: match.params || {}, // Renamed from params
+			routeTail: match.tail || '',     // Renamed from tail
+			routeSpec: route.spec || null,   // Add route spec for timeout resolution
+		});
 
 		// Send request to process using stream handler
 		try {
-			this.logger.debug(`Sending WEB_REQUEST to ${process.id} for ${req.method} ${new URL(req.url).pathname}`);
+			const url = new URL(req.url);
+			this.logger.debug(`Sending WEB_REQUEST to ${process.id} for ${req.method} ${url.pathname}`);
 
 			// Update affinity
 			if (appletPath) {
 				this.processManager.updateAffinity(process.id, appletPath);
 			}
+
+			// Get timeout configuration for initial request
+			const timeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
+			const reqTimeout = timeouts.reqTimeout * 1000;
 
 			// Create promise to capture first frame
 			const firstFramePromise = new Promise((resolve, reject) => {
@@ -415,7 +424,7 @@ class OperatorProcess {
 				let firstData = null;
 
 				// Register stream handler for this request
-				process.ipcConn.registerStreamHandler(
+				process.ipcConn.setRequestHandler(
 					requestMsg.at('id'),
 					async (message, binaryData) => {
 						// Handle error
@@ -431,7 +440,7 @@ class OperatorProcess {
 							resolve({ message: firstFrame, binaryData: firstData });
 						}
 					},
-					30000 // 30 second timeout
+					reqTimeout
 				);
 			});
 
@@ -444,7 +453,7 @@ class OperatorProcess {
 
 			// Handle frame message (unified protocol)
 			if (message.type === MessageType.WEB_FRAME) {
-				return await this.handleFrameResponse(message.id, message, binaryData, process, req);
+				return await this.handleFrameResponse(message.id, message, binaryData, process, req, poolName, routeSpec);
 			} else {
 				throw new Error(`Unexpected message type: ${message.type}`);
 			}
@@ -479,7 +488,7 @@ class OperatorProcess {
 	/**
 	 * Handle frame response (unified protocol)
 	 */
-	async handleFrameResponse (requestId, firstFrame, firstData, process, req) {
+	async handleFrameResponse (requestId, firstFrame, firstData, process, req, poolName, routeSpec) {
 		const mode = firstFrame.fields.at('mode');
 		const status = firstFrame.fields.at('status', 200);
 		const headers = this.convertHeaders(firstFrame.fields.at('headers'));
@@ -488,12 +497,12 @@ class OperatorProcess {
 
 		// Handle bidirectional upgrade
 		if (mode === 'bidi' && status === 101) {
-			return await this.handleBidiUpgrade(requestId, firstFrame, process, req);
+			return await this.handleBidiUpgrade(requestId, firstFrame, process, req, poolName, routeSpec);
 		}
 
 		// Handle response/stream modes
 		if (mode === 'response' || mode === 'stream') {
-			return await this.handleResponseStream(requestId, status, headers, keepAlive, final, firstData, process);
+			return await this.handleResponseStream(requestId, status, headers, keepAlive, final, firstData, process, poolName, routeSpec);
 		}
 
 		// Unknown mode
@@ -503,7 +512,7 @@ class OperatorProcess {
 	/**
 	 * Handle response or stream mode frames
 	 */
-	async handleResponseStream (requestId, status, headers, keepAlive, firstFinal, firstData, process) {
+	async handleResponseStream (requestId, status, headers, keepAlive, firstFinal, firstData, process, poolName, routeSpec) {
 		// Create readable stream to handle frame messages
 		const stream = new ReadableStream({
 			start: async (controller) => {
@@ -516,15 +525,20 @@ class OperatorProcess {
 					// If first frame is final and not keepAlive, close immediately
 					if (firstFinal && !keepAlive) {
 						controller.close();
-						process.ipcConn.unregisterStreamHandler(requestId);
+						process.ipcConn.clearRequestHandler(requestId);
 						return;
 					}
 
 					// Update stream handler to process subsequent frames
 					// (handler was already registered in forwardToServiceProcess)
 					// We need to replace it with one that feeds the controller
-					process.ipcConn.unregisterStreamHandler(requestId);
-					process.ipcConn.registerStreamHandler(
+					process.ipcConn.clearRequestHandler(requestId);
+					
+					// Get timeout configuration from route/pool hierarchy (captured in closure)
+					const streamTimeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
+					const streamConTimeout = streamTimeouts.conTimeout * 1000;
+					
+					process.ipcConn.setRequestHandler(
 						requestId,
 						async (message, binaryData) => {
 							// Handle error
@@ -554,8 +568,7 @@ class OperatorProcess {
 								// Otherwise, more frames coming later (streaming mode)
 							}
 						},
-						300000 // 5 minute timeout for streaming
-						// FEEDBACK: this should be based on a pool default timeout with an optional route override
+						streamConTimeout
 					);
 				} catch (error) {
 					controller.error(error);
@@ -572,15 +585,19 @@ class OperatorProcess {
 	/**
 	 * Handle bidirectional connection upgrade (transport-agnostic)
 	 */
-	async handleBidiUpgrade (requestId, firstFrame, process, req) {
+	async handleBidiUpgrade (requestId, firstFrame, process, req, poolName, routeSpec) {
 		try {
+			// Get timeout configuration for bidi upgrade (from parameters, not process object)
+			const timeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
+			const reqTimeout = timeouts.reqTimeout * 1000;
+
 			// Wait for protocol parameters from next frame (sent by responder after status 101)
 			const paramsPromise = new Promise((resolve, reject) => {
 				let gotParams = false;
 
 				// Update stream handler to capture protocol parameters
-				process.ipcConn.unregisterStreamHandler(requestId);
-				process.ipcConn.registerStreamHandler(
+				process.ipcConn.clearRequestHandler(requestId);
+				process.ipcConn.setRequestHandler(
 					requestId,
 					async (message, binaryData) => {
 						if (message instanceof Error) {
@@ -593,7 +610,7 @@ class OperatorProcess {
 							resolve(message);
 						}
 					},
-					30000 // FEEDBACK: need a configurable
+					reqTimeout
 				);
 			});
 
@@ -696,7 +713,7 @@ class OperatorProcess {
 		};
 
 		// Start reading frames from responder process
-		this.readBidiFrames(requestId, connState);
+		this.readBidiFrames(requestId, connState, poolName, routeSpec);
 
 		return response;
 	}
@@ -751,10 +768,14 @@ class OperatorProcess {
 	/**
 	 * Read bidirectional frames from responder process using stream handler
 	 */
-	async readBidiFrames (requestId, connState) {
+	async readBidiFrames (requestId, connState, poolName, routeSpec) {
+		// Get timeout configuration for bidi connection (from parameters, not process object)
+		const timeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
+		const bidiConTimeout = timeouts.conTimeout * 1000;
+
 		// Replace stream handler to process bidi frames
-		connState.process.ipcConn.unregisterStreamHandler(requestId);
-		connState.process.ipcConn.registerStreamHandler(
+		connState.process.ipcConn.clearRequestHandler(requestId);
+		connState.process.ipcConn.setRequestHandler(
 			requestId,
 			async (message, binaryData) => {
 				try {
@@ -823,8 +844,7 @@ class OperatorProcess {
 					}
 				}
 			},
-			300000 // 5 minute timeout for long-lived connections
-			// FEEDBACK: config like streaming (pool/route)
+			bidiConTimeout
 		);
 	}
 

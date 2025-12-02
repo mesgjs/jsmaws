@@ -27,7 +27,7 @@ This document describes the unified frame-based protocol for *communication betw
 
 ### Request Message (Responder → Applet)
 
-The responder sends requests to applets with the maximum chunk size:
+The responder sends requests to applets with the maximum chunk size and timeout configuration:
 
 ```javascript
 {
@@ -40,14 +40,20 @@ The responder sends requests to applets with the maximum chunk size:
   query: { ... },
   tail: '/large-file.bin',
   body: Uint8Array,
-  maxChunkSize: 65536  // Maximum frame data size per message (enforced security limit)
+  maxChunkSize: 65536,  // Maximum frame data size per message (enforced security limit)
+  timeouts: {           // Timeout configuration (seconds, 0=disabled)
+    reqTimeout: 30,     // Request processing timeout
+    idleTimeout: 60,    // Idle timeout (between frames)
+    conTimeout: 300     // Connection lifetime timeout
+  }
 }
 ```
 
 **Key Fields**:
 - `maxChunkSize`: Maximum frame data size per message (security limit enforced by responder)
+- `timeouts`: Timeout configuration resolved from route > pool > global hierarchy
 
-**Security Note**: Non-built-in applets receive only `maxChunkSize`. Built-in applets (like `@static`) receive additional configuration via a `config` sub-object.
+**Security Note**: Non-built-in applets receive only `maxChunkSize` and `timeouts`. Built-in applets (like `@static`) receive additional configuration via a `config` sub-object.
 
 ### Frame Message (Unified Protocol)
 
@@ -483,6 +489,309 @@ class ResponderProcess {
 ```
 
 **DoS Protection**: The responder validates each frame size and terminates the applet if it exceeds `maxChunkSize`. Additionally, if accumulated frames exceed `autoChunkThresh`, the responder immediately starts sending chunks to the operator, preventing memory exhaustion.
+
+## Timeout Semantics in Frame Protocol
+
+The frame-based protocol implements three types of timeouts with specific semantics for different connection modes.
+
+### Timeout Types
+
+1. **Request Timeout (`reqTimeout`)**: Active during frame processing
+2. **Idle Timeout (`idleTimeout`)**: Active between frames (streaming/bidi only)
+3. **Connection Timeout (`conTimeout`)**: Active for entire connection lifetime (streaming/bidi only)
+
+### Timeout State Transitions
+
+```
+Regular Response (mode: 'response'):
+┌─────────────────────────────────────────────────────────┐
+│ Request Timeout Active                                  │
+│ ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│ │ Frame 1  │→ │ Frame 2  │→ │ Frame 3  │→ │ Frame N  │  │
+│ │(headers) │  │ (data)   │  │ (data)   │  │ (final)  │  │
+│ └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
+└─────────────────────────────────────────────────────────┘
+                                                ↓
+                                          Connection Closed
+
+Streaming Response (mode: 'stream', keepAlive: true):
+┌─────────────────────────────────────────────────────────┐
+│ Frame 1 (headers, keepAlive: true)                      │
+│ ┌──────────┐                                            │
+│ │ Request  │                                            │
+│ │ Timeout  │                                            │
+│ └──────────┘                                            │
+└─────────────────────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────────────────────┐
+│ Idle Timeout Active + Connection Timeout Starts         │
+│ (waiting for next frame)                                │
+└─────────────────────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────────────────────┐
+│ Frame 2 (data, final: true)                             │
+│ ┌──────────┐                                            │
+│ │ Request  │  ← Idle timeout cleared                    │
+│ │ Timeout  │  ← Request timeout starts                  │
+│ └──────────┘                                            │
+└─────────────────────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────────────────────┐
+│ Idle Timeout Active Again                               │
+│ (waiting for next frame)                                │
+│ Connection Timeout Still Running                        │
+└─────────────────────────────────────────────────────────┘
+        ↓
+    (repeats until connection closes or timeout expires)
+```
+
+### Request Timeout Behavior
+
+**When Active**:
+- During processing of each frame (from arrival to `final: true` chunk sent)
+- Cleared immediately after final chunk of frame is sent
+
+**When Inactive**:
+- Between frames in streaming/bidi connections (idle timeout active instead)
+
+**Example**:
+```javascript
+// Request timeout active during this entire block
+self.onmessage = async (event) => {
+  const { type, id, timeouts } = event.data;
+  
+  // Processing... (request timeout active)
+  const data = await generateData();
+  
+  // Send frame
+  self.postMessage({
+    type: 'frame',
+    id,
+    mode: 'stream',
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+    data: data,
+    final: true,  // Request timeout cleared after this
+    keepAlive: true
+  });
+  
+  // NOW: Idle timeout starts (request timeout cleared)
+};
+```
+
+### Idle Timeout Behavior
+
+**When Active**:
+- Only between frames in streaming/bidi connections
+- Starts immediately after final chunk of frame is sent
+- Each idle period gets FULL configured duration
+
+**When Inactive**:
+- During frame processing (request timeout active instead)
+- In regular response mode (no keepAlive)
+
+**Key Characteristics**:
+- NOT shortened by processing time
+- Resets to full duration when new frame arrives
+- Independent of request timeout
+
+**Example**:
+```javascript
+// Streaming with 60-second idle timeout
+self.postMessage({
+  type: 'frame',
+  id,
+  mode: 'stream',
+  status: 200,
+  headers: { 'Content-Type': 'text/event-stream' },
+  data: initialData,
+  final: true,
+  keepAlive: true
+});
+
+// Idle timeout starts NOW (60 seconds)
+
+// 50 seconds later, send next frame
+setTimeout(() => {
+  // Idle timeout cleared (was at 10 seconds remaining)
+  // Request timeout starts
+  
+  const data = generateUpdate();  // Takes 5 seconds
+  
+  self.postMessage({
+    type: 'frame',
+    id,
+    data: data,
+    final: true
+  });
+  
+  // Request timeout cleared
+  // Idle timeout starts again at FULL 60 seconds
+  // (NOT 10 seconds, NOT 5 seconds)
+}, 50000);
+```
+
+### Connection Timeout Behavior
+
+**When Active**:
+- Starts with first `keepAlive: true` frame
+- Runs for entire connection lifetime
+- Independent of request/idle timeouts
+
+**When Inactive**:
+- Regular response mode (no keepAlive)
+
+**Characteristics**:
+- Absolute deadline for connection
+- Not affected by activity
+- Connection closed when expires
+
+**Example**:
+```javascript
+// Connection timeout: 300 seconds (5 minutes)
+self.postMessage({
+  type: 'frame',
+  id,
+  mode: 'stream',
+  status: 200,
+  headers: { 'Content-Type': 'text/event-stream' },
+  data: null,
+  final: false,
+  keepAlive: true
+});
+
+// Connection timeout starts NOW
+// Connection will close in 300 seconds regardless of activity
+
+// Send frames every 10 seconds
+const interval = setInterval(() => {
+  self.postMessage({
+    type: 'frame',
+    id,
+    data: generateUpdate(),
+    final: true
+  });
+}, 10000);
+
+// After 300 seconds, connection closes even though
+// frames are being sent regularly
+```
+
+### Timeout Configuration Resolution
+
+Timeouts are resolved using a three-tier hierarchy:
+
+```
+Route Configuration > Pool Configuration > Global Configuration
+```
+
+**Implementation**:
+```javascript
+// In responder-process.esm.js
+const routeSpec = fields.at('routeSpec');
+const timeouts = this.config.getTimeoutConfig(this.poolName, routeSpec);
+
+// timeouts = {
+//   reqTimeout: 30,   // From route, pool, or global
+//   idleTimeout: 60,  // From route, pool, or global
+//   conTimeout: 300   // From route, pool, or global
+// }
+```
+
+### Timeout Values
+
+- **Value > 0**: Timeout enabled (seconds)
+- **Value = 0**: Timeout disabled
+- **Omitted**: Inherits from next level in hierarchy
+
+**Example**:
+```slid
+[(
+  /* Global defaults */
+  reqTimeout=30
+  idleTimeout=60
+  conTimeout=300
+  
+  pools=[
+    stream=[
+      reqTimeout=0      /* Disable request timeout */
+      conTimeout=3600   /* Override: 1 hour */
+      /* idleTimeout inherits global: 60 seconds */
+    ]
+  ]
+  
+  routes=[
+    [path=/api/slow pool=standard reqTimeout=120]  /* Override: 2 minutes */
+  ]
+)]
+```
+
+### Responder Implementation
+
+The responder enforces all three timeouts:
+
+```javascript
+class ResponderProcess {
+  async handleWebRequest(id, fields, binaryData) {
+    const routeSpec = fields.at('routeSpec');
+    const timeouts = this.config.getTimeoutConfig(this.poolName, routeSpec);
+    
+    // Store timeouts for lifecycle access
+    requestInfo.timeouts = timeouts;
+    
+    // Start request timeout (if enabled)
+    if (timeouts.reqTimeout > 0) {
+      requestInfo.reqTimeoutId = setTimeout(() => {
+        this.handleRequestTimeout(id);
+      }, timeouts.reqTimeout * 1000);
+    }
+    
+    // Pass timeouts to applet
+    appletWorker.postMessage({
+      type: 'request',
+      id,
+      // ... other fields ...
+      timeouts: timeouts
+    });
+  }
+  
+  async handleFrame(id, data, requestInfo) {
+    const { final, keepAlive } = data;
+    
+    // Clear request timeout after final chunk
+    if (final && requestInfo.reqTimeoutId) {
+      clearTimeout(requestInfo.reqTimeoutId);
+      requestInfo.reqTimeoutId = null;
+      
+      // Start idle timeout if keepAlive
+      if (keepAlive && requestInfo.timeouts.idleTimeout > 0) {
+        this.startIdleTimeout(id, requestInfo);
+      }
+    }
+    
+    // Start connection timeout on first keepAlive frame
+    if (keepAlive && !requestInfo.conTimeoutId && requestInfo.timeouts.conTimeout > 0) {
+      this.startConnectionTimeout(id, requestInfo);
+    }
+  }
+  
+  startIdleTimeout(id, requestInfo) {
+    if (requestInfo.idleTimeoutId) {
+      clearTimeout(requestInfo.idleTimeoutId);
+    }
+    
+    requestInfo.idleTimeoutId = setTimeout(() => {
+      this.handleIdleTimeout(id);
+    }, requestInfo.timeouts.idleTimeout * 1000);
+  }
+  
+  startConnectionTimeout(id, requestInfo) {
+    requestInfo.conTimeoutId = setTimeout(() => {
+      this.handleConnectionTimeout(id);
+    }, requestInfo.timeouts.conTimeout * 1000);
+  }
+}
+```
 
 ## Frame Size Negotiation
 

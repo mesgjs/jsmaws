@@ -192,9 +192,9 @@ export class IPCConnection {
 		this.onConsoleOutput = null;  // (text, logLevel) => void
 		this.currentLogLevel = 'log'; // Track most recent log level
 		
-		// Event-driven stream handlers
-		this.streamHandlers = new Map(); // requestId -> { handler, timeout, startTime }
-		this.globalHandlers = new Map(); // messageType -> handler function
+		// Event-driven handlers
+		this.requestHandlers = new Map(); // requestId -> { handler, timeout, startTime }
+		this.messageHandlers = new Map(); // messageType -> handler function
 		this.monitoring = false;
 		this.onCapacityUpdate = null; // (capacity) => void
 	}
@@ -415,33 +415,45 @@ export class IPCConnection {
 	}
 
 	/**
-	 * Register handler for specific request stream
+	 * Set handler for specific request stream
 	 * Handler receives multiple frames until stream completes
 	 * @param {string} requestId Request ID
 	 * @param {Function} handler (message, binaryData) => void | Promise<void>
 	 * @param {number} timeout Timeout in milliseconds
 	 */
-	registerStreamHandler (requestId, handler, timeout = 30000) {
-		const timeoutHandle = setTimeout(() => {
-			this.streamHandlers.delete(requestId);
-			handler(new Error(`Request ${requestId} timed out`), null);
-		}, timeout);
+	setRequestHandler (requestId, handler, timeout = 0) {
+		let startTime;
 
-		this.streamHandlers.set(requestId, {
+		const entry = this.requestHandlers.get(requestId);
+		if (entry) {
+			// Update (replace) existing entry
+			startTime = entry.startTime;
+			clearTimeout(entry.timeout);
+		} else {
+			// New entry
+			startTime = Date.now();
+		}
+
+		const timeoutHandle = timeout ? setTimeout(() => {
+			this.requestHandlers.delete(requestId);
+			handler(new Error(`Request ${requestId} timed out`), null);
+		}, timeout) : null;
+
+		this.requestHandlers.set(requestId, {
 			handler,
 			timeout: timeoutHandle,
-			startTime: Date.now()
+			startTime
 		});
 	}
 
 	/**
-	 * Unregister stream handler
+	 * Clear handler for request stream
 	 */
-	unregisterStreamHandler (requestId) {
-		const entry = this.streamHandlers.get(requestId);
+	clearRequestHandler (requestId) {
+		const entry = this.requestHandlers.get(requestId);
 		if (entry) {
 			clearTimeout(entry.timeout);
-			this.streamHandlers.delete(requestId);
+			this.requestHandlers.delete(requestId);
 		}
 	}
 
@@ -452,7 +464,7 @@ export class IPCConnection {
 	 * @param {Function} handler (message, binaryData) => void | Promise<void>
 	 */
 	onMessage (type, handler) {
-		this.globalHandlers.set(type, handler);
+		this.messageHandlers.set(type, handler);
 	}
 
 	/**
@@ -475,7 +487,7 @@ export class IPCConnection {
 				}
 				
 				// Check if this is part of a registered stream
-				const streamEntry = this.streamHandlers.get(message.id);
+				const streamEntry = this.requestHandlers.get(message.id);
 				if (streamEntry) {
 					try {
 						await streamEntry.handler(message, binaryData);
@@ -484,17 +496,17 @@ export class IPCConnection {
 						const final = message.fields.at('final', false);
 						const keepAlive = message.fields.at('keepAlive', false);
 						if (final && !keepAlive) {
-							this.unregisterStreamHandler(message.id);
+							this.clearRequestHandler(message.id);
 						}
 					} catch (error) {
 						console.error(`Stream handler error for ${message.id}:`, error);
-						this.unregisterStreamHandler(message.id);
+						this.clearRequestHandler(message.id);
 					}
 					continue;
 				}
 
 				// Otherwise, dispatch to global handler
-				const handler = this.globalHandlers.get(message.type);
+				const handler = this.messageHandlers.get(message.type);
 				if (handler) {
 					await handler(message, binaryData);
 				} else {
@@ -515,11 +527,11 @@ export class IPCConnection {
 		this.monitoring = false;
 		
 		// Cleanup all pending streams
-		for (const [requestId, entry] of this.streamHandlers) {
+		for (const [requestId, entry] of this.requestHandlers) {
 			clearTimeout(entry.timeout);
 			entry.handler(new Error('Connection closed'), null);
 		}
-		this.streamHandlers.clear();
+		this.requestHandlers.clear();
 	}
 }
 
@@ -551,18 +563,25 @@ export function createRouteResponse (id, pool, app, params, tail, status = 200) 
 
 /**
  * Create request message
+ * @param {Object} options Request options
+ * @param {string} options.method HTTP method
+ * @param {string} options.url Complete request URL
+ * @param {string} options.app Applet path
+ * @param {string} options.pool Pool name
+ * @param {NANOS} options.headers Request headers
+ * @param {number} options.bodySize Request body size
+ * @param {string} options.remote Remote address
+ * @param {Object} options.routeParams Route parameters (from pattern matching)
+ * @param {string} options.routeTail Route tail (from wildcard routes)
+ * @param {NANOS} options.routeSpec Route specification (for timeout resolution)
+ * @returns {NANOS} Request message
  */
-export function createRequest (method, path, app, pool, headers, bodySize, remote, params = {}, tail = '') {
+export function createRequest ({ method, routeParams = {}, routeTail = '', ...fields }) {
 	return createMessage({ type: MessageType.WEB_REQUEST }, {
 		method: method.toLowerCase(),
-		path,
-		app,
-		pool,
-		headers,
-		bodySize,
-		remote,
-		params,
-		tail,
+		routeParams,      // Renamed from 'params'
+		routeTail,        // Renamed from 'tail'
+		...fields,        // Pass through all other fields (url, app, pool, headers, etc.)
 	});
 }
 

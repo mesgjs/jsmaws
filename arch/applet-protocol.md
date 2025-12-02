@@ -70,9 +70,16 @@ The responder (process) sends an HTTP-like request to the applet (worker):
     page: '1'
   },
   tail: '/extra/path',       // Tail path (if route has :* component)
-  body: Uint8Array           // Request body as binary data (or null)
+  body: Uint8Array,          // Request body as binary data (or null)
+  timeouts: {                // Timeout configuration (seconds, 0=disabled)
+    reqTimeout: 30,          // Request processing timeout
+    idleTimeout: 60,         // Idle timeout (between frames)
+    conTimeout: 300          // Connection lifetime timeout
+  }
 }
 ```
+
+**Note**: The `timeouts` object is provided for informational purposes. Applets do not need to enforce these timeouts themselves - the responder process handles all timeout enforcement.
 
 ### Response Message (Applet → Responder)
 
@@ -106,6 +113,232 @@ If the applet encounters an error:
 ```
 
 The responder converts this to a 500 Internal Server Error response.
+
+## Timeout Configuration
+
+JSMAWS implements a three-tier timeout hierarchy to control request processing, idle periods, and connection lifetimes.
+
+### Timeout Types
+
+1. **Request Timeout (`reqTimeout`)**
+   - Maximum time for processing a single request or frame
+   - Applies during active request processing
+   - Value of `0` disables the timeout
+   - Default: 30 seconds (configurable)
+
+2. **Idle Timeout (`idleTimeout`)**
+   - Maximum idle time between frames in streaming/bidirectional connections
+   - Only active BETWEEN frames, NOT during request processing
+   - Each idle period gets the full configured duration
+   - Value of `0` disables the timeout
+   - Default: 60 seconds (configurable)
+
+3. **Connection Timeout (`conTimeout`)**
+   - Maximum lifetime for entire connection in streaming/bidirectional modes
+   - Starts with first `keepAlive` frame
+   - Runs for entire connection duration
+   - Value of `0` disables the timeout
+   - Default: 300 seconds (configurable)
+
+### Timeout Hierarchy
+
+Timeouts are resolved using a three-tier hierarchy:
+
+```
+Route Configuration > Pool Configuration > Global Configuration
+```
+
+**Example Configuration**:
+```slid
+[(
+  /* Global timeout defaults */
+  reqTimeout=30
+  idleTimeout=60
+  conTimeout=300
+  
+  /* Pool-specific overrides */
+  pools=[
+    fast=[
+      reqTimeout=5      /* Override: fast pool has shorter timeout */
+      /* idleTimeout and conTimeout inherit global defaults */
+    ]
+    stream=[
+      reqTimeout=0      /* Override: no request timeout for streaming */
+      conTimeout=3600   /* Override: 1 hour connection timeout */
+    ]
+  ]
+  
+  /* Route-specific overrides */
+  routes=[
+    [path=/api/slow pool=standard reqTimeout=120]  /* Override: 2 minute timeout for this route */
+  ]
+)]
+```
+
+### Timeout Semantics
+
+#### Request Timeout Behavior
+
+- **Regular requests**: Timeout covers entire request processing
+- **Streaming requests**: Timeout applies to each frame individually
+- **Bidirectional requests**: Timeout applies to each frame in both directions
+
+```javascript
+// Request timeout starts when applet begins processing
+self.onmessage = async (event) => {
+  const { type, id, timeouts } = event.data;
+  
+  // Request timeout is active during this processing
+  const result = await processRequest(event.data);
+  
+  // Send response - request timeout cleared after final frame
+  self.postMessage({
+    type: 'frame',
+    id,
+    mode: 'response',
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+    data: result,
+    final: true
+  });
+};
+```
+
+#### Idle Timeout Behavior
+
+- **Only active between frames**: NOT during request processing
+- **Full duration each cycle**: Each idle period gets full configured duration
+- **Cleared on frame arrival**: Timer resets when new frame arrives
+
+```javascript
+// Streaming example showing idle timeout behavior
+self.onmessage = async (event) => {
+  const { type, id, timeouts } = event.data;
+  
+  // Send initial frame
+  self.postMessage({
+    type: 'frame',
+    id,
+    mode: 'stream',
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+    data: null,
+    final: false,
+    keepAlive: true
+  });
+  
+  // Idle timeout starts NOW (after final chunk of first frame)
+  
+  // Send updates periodically
+  setInterval(() => {
+    // Idle timeout cleared when this frame arrives
+    // Request timeout active during frame processing
+    const data = generateUpdate();
+    
+    self.postMessage({
+      type: 'frame',
+      id,
+      data: data,
+      final: true  // End of this frame
+    });
+    
+    // Idle timeout starts again NOW (after final chunk)
+  }, 5000);  // Every 5 seconds
+};
+```
+
+**Key Points**:
+- Idle timeout is NOT shortened by processing time
+- Each idle period gets full `idleTimeout` duration
+- Processing time does not "eat into" idle timeout
+
+#### Connection Timeout Behavior
+
+- **Starts with first keepAlive frame**: Timer begins when connection becomes long-lived
+- **Runs for entire connection**: Independent of request/idle timeouts
+- **Absolute deadline**: Connection closed when timeout expires
+
+```javascript
+// Connection timeout example
+self.onmessage = async (event) => {
+  const { type, id, timeouts } = event.data;
+  
+  // Send initial frame with keepAlive
+  self.postMessage({
+    type: 'frame',
+    id,
+    mode: 'stream',
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+    data: null,
+    final: false,
+    keepAlive: true
+  });
+  
+  // Connection timeout starts NOW
+  // Connection will be closed after timeouts.conTimeout seconds
+  // regardless of activity
+  
+  // ... streaming continues ...
+};
+```
+
+### Timeout Enforcement
+
+**Responder Process Responsibilities**:
+- Resolves timeout configuration using hierarchy (route > pool > global)
+- Passes timeout values to applets in request message
+- Enforces all three timeout types
+- Terminates applet workers on timeout
+- Sends appropriate error responses to clients
+
+**Applet Responsibilities**:
+- Applets receive timeout values for informational purposes only
+- Applets do NOT need to enforce timeouts themselves
+- Applets should design for graceful termination
+
+### Timeout Error Responses
+
+When a timeout occurs, the responder sends an appropriate error response:
+
+- **Request timeout**: `500 Internal Server Error` or `504 Gateway Timeout`
+- **Idle timeout**: Connection closed (no response sent)
+- **Connection timeout**: Connection closed (no response sent)
+
+### Configuration Examples
+
+#### Fast API Pool
+```slid
+fast=[
+  minProcs=2
+  maxProcs=10
+  reqTimeout=5      # Short timeout for fast operations
+  idleTimeout=30    # Short idle timeout
+  conTimeout=60     # Short connection timeout
+]
+```
+
+#### Standard API Pool
+```slid
+standard=[
+  minProcs=1
+  maxProcs=20
+  reqTimeout=60     # Moderate timeout
+  idleTimeout=120   # Moderate idle timeout
+  conTimeout=300    # 5 minute connection timeout
+]
+```
+
+#### Streaming Pool
+```slid
+stream=[
+  minProcs=1
+  maxProcs=50
+  reqTimeout=0      # No request timeout (streaming can be indefinite)
+  idleTimeout=60    # 1 minute between frames
+  conTimeout=3600   # 1 hour connection lifetime
+]
+```
 
 ## Applet Implementation
 

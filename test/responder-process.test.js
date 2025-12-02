@@ -10,8 +10,6 @@
  * - Backpressure detection and signaling
  * - Request lifecycle and cleanup
  * - Error handling
- *
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';
@@ -283,7 +281,8 @@ Deno.test('ResponderProcess - sticky keepAlive state', async () => {
 		mode: 'stream',
 		keepAlive: true,
 		frameBuffer: [],
-		totalBuffered: 0
+		totalBuffered: 0,
+		timeouts: { reqTimeout: 30, idleTimeout: 60, conTimeout: 300 }
 	};
 	process.activeRequests.set('req-3', requestInfo);
 
@@ -579,14 +578,13 @@ Deno.test('ResponderProcess - built-in applet config', async () => {
 	try {
 		const fields = new NANOS({
 			method: 'GET',
-			path: '/test.html',
+			url: 'https://example.com/test.html',
 			app: '@static',
 			pool: 'standard',
 			root: '/custom/root',
 			headers: new NANOS(),
-			params: new NANOS(),
-			query: new NANOS(),
-			tail: '/test.html'
+			routeParams: new NANOS(),
+			routeTail: '/test.html'
 		});
 
 		await process.handleWebRequest('req-10', fields, null);
@@ -679,7 +677,7 @@ Deno.test('ResponderProcess - at capacity', async () => {
 
 	const fields = new NANOS({
 		method: 'GET',
-		path: '/test',
+		url: 'https://example.com/test',
 		app: 'test-app',
 		pool: 'standard'
 	});
