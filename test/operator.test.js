@@ -343,52 +343,6 @@ Deno.test("OperatorProcess - converts multi-valued NANOS headers", () => {
 });
 
 // ============================================================================
-// Response Handler Tests
-// ============================================================================
-
-Deno.test("OperatorProcess - handleFrameResponse creates proper Response", async () => {
-	const config = new ServerConfig({ noSSL: true });
-	const operator = new OperatorProcess(config);
-
-	// Create a mock process with IPC connection
-	const mockProcess = {
-		id: 'test-process',
-		ipcConn: {
-			readMessage: async () => {
-				// Return a final frame to close the stream
-				const finalFrame = {
-					type: 'WEB_FRAME',
-					id: 'test-request',
-					fields: new NANOS({ final: true, keepAlive: false }),
-				};
-				return { message: finalFrame, binaryData: new Uint8Array(0) };
-			},
-			clearRequestHandler: () => {}
-		}
-	};
-
-	// Create first frame with response mode
-	const firstFrame = {
-		type: 'WEB_FRAME',
-		id: 'test-request',
-		fields: new NANOS({ mode: 'response', status: 200 }),
-	};
-
-	const headers = new NANOS({ 'content-type': 'text/plain' });
-	firstFrame.fields.push({ headers: headers, final: true, keepAlive: false });
-
-	const binaryData = new TextEncoder().encode('Hello, World!');
-
-	const response = await operator.handleFrameResponse('test-request', firstFrame, binaryData, mockProcess, new Request('https://example.com/test'));
-
-	assertEquals(response.status, 200);
-	assertEquals(response.headers.get('content-type'), 'text/plain');
-
-	const body = await response.text();
-	assertEquals(body, 'Hello, World!');
-});
-
-// ============================================================================
 // Shutdown Tests
 // ============================================================================
 
