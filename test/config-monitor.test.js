@@ -24,7 +24,7 @@ Deno.test("ConfigMonitor - sets callback", () => {
 	const monitor = new ConfigMonitor('test.slid', callback);
 
 	try {
-		assertEquals(monitor.onConfigChange, callback);
+		assertEquals(monitor.onChange, callback);
 	} finally {
 		monitor.stopMonitoring();
 	}
@@ -37,7 +37,7 @@ Deno.test("ConfigMonitor - factory function creates instance", () => {
 	try {
 		assertExists(monitor);
 		assertEquals(monitor.configPath, 'test.slid');
-		assertEquals(monitor.onConfigChange, callback);
+		assertEquals(monitor.onChange, callback);
 	} finally {
 		monitor.stopMonitoring();
 	}
@@ -262,23 +262,6 @@ Deno.test("ConfigMonitor - handles callback errors gracefully", async () => {
 	}
 });
 
-Deno.test("ConfigMonitor - updates last modified time", async () => {
-	const testFile = await Deno.makeTempFile({ suffix: '.slid' });
-	const monitor = new ConfigMonitor(testFile, null);
-
-	try {
-		assertEquals(monitor.lastModified, null);
-
-		await monitor.updateLastModified();
-
-		assertExists(monitor.lastModified);
-		assertEquals(typeof monitor.lastModified, 'number');
-	} finally {
-		monitor.stopMonitoring();
-		await Deno.remove(testFile);
-	}
-});
-
 Deno.test("ConfigMonitor - ignores non-modify events", async () => {
 	const testFile = await Deno.makeTempFile({ suffix: '.slid' });
 	let changeCount = 0;
@@ -409,6 +392,7 @@ Deno.test("ConfigMonitor - detects multiple atomic writes", async () => {
 	const callback = (config) => {
 		const version = config.at('version');
 		changes.push(version);
+		// console.log('Processing version', version);
 	};
 
 	const monitor = new ConfigMonitor(configPath, callback);
@@ -431,16 +415,19 @@ Deno.test("ConfigMonitor - detects multiple atomic writes", async () => {
 		};
 
 		// Make first atomic write
+		// console.debug('Writing version 2');
 		await atomicWrite('[(version=2)]');
-		await new Promise(resolve => setTimeout(resolve, 700));
+		await new Promise(resolve => setTimeout(resolve, 1000));
 
 		// Make second atomic write
+		// console.debug('Writing version 3');
 		await atomicWrite('[(version=3)]');
-		await new Promise(resolve => setTimeout(resolve, 700));
+		await new Promise(resolve => setTimeout(resolve, 1000));
 
 		// Should have detected both changes
-		assertEquals(changes.length, 2, `Expected 2 changes, got ${changes.length}`);
+		// console.debug('Changes seen:', changes);
 		assertEquals(changes, [2, 3], `Expected versions [2, 3], got [${changes.join(', ')}]`);
+		// assertEquals(changes.length, 2, `Expected 2 changes, got ${changes.length}`);
 	} finally {
 		monitor.stopMonitoring();
 		await Deno.remove(tempDir, { recursive: true });

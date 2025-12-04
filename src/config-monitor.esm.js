@@ -16,14 +16,15 @@ import { parseSLID } from './vendor.esm.js';
  * Configuration monitor for watching SLID files
  */
 class ConfigMonitor {
-	constructor (configPath, onConfigChange) {
+	constructor (configPath, onChange, { debounceDelay = 500 } = {}) {
 		this.configPath = configPath;
-		this.onConfigChange = onConfigChange;
+		this.onChange = onChange;
 		this.watcher = null;
 		this.isMonitoring = false;
-		this.lastModified = null;
+		this.lastRead = Date.now(); // When the configuration was last read
+		this.lastModified = null; // When the file was last modified
 		this.debounceTimer = null;
-		this.debounceDelay = 500; // ms - debounce rapid file changes
+		this.debounceDelay = debounceDelay; // ms - debounce rapid file changes
 
 		// Extract directory and filename for watching
 		// Watch directory instead of file to handle atomic writes (rename operations)
@@ -45,9 +46,6 @@ class ConfigMonitor {
 		console.info(`[operator] Starting configuration monitor for: ${this.configPath}`);
 
 		try {
-			// Get initial file modification time
-			await this.updateLastModified();
-
 			// Watch both the directory (for atomic writes/renames) and the file itself
 			// (for in-place edits). Use non-recursive watching to avoid permission issues
 			// with unreadable subdirectories. We check the file's mod time when either changes.
@@ -74,11 +72,14 @@ class ConfigMonitor {
 				}
 
 				// We're watching the config file and its directory (non-recursive).
-				// Any modify or create event could be relevant (in-place edit or atomic write).
-				// handleConfigChange will check the actual file mod time to confirm real changes.
-				if (event.kind === 'modify' || event.kind === 'create') {
-					// Debounce rapid changes
-					this.debounceConfigChange();
+				// Any create/modify/rename event could be relevant (in-place edit or atomic write).
+				// debounceChanges will check the actual file mod time to confirm real changes.
+				switch (event.kind) {
+				case 'create':
+				case 'modify':
+				case 'rename':
+					// console.debug('fs change:', event);
+					await this.debounceChanges();
 				}
 			}
 		} catch (error) {
@@ -92,15 +93,25 @@ class ConfigMonitor {
 	/**
 	 * Debounce configuration change detection
 	 */
-	debounceConfigChange () {
-		// Clear existing timer
+	async debounceChanges () {
+		// Maintain the status quo if the file is present and hasn't changed.
+		const curModTime = await this.getFileModificationTime();
+		if (curModTime && curModTime === this.lastModified) return;
+
+		// The file changed or went away. Clear the existing timer.
 		if (this.debounceTimer) {
 			clearTimeout(this.debounceTimer);
+			this.debounceTimer = null;
 		}
 
-		// Set new timer
+		if (!curModTime || !this.isMonitoring) return;
+		// The file is present, the modification time has changed (and we're still monitoring).
+		this.lastModified = curModTime;
+
+		// Set the debounce timer to check for more changes.
 		this.debounceTimer = setTimeout(async () => {
 			try {
+				this.debounceTimer = null;
 				await this.handleConfigChange();
 			} catch (error) {
 				console.error('[operator] Error handling configuration change:', error.message);
@@ -112,25 +123,19 @@ class ConfigMonitor {
 	 * Handle configuration file change
 	 */
 	async handleConfigChange () {
+		if (this.lastRead >= this.lastModified) return; // Already read since last change
 		try {
-			// Check if file was actually modified
-			const newModified = await this.getFileModificationTime();
-			if (newModified === this.lastModified) {
-				return; // No actual change
-			}
-
-			this.lastModified = newModified;
-
 			// Load new configuration
 			const configText = await Deno.readTextFile(this.configPath);
+			this.lastread = Date.now();
 			const newConfig = parseSLID(configText);
 
 			console.info('[operator] Configuration file changed, reloading...');
 
 			// Notify listener of configuration change
-			if (this.onConfigChange) {
+			if (this.onChange) {
 				try {
-					await this.onConfigChange(newConfig);
+					await this.onChange(newConfig);
 				} catch (callbackError) {
 					console.error('[console] Error in configuration change callback:', callbackError.message);
 				}
@@ -138,13 +143,6 @@ class ConfigMonitor {
 		} catch (error) {
 			console.error('[console] Failed to reload configuration:', error.message);
 		}
-	}
-
-	/**
-	 * Update last modified time
-	 */
-	async updateLastModified () {
-		this.lastModified = await this.getFileModificationTime();
 	}
 
 	/**
@@ -188,11 +186,11 @@ class ConfigMonitor {
 /**
  * Factory function to create a configuration monitor
  * @param {string} configPath Path to SLID configuration file
- * @param {Function} onConfigChange Callback when configuration changes
+ * @param {Function} onChange Callback when configuration changes
  * @returns {ConfigMonitor} Configuration monitor instance
  */
-function createConfigMonitor (configPath, onConfigChange) {
-	return new ConfigMonitor(configPath, onConfigChange);
+function createConfigMonitor (configPath, onChange) {
+	return new ConfigMonitor(configPath, onChange);
 }
 
 export { ConfigMonitor, createConfigMonitor };

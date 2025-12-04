@@ -257,16 +257,49 @@ Deno.test("OperatorProcess - handles configuration update", async () => {
 	operator.initializeRouter();
 	operator.initializeProcessManager();
 
-	const newConfig = new NANOS({
-		httpPort: 9090,
-		httpsPort: 9443
-	});
+	// Mock process creation to avoid actual process creation in tests
+	const originalCreate = operator.processManager.createProcess;
+	operator.processManager.createProcess = async (processId, type, poolName, poolConfig) => {
+		assertEquals(type, 'responder');
+		assertEquals(poolName, 'standard');
+		assertExists(poolConfig);
+		// Return mock process in PoolManager format
+		return {
+			item: {
+				id: processId,
+				state: 'ready',
+				availableWorkers: 1,
+				totalWorkers: 1,
+				ipcConn: {
+					setRequestHandler: () => {},
+					clearRequestHandler: () => {},
+					writeMessage: async () => {}
+				}
+			},
+			isWorker: false
+		};
+	};
 
-	await operator.handleConfigUpdate(newConfig);
+	try {
+		const newConfig = new NANOS({
+			httpPort: 9090,
+			httpsPort: 9443
+		});
 
-	assertEquals(operator.config.httpPort, 9090);
-	assertEquals(operator.config.httpsPort, 9443);
-	assertExists(operator.router);
+		await operator.handleConfigUpdate(newConfig);
+
+		assertEquals(operator.config.httpPort, 9090);
+		assertEquals(operator.config.httpsPort, 9443);
+		assertExists(operator.router);
+	} finally {
+		// Clean up: shutdown pool managers to stop scaling timers and close processes
+		for (const [poolName, poolManager] of operator.poolManagers) {
+			await poolManager.shutdown(0);
+		}
+
+		// Restore original
+		operator.processManager.createProcess = originalCreate;
+	}
 });
 
 // ============================================================================
