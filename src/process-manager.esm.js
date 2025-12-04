@@ -1,14 +1,16 @@
 /**
  * JSMAWS Process Manager
- * Manages service process lifecycle (responders and routers)
- * 
+ * Factory for creating and managing service processes (responders and routers)
+ *
  * Responsibilities:
- * - Spawn service processes with privilege dropping
- * - Monitor process health
- * - Handle process failures and restarts
- * - Manage affinity tracking for responders
- * - Coordinate with pool manager for scaling
- * 
+ * - Create service processes with privilege dropping (factory for PoolManager)
+ * - Monitor process health and lifecycle
+ * - Handle IPC connections and console output
+ * - Shutdown processes gracefully
+ *
+ * Note: Pool management (scaling, recycling, capacity) is handled by PoolManager.
+ * This class is a pure factory that creates and monitors process instances.
+ *
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
@@ -29,7 +31,6 @@ export const ProcessState = {
 	STARTING: 'starting',
 	READY: 'ready',
 	BUSY: 'busy',
-	IDLE: 'idle',
 	STOPPING: 'stopping',
 	DEAD: 'dead',
 };
@@ -108,23 +109,20 @@ export class ProcessManager {
 		this.config = config;
 		this.logger = logger;
 		this.processes = new Map(); // processId -> ManagedProcess
-		this.poolProcesses = new Map(); // poolName -> Set of processIds
-		this.affinityMap = new Map(); // appletPath -> Set of processIds
 		this.nextProcessId = 1;
 		this.isShuttingDown = false;
 	}
 
 	/**
-	 * Spawn a new service process
+	 * Create a new service process (factory method for PoolManager)
+	 * @param {string} processId Process ID (provided by PoolManager)
 	 * @param {string} type Process type (responder or router)
 	 * @param {string} poolName Pool name
 	 * @param {Object} poolConfig Pool configuration
-	 * @returns {Promise<ManagedProcess>}
+	 * @returns {Promise<{item: ManagedProcess, isWorker: false}>}
 	 */
-	async spawnProcess (type, poolName, poolConfig) {
-		const processId = `${type}-${poolName}-${this.nextProcessId++}`;
-
-		this.logger.info(`Spawning ${type} process: ${processId}`);
+	async createProcess (processId, type, poolName, poolConfig) {
+		this.logger.info(`Creating ${type} process: ${processId}`);
 
 		// Determine script path
 		const scriptPath = type === ProcessType.RESPONDER
@@ -158,6 +156,7 @@ export class ProcessManager {
 			stderr: 'piped',
 			env: {
 				JSMAWS_PID: processId,
+				JSMAWS_POOL: poolName,
 			},
 		});
 
@@ -166,7 +165,7 @@ export class ProcessManager {
 		// Create IPC connection for stdout (handles IPC messages)
 		const stdinWriter = process.stdin.getWriter();
 		const stdoutReader = process.stdout.getReader();
-		
+
 		const ipcConn = new IPCConnection({
 			read: () => stdoutReader.read(),
 			write: (data) => stdinWriter.write(data),
@@ -178,6 +177,8 @@ export class ProcessManager {
 					// Ignore close errors
 				}
 			},
+		}, {
+			logger: this.logger // Pass logger for proper logging in operator context
 		});
 
 		// Set console output handler for stdout
@@ -235,12 +236,6 @@ export class ProcessManager {
 		// Store process
 		this.processes.set(processId, managedProc);
 
-		// Add to pool
-		if (!this.poolProcesses.has(poolName)) {
-			this.poolProcesses.set(poolName, new Set());
-		}
-		this.poolProcesses.get(poolName).add(processId);
-
 		// Send initial configuration
 		await this.sendConfigUpdate(managedProc);
 
@@ -258,9 +253,53 @@ export class ProcessManager {
 		// Mark as ready after startup
 		managedProc.state = ProcessState.READY;
 
-		this.logger.info(`Process ${processId} spawned and ready (capacity: ${maxWorkers})`);
+		this.logger.debug(`Process ${processId} created and ready (capacity: ${maxWorkers})`);
 
-		return managedProc;
+		// Return in PoolManager format
+		return { item: managedProc, isWorker: false };
+	}
+
+	/**
+		* Shutdown a service process (for PoolManager)
+		* @param {ManagedProcess} managedProc Process to shutdown
+		* @param {number} timeout Shutdown timeout in seconds
+		*/
+	async shutdownProcess (managedProc, timeout = 30) {
+		if (!managedProc || !managedProc.id) {
+			this.logger.warn('Invalid process provided to shutdownProcess');
+			return;
+		}
+
+		const processId = managedProc.id;
+		this.logger.info(`Shutting down process: ${processId}`);
+
+		managedProc.state = ProcessState.STOPPING;
+
+		try {
+			// Send shutdown signal
+			const shutdownMsg = createShutdown(timeout);
+			await managedProc.ipcConn.writeMessage(shutdownMsg);
+
+			// Wait for process to exit (with timeout)
+			const exitPromise = managedProc.process.status;
+			const timeoutPromise = new Promise((resolve) =>
+				setTimeout(() => resolve({ code: -1, signal: 'TIMEOUT' }), timeout * 1000)
+			);
+
+			const status = await Promise.race([exitPromise, timeoutPromise]);
+
+			if (status.signal === 'TIMEOUT') {
+				this.logger.warn(`Process ${processId} did not exit within ${timeout}s, forcing termination`);
+				managedProc.process.kill('SIGKILL');
+			} else {
+				this.logger.info(`Process ${processId} exited with code ${status.code}`);
+			}
+		} catch (error) {
+			this.logger.error(`Error shutting down process ${processId}: ${error.message}`);
+		} finally {
+			// Clean up
+			this.removeProcess(processId);
+		}
 	}
 
 	/**
@@ -282,7 +321,7 @@ export class ProcessManager {
 				while (true) {
 					const result = await stderrConn.readMessage();
 					if (!result) break; // Stream closed
-					
+
 					// Stderr should never have IPC messages, but if it does, log error
 					this.logger.error(`[${managedProc.id}] Unexpected IPC message on stderr: ${result.message.type}`);
 				}
@@ -305,12 +344,7 @@ export class ProcessManager {
 			// Remove from tracking
 			this.removeProcess(managedProc.id);
 
-			// Restart if not shutting down
-			if (!this.isShuttingDown) {
-				this.logger.info(`Restarting process ${managedProc.id}`);
-				const poolConfig = this.config.at('pools').at(managedProc.poolName);
-				await this.spawnProcess(managedProc.type, managedProc.poolName, poolConfig);
-			}
+			// Note: PoolManager handles respawning via its scaling logic
 		})();
 	}
 
@@ -321,120 +355,8 @@ export class ProcessManager {
 		const managedProc = this.processes.get(processId);
 		if (!managedProc) return;
 
-		// Remove from pool
-		const poolSet = this.poolProcesses.get(managedProc.poolName);
-		if (poolSet) {
-			poolSet.delete(processId);
-		}
-
-		// Remove from affinity map
-		for (const appletPath of managedProc.affinity) {
-			const affinitySet = this.affinityMap.get(appletPath);
-			if (affinitySet) {
-				affinitySet.delete(processId);
-				if (affinitySet.size === 0) {
-					this.affinityMap.delete(appletPath);
-				}
-			}
-		}
-
 		// Remove from processes
 		this.processes.delete(processId);
-	}
-
-	/**
-	 * Find best process for request
-	 * @param {string} poolName Pool name
-	 * @param {string} appletPath Applet path (for affinity)
-	 * @returns {ManagedProcess|null}
-	 */
-	findProcessForRequest (poolName, appletPath) {
-		const poolSet = this.poolProcesses.get(poolName);
-		if (!poolSet || poolSet.size === 0) {
-			return null;
-		}
-
-		// Strategy 1: Find process with affinity and capacity
-		if (appletPath) {
-			const affinitySet = this.affinityMap.get(appletPath);
-			if (affinitySet) {
-				for (const processId of affinitySet) {
-					if (poolSet.has(processId)) {
-						const proc = this.processes.get(processId);
-						if (proc && proc.hasCapacity()) {
-							return proc;
-						}
-					}
-				}
-			}
-		}
-
-		// Strategy 2: Find any process with capacity
-		for (const processId of poolSet) {
-			const proc = this.processes.get(processId);
-			if (proc && proc.hasCapacity()) {
-				return proc;
-			}
-		}
-
-		return null;
-	}
-
-	/**
-	 * Update affinity after request dispatch
-	 */
-	updateAffinity (processId, appletPath) {
-		const proc = this.processes.get(processId);
-		if (!proc || !appletPath) return;
-
-		// Add to process affinity
-		proc.addAffinity(appletPath);
-
-		// Add to affinity map
-		if (!this.affinityMap.has(appletPath)) {
-			this.affinityMap.set(appletPath, new Set());
-		}
-		this.affinityMap.get(appletPath).add(processId);
-	}
-
-	/**
-	 * Get pool statistics
-	 */
-	getPoolStats (poolName) {
-		const poolSet = this.poolProcesses.get(poolName);
-		if (!poolSet) {
-			return {
-				processCount: 0,
-				readyCount: 0,
-				busyCount: 0,
-				totalWorkers: 0,
-				availableWorkers: 0,
-			};
-		}
-
-		let readyCount = 0;
-		let busyCount = 0;
-		let totalWorkers = 0;
-		let availableWorkers = 0;
-
-		for (const processId of poolSet) {
-			const proc = this.processes.get(processId);
-			if (!proc) continue;
-
-			if (proc.state === ProcessState.READY) readyCount++;
-			if (proc.state === ProcessState.BUSY) busyCount++;
-
-			totalWorkers += proc.totalWorkers;
-			availableWorkers += proc.availableWorkers;
-		}
-
-		return {
-			processCount: poolSet.size,
-			readyCount,
-			busyCount,
-			totalWorkers,
-			availableWorkers,
-		};
 	}
 
 	/**
@@ -458,37 +380,24 @@ export class ProcessManager {
 
 	/**
 	 * Gracefully shutdown all processes
+	 * Note: This is typically called by PoolManager.shutdown() for each process
+	 * But can also be used for emergency shutdown of all tracked processes
 	 */
 	async shutdown (timeout = 30) {
 		this.isShuttingDown = true;
-		this.logger.info('Shutting down all service processes...');
+		this.logger.info('Shutting down all tracked processes...');
 
-		const shutdownMsg = createShutdown(timeout);
-
-		// Send shutdown to all processes
-		const shutdownPromises = [];
+		const tasks = [];
 		for (const [processId, proc] of this.processes) {
 			if (proc.state === ProcessState.DEAD) continue;
 
-			proc.state = ProcessState.STOPPING;
-
-			shutdownPromises.push(
-				(async () => {
-					try {
-						await proc.ipcConn.writeMessage(shutdownMsg);
-						await proc.process.status;
-						this.logger.info(`Process ${processId} shutdown complete`);
-					} catch (error) {
-						this.logger.error(`Error shutting down ${processId}: ${error.message}`);
-					}
-				})()
-			);
+			tasks.push(this.shutdownProcess(proc, timeout));
 		}
 
 		// Wait for all processes to shutdown
-		await Promise.all(shutdownPromises);
+		if (tasks.length) await Promise.all(tasks);
 
-		this.logger.info('Service process shutdown sequence complete');
+		this.logger.info('Process manager shutdown complete');
 	}
 
 	/**
@@ -499,14 +408,9 @@ export class ProcessManager {
 	}
 
 	/**
-	 * Get all processes in pool
+	 * Get all tracked processes
 	 */
-	getPoolProcesses (poolName) {
-		const poolSet = this.poolProcesses.get(poolName);
-		if (!poolSet) return [];
-
-		return Array.from(poolSet)
-			.map(id => this.processes.get(id))
-			.filter(proc => proc !== undefined);
+	getAllProcesses () {
+		return Array.from(this.processes.values());
 	}
 }

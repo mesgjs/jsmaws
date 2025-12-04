@@ -8,9 +8,9 @@
 
 self.onmessage = async (event) => {
 	const { type, id, maxChunkSize } = event.data;
-	
+
 	if (type !== 'request') return;
-	
+
 	try {
 		// Send first frame (establishes streaming connection)
 		self.postMessage({
@@ -28,23 +28,23 @@ self.onmessage = async (event) => {
 			// final: false, // (default)
 			keepAlive: true
 		});
-		
+
 		// Send time updates every second for 10 seconds
 		let count = 0;
 		const maxUpdates = 10;
-		
+
 		const interval = setInterval(() => {
 			count++;
-			
+
 			const eventData = {
 				timestamp: new Date().toISOString(),
 				count,
 				message: `Update ${count} of ${maxUpdates}`
 			};
-			
+
 			const sseMessage = `data: ${JSON.stringify(eventData)}\n\n`;
 			const chunk = new TextEncoder().encode(sseMessage);
-			
+
 			// Check chunk size
 			if (chunk.length > maxChunkSize) {
 				console.error('SSE message exceeds maxChunkSize');
@@ -52,7 +52,7 @@ self.onmessage = async (event) => {
 				self.close();
 				return;
 			}
-			
+
 			// Send SSE event
 			self.postMessage({
 				type: 'frame',
@@ -60,11 +60,11 @@ self.onmessage = async (event) => {
 				data: chunk,
 				final: true  // Each SSE event is one complete frame
 			});
-			
+
 			// Stop after maxUpdates
 			if (count >= maxUpdates) {
 				clearInterval(interval);
-				
+
 				// Send final close frame
 				self.postMessage({
 					type: 'frame',
@@ -73,11 +73,11 @@ self.onmessage = async (event) => {
 					final: true,
 					keepAlive: false
 				});
-				
+
 				self.close();
 			}
 		}, 1000);
-		
+
 	} catch (error) {
 		self.postMessage({
 			type: 'error',

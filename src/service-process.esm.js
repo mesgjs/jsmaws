@@ -34,6 +34,14 @@ export class ServiceProcess {
 		this.config = null; // Configuration instance (set during initialization)
 		this.ipcConn = null;
 		this.isShuttingDown = false;
+		// Create simple console-based logger for components that need it
+		// Console output is forwarded to operator's logger via IPC
+		this.logger = {
+			debug: (msg) => console.debug(msg),
+			info: (msg) => console.info(msg),
+			warn: (msg) => console.warn(msg),
+			error: (msg) => console.error(msg),
+		};
 	}
 
 	/**
@@ -49,14 +57,14 @@ export class ServiceProcess {
 				Deno.stdout.close();
 			},
 		});
-		console.log(`[${this.processId}] IPC connection established`);
+		console.debug(`[${this.processId}] IPC connection established`);
 	}
 
 	/**
 	 * Wait for and process initial configuration
 	 */
 	async waitForInitialConfig () {
-		console.log(`[${this.processId}] Waiting for initial configuration...`);
+		console.debug(`[${this.processId}] Waiting for initial configuration...`);
 		const result = await this.ipcConn.readMessage();
 
 		if (!result || result.message.type !== MessageType.CONFIG_UPDATE) {
@@ -92,42 +100,25 @@ export class ServiceProcess {
 	}
 
 	/**
-	 * Process incoming IPC messages
+	 * Setup event-driven message handlers
 	 */
-	async processMessages () {
+	setupMessageHandlers () {
 		const handlers = this.getMessageHandlers();
 
-		console.log(`[${this.processId}] Starting message processing loop...`);
-		while (!this.isShuttingDown) {
-			try {
-				console.log(`[${this.processId}] Waiting for IPC message...`);
-				const result = await this.ipcConn.readMessage();
+		console.debug(`[${this.processId}] Setting up event-driven message handlers...`);
 
-				if (!result) {
-					// Connection closed
-					console.log(`[${this.processId}] IPC connection closed`);
-					break;
-				}
-
-				const { message, binaryData } = result;
-				console.log(`[${this.processId}] Received IPC message: type=${message.type}, id=${message.id}`);
-				const handler = handlers.get(message.type);
-
-				if (handler) {
-					console.log(`[${this.processId}] Calling handler for ${message.type}...`);
+		// Register each handler with the IPC connection
+		for (const [messageType, handler] of handlers) {
+			this.ipcConn.onMessage(messageType, async (message, binaryData) => {
+				try {
+					console.debug(`[${this.processId}] Handling ${messageType} message (id: ${message.id})`);
 					await handler(message.id, message.fields, binaryData);
-					console.log(`[${this.processId}] Handler completed for ${message.type}`);
-				} else {
-					console.warn(`[${this.processId}] Unknown message type: ${message.type}`);
+					console.debug(`[${this.processId}] Handler completed for ${messageType}`);
+				} catch (error) {
+					console.error(`[${this.processId}] Handler error for ${messageType}:`, error);
 				}
-			} catch (error) {
-				if (this.isShuttingDown) {
-					break;
-				}
-				console.error(`[${this.processId}] Message processing error:`, error);
-			}
+			});
 		}
-		console.log(`[${this.processId}] Message processing loop ended`);
 	}
 
 	/**
@@ -137,8 +128,8 @@ export class ServiceProcess {
 	async start () {
 		// Intercept console methods BEFORE any logging
 		interceptConsole();
-		
-		console.log(`[${this.processId}] Starting ${this.processType} process...`);
+
+		console.info(`[${this.processId}] Starting ${this.processType} process...`);
 
 		// Create IPC connection
 		this.createIPCConnection();
@@ -146,13 +137,18 @@ export class ServiceProcess {
 		// Wait for initial configuration
 		await this.waitForInitialConfig();
 
+		// Setup event-driven message handlers
+		this.setupMessageHandlers();
+
 		// Let subclass perform additional initialization
 		await this.onStarted();
 
-		console.log(`[${this.processId}] ${this.processType} process started successfully`);
+		console.debug(`[${this.processId}] ${this.processType} process started successfully`);
 
-		// Process incoming messages
-		await this.processMessages();
+		// Start monitoring for incoming messages (blocks until connection closes)
+		await this.ipcConn.startMonitoring();
+
+		console.info(`[${this.processId}] IPC monitoring ended, process exiting`);
 	}
 
 	/**
@@ -199,7 +195,8 @@ export class ServiceProcess {
 			await process.handleShutdown(new NANOS());
 		};
 
-		Deno.addSignalListener('SIGINT', shutdownHandler);
+		// Ignore direct SIGINT and wait for an operator shutdown message
+		Deno.addSignalListener('SIGINT', () => {});
 		Deno.addSignalListener('SIGTERM', shutdownHandler);
 
 		// Start the process

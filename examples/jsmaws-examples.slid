@@ -12,7 +12,7 @@
   
   /* Routes for example applets */
   routes=[
-    [path=/hello app=../examples/applets/hello-world.esm.js pool=fast]
+    [path=/hello method=[get post] app=../examples/applets/hello-world.esm.js pool=fast]
     [path=/sse-clock app=../examples/applets/sse-clock.esm.js pool=stream]
     [path=/ws-echo app=../examples/applets/websocket-echo.esm.js pool=stream]
   ]

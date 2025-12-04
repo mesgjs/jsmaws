@@ -458,7 +458,7 @@ class Router {
 
 				// Skip filesystem routes when fsRouting is disabled
 				if (!this.config.routing.fsRouting && route.isFilesystem) {
-					console.warn(`Skipping filesystem route (fsRouting disabled): ${route.spec.at('path', '(no path)')}`);
+					console.error(`Skipping filesystem route (fsRouting disabled): ${route.spec.at('path', '(no path)')}`);
 					continue;
 				}
 

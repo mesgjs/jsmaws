@@ -38,7 +38,7 @@ class RouterProcess extends ServiceProcess {
 	 * Handle configuration update from operator
 	 */
 	async handleConfigUpdate (fields) {
-		console.log(`[${this.processId}] Received configuration update`);
+		console.info(`[${this.processId}] Received configuration update`);
 
 		// Configuration instance is already updated by ServiceProcess base class
 		// Just need to propagate to pool manager and workers
@@ -57,7 +57,7 @@ class RouterProcess extends ServiceProcess {
 			}
 		}
 
-		console.log(`[${this.processId}] Configuration updated (fsRouting: ${this.config.routing.fsRouting})`);
+		console.debug(`[${this.processId}] Configuration updated (fsRouting: ${this.config.routing.fsRouting})`);
 	}
 
 	/**
@@ -71,7 +71,7 @@ class RouterProcess extends ServiceProcess {
 			const method = fields.at('method');
 			const path = fields.at('path');
 
-			console.log(`[${this.processId}] Route request: ${method.toUpperCase()} ${path}`);
+			console.debug(`[${this.processId}] Route request: ${method.toUpperCase()} ${path}`);
 
 			// Get available worker from pool
 			const poolItem = await this.poolManager.getAvailableItem();
@@ -140,7 +140,7 @@ class RouterProcess extends ServiceProcess {
 	 * Handle health check from operator
 	 */
 	async handleHealthCheck (id, fields) {
-		console.log(`[${this.processId}] Health check received`);
+		console.debug(`[${this.processId}] Health check received`);
 
 		// Get worker stats from pool manager
 		const metrics = this.poolManager.getMetrics();
@@ -164,7 +164,7 @@ class RouterProcess extends ServiceProcess {
 	 */
 	async handleShutdown (fields) {
 		const timeout = fields.at('timeout', 30);
-		console.log(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
+		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
 
 		this.isShuttingDown = true;
 
@@ -178,7 +178,7 @@ class RouterProcess extends ServiceProcess {
 			await this.ipcConn.close();
 		}
 
-		console.log(`[${this.processId}] Shutdown complete`);
+		console.info(`[${this.processId}] Shutdown complete`);
 		Deno.exit(0);
 	}
 
@@ -202,7 +202,7 @@ class RouterProcess extends ServiceProcess {
 			return { item: worker, isWorker: true };
 		};
 
-		this.poolManager = new PoolManager('@router', routerPoolConfig, workerFactory);
+		this.poolManager = new PoolManager('@router', routerPoolConfig, workerFactory, this.logger);
 		await this.poolManager.initialize();
 	}
 }

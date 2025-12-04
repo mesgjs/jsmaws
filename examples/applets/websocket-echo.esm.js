@@ -8,7 +8,7 @@
 
 self.onmessage = async (event) => {
 	const { type, id, headers, mode, data, initialCredits, maxChunkSize } = event.data;
-	
+
 	if (type === 'request' && headers?.['Upgrade']?.toLowerCase() === 'websocket') {
 		// Accept WebSocket upgrade
 		self.postMessage({
@@ -25,23 +25,23 @@ self.onmessage = async (event) => {
 			// final: false, // (default)
 			keepAlive: true
 		});
-		
+
 		// Responder will send protocol parameters next
 		return;
 	}
-	
+
 	if (type === 'frame' && mode === 'bidi') {
 		// Check for protocol parameters (first frame from responder)
 		if (initialCredits !== undefined) {
 			console.log(`WebSocket connection ready with ${initialCredits} credits, max chunk ${maxChunkSize}`);
-			
+
 			// Send welcome message
 			const welcome = new TextEncoder().encode(JSON.stringify({
 				type: 'welcome',
 				message: 'WebSocket echo server ready',
 				maxChunkSize
 			}));
-			
+
 			self.postMessage({
 				type: 'frame',
 				id,
@@ -50,7 +50,7 @@ self.onmessage = async (event) => {
 			});
 			return;
 		}
-		
+
 		// Received data from client - echo it back
 		if (data) {
 			// Echo the data

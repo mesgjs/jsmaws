@@ -113,10 +113,11 @@ class PoolItem {
  * Handles both worker pools and process pools with configurable scaling
  */
 export class PoolManager {
-	constructor (poolName, config, itemFactory) {
+	constructor (poolName, config, itemFactory, logger) {
 		this.poolName = poolName;
-		this.config = this.validateConfig(config);
+		this.config = this.validateConfig(config); // Expects object
 		this.itemFactory = itemFactory; // Function to create new items
+		this.logger = logger; // Logger instance
 		this.items = new Map(); // itemId -> PoolItem
 		this.itemIdCounter = 0;
 		this.isShuttingDown = false;
@@ -133,7 +134,21 @@ export class PoolManager {
 	}
 
 	/**
-	 * Validate pool configuration
+	 * Validate and replace current pool configuration
+	 */
+	updateConfig (newConfig) {
+		this.logger.info(`[PoolManager:${this.poolName}] Updating configuration`);
+		this.config = this.validateConfig(newConfig);
+
+		// Trigger immediate scaling check (non-blocking, *all* strategies)
+		this.startScalingTimer();
+		this.performScaling().catch((error) => {
+			this.logger.error(`[PoolManager:${this.poolName}] Scaling error after config update:`, error);
+		});
+	}
+
+	/**
+	 * Validate pool configuration object
 	 */
 	validateConfig (config) {
 		const validated = {
@@ -175,7 +190,7 @@ export class PoolManager {
 	 * Initialize pool
 	 */
 	async initialize () {
-		console.log(`[PoolManager:${this.poolName}] Initializing pool (strategy: ${this.config.scaling})`);
+		this.logger.debug(`[PoolManager:${this.poolName}] Initializing pool (strategy: ${this.config.scaling})`);
 
 		// Spawn minimum items
 		const spawnCount = this.config.scaling === ScalingStrategy.ONDEMAND ? 0 : this.config.minProcs;
@@ -188,7 +203,7 @@ export class PoolManager {
 			this.startScalingTimer();
 		}
 
-		console.log(`[PoolManager:${this.poolName}] Initialized with ${this.items.size} items`);
+		this.logger.debug(`[PoolManager:${this.poolName}] Initialized with ${this.items.size} items`);
 	}
 
 	/**
@@ -211,7 +226,7 @@ export class PoolManager {
 		}
 
 		const itemId = this.generateItemId();
-		console.log(`[PoolManager:${this.poolName}] Spawning item ${itemId}`);
+		this.logger.debug(`[PoolManager:${this.poolName}] Spawning item ${itemId}`);
 
 		try {
 			// Use factory to create item (worker or process)
@@ -224,10 +239,10 @@ export class PoolManager {
 			// Mark as idle after initialization
 			poolItem.state = ItemState.IDLE;
 
-			console.log(`[PoolManager:${this.poolName}] Item ${itemId} spawned successfully`);
+			this.logger.debug(`[PoolManager:${this.poolName}] Item ${itemId} spawned successfully`);
 			return poolItem;
 		} catch (error) {
-			console.error(`[PoolManager:${this.poolName}] Failed to spawn item ${itemId}:`, error);
+			this.logger.error(`[PoolManager:${this.poolName}] Failed to spawn item ${itemId}:`, error);
 			this.metrics.totalErrors++;
 			throw error;
 		}
@@ -252,7 +267,7 @@ export class PoolManager {
 			try {
 				return await this.spawnItem();
 			} catch (error) {
-				console.error(`[PoolManager:${this.poolName}] Failed to spawn item:`, error);
+				this.logger.error(`[PoolManager:${this.poolName}] Failed to spawn item:`, error);
 			}
 		}
 
@@ -292,7 +307,7 @@ export class PoolManager {
 	async markItemIdle (itemId) {
 		const item = this.items.get(itemId);
 		if (!item) {
-			console.warn(`[PoolManager:${this.poolName}] Item not found: ${itemId}`);
+			this.logger.warn(`[PoolManager:${this.poolName}] Item not found: ${itemId}`);
 			return;
 		}
 
@@ -301,7 +316,7 @@ export class PoolManager {
 
 		// Check if item should be recycled
 		if (item.shouldRecycle(this.config.maxReqs)) {
-			console.log(`[PoolManager:${this.poolName}] Item ${itemId} reached maxReqs (${this.config.maxReqs}), recycling`);
+			this.logger.debug(`[PoolManager:${this.poolName}] Item ${itemId} reached maxReqs (${this.config.maxReqs}); recycling`);
 			await this.recycleItem(itemId);
 		}
 	}
@@ -313,7 +328,7 @@ export class PoolManager {
 		const item = this.items.get(itemId);
 		if (!item) return;
 
-		console.log(`[PoolManager:${this.poolName}] Recycling item ${itemId}`);
+		this.logger.debug(`[PoolManager:${this.poolName}] Recycling item ${itemId}`);
 		item.state = ItemState.RECYCLING;
 
 		try {
@@ -336,7 +351,7 @@ export class PoolManager {
 				await this.spawnItem();
 			}
 		} catch (error) {
-			console.error(`[PoolManager:${this.poolName}] Error recycling item ${itemId}:`, error);
+			this.logger.error(`[PoolManager:${this.poolName}] Error recycling item ${itemId}:`, error);
 			this.metrics.totalErrors++;
 		}
 	}
@@ -348,7 +363,7 @@ export class PoolManager {
 		const item = this.items.get(itemId);
 		if (!item) return;
 
-		console.log(`[PoolManager:${this.poolName}] Removing dead item ${itemId}`);
+		this.logger.info(`[PoolManager:${this.poolName}] Removing dead item ${itemId}`);
 		item.state = ItemState.DEAD;
 		this.items.delete(itemId);
 	}
@@ -362,7 +377,7 @@ export class PoolManager {
 		// Check every 10 seconds
 		this.scaleTimer = setInterval(() => {
 			this.performScaling().catch((error) => {
-				console.error(`[PoolManager:${this.poolName}] Scaling error:`, error);
+				this.logger.error(`[PoolManager:${this.poolName}] Scaling error:`, error);
 			});
 		}, 10000);
 	}
@@ -382,7 +397,6 @@ export class PoolManager {
 	 */
 	async performScaling () {
 		if (this.isShuttingDown) return;
-		if (this.config.scaling === ScalingStrategy.STATIC) return;
 
 		const idleItems = Array.from(this.items.values()).filter((item) => item.isIdle());
 		const idleCount = idleItems.length;
@@ -394,7 +408,7 @@ export class PoolManager {
 
 				const idleTime = item.getIdleTime();
 				if (idleTime >= this.config.idleTimeout) {
-					console.log(`[PoolManager:${this.poolName}] Scaling down: removing idle item ${item.id} (idle: ${idleTime}s)`);
+					this.logger.debug(`[PoolManager:${this.poolName}] Scaling down: removing idle item ${item.id} (idle: ${idleTime}s)`);
 					await this.recycleItem(item.id);
 				}
 			}
@@ -403,24 +417,29 @@ export class PoolManager {
 		// Scale up: Spawn items if below minProcs OR (all busy and below maxProcs)
 		if (this.items.size < this.config.minProcs) {
 			// Below minimum - spawn to reach minProcs
-			console.log(`[PoolManager:${this.poolName}] Scaling up: below minProcs, spawning new item`);
+			this.logger.debug(`[PoolManager:${this.poolName}] Scaling up: below minProcs, spawning new item`);
 			try {
 				await this.spawnItem();
 			} catch (error) {
-				console.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
+				this.logger.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
 			}
 		} else {
 			// At or above minimum - only spawn if all items are busy
 			const availableCount = Array.from(this.items.values()).filter((item) => item.isAvailable()).length;
 			const busyCount = this.items.size - availableCount;
 			if (availableCount === 0 && busyCount > 0 && this.canSpawnItem()) {
-				console.log(`[PoolManager:${this.poolName}] Scaling up: all items busy, spawning new item`);
+				this.logger.debug(`[PoolManager:${this.poolName}] Scaling up: all items busy, spawning new item`);
 				try {
 					await this.spawnItem();
 				} catch (error) {
-					console.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
+					this.logger.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
 				}
 			}
+		}
+
+		if (this.items.size === this.config.minProcs && this.config.scaling === ScalingStrategy.STATIC) {
+			// Stop scaling static strategy at equilibrium
+			this.stopScalingTimer();
 		}
 	}
 
@@ -444,40 +463,10 @@ export class PoolManager {
 	}
 
 	/**
-	 * Update pool configuration
-	 */
-	async updateConfig (newConfig) {
-		console.log(`[PoolManager:${this.poolName}] Updating configuration`);
-
-		const oldConfig = this.config;
-		this.config = this.validateConfig(newConfig);
-
-		// Handle scaling strategy change
-		if (oldConfig.scaling !== this.config.scaling) {
-			if (this.config.scaling === ScalingStrategy.STATIC) {
-				this.stopScalingTimer();
-			} else if (oldConfig.scaling === ScalingStrategy.STATIC) {
-				this.startScalingTimer();
-			}
-		}
-
-		// Adjust pool size if needed
-		if (this.items.size < this.config.minProcs) {
-			const spawnCount = this.config.minProcs - this.items.size;
-			console.log(`[PoolManager:${this.poolName}] Spawning ${spawnCount} items to meet minProcs`);
-			for (let i = 0; i < spawnCount; i++) {
-				await this.spawnItem();
-			}
-		}
-
-		console.log(`[PoolManager:${this.poolName}] Configuration updated`);
-	}
-
-	/**
 	 * Graceful shutdown
 	 */
 	async shutdown (timeoutSeconds = 30) {
-		console.log(`[PoolManager:${this.poolName}] Shutting down (timeout: ${timeoutSeconds}s)`);
+		this.logger.info(`[PoolManager:${this.poolName}] Shutting down (timeout: ${timeoutSeconds}s)`);
 		this.isShuttingDown = true;
 		this.stopScalingTimer();
 
@@ -494,7 +483,7 @@ export class PoolManager {
 					}
 					this.items.delete(itemId);
 				} catch (error) {
-					console.error(`[PoolManager:${this.poolName}] Error shutting down item ${itemId}:`, error);
+					this.logger.error(`[PoolManager:${this.poolName}] Error shutting down item ${itemId}:`, error);
 				}
 			})();
 			shutdownPromises.push(promise);
@@ -509,7 +498,7 @@ export class PoolManager {
 			clearTimeout(timer);
 		}
 
-		console.log(`[PoolManager:${this.poolName}] Shutdown complete (${this.items.size} items remaining)`);
+		this.logger.info(`[PoolManager:${this.poolName}] Shutdown complete (${this.items.size} items remaining)`);
 	}
 }
 

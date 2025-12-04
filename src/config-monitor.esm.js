@@ -4,6 +4,8 @@
  *
  * Uses Deno's file watching capabilities to detect configuration updates
  * and notifies listeners when changes occur.
+ *
+ * Since logging depends on configuration, this module logs to the console.
  * 
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -22,6 +24,12 @@ class ConfigMonitor {
 		this.lastModified = null;
 		this.debounceTimer = null;
 		this.debounceDelay = 500; // ms - debounce rapid file changes
+
+		// Extract directory and filename for watching
+		// Watch directory instead of file to handle atomic writes (rename operations)
+		const pathParts = configPath.split('/');
+		this.configFilename = pathParts[pathParts.length - 1];
+		this.configDir = pathParts.slice(0, -1).join('/') || '.';
 	}
 
 	/**
@@ -29,24 +37,26 @@ class ConfigMonitor {
 	 */
 	async startMonitoring () {
 		if (this.isMonitoring) {
-			console.warn('Configuration monitor already running');
+			console.warn('[operator] Configuration monitor already running');
 			return;
 		}
 
 		this.isMonitoring = true;
-		console.log(`Starting configuration monitor for: ${this.configPath}`);
+		console.info(`[operator] Starting configuration monitor for: ${this.configPath}`);
 
 		try {
 			// Get initial file modification time
 			await this.updateLastModified();
 
-			// Start watching the file
-			this.watcher = Deno.watchFs([this.configPath]);
+			// Watch both the directory (for atomic writes/renames) and the file itself
+			// (for in-place edits). Use non-recursive watching to avoid permission issues
+			// with unreadable subdirectories. We check the file's mod time when either changes.
+			this.watcher = Deno.watchFs([this.configDir, this.configPath], { recursive: false });
 
 			// Process watch events in a separate task
 			this.processWatchEvents();
 		} catch (error) {
-			console.error('Failed to start configuration monitor:', error.message);
+			console.error('[operator] Failed to start configuration monitor:', error.message);
 			this.isMonitoring = false;
 			throw error;
 		}
@@ -63,8 +73,10 @@ class ConfigMonitor {
 					break;
 				}
 
-				// Only process modify events
-				if (event.kind === 'modify') {
+				// We're watching the config file and its directory (non-recursive).
+				// Any modify or create event could be relevant (in-place edit or atomic write).
+				// handleConfigChange will check the actual file mod time to confirm real changes.
+				if (event.kind === 'modify' || event.kind === 'create') {
 					// Debounce rapid changes
 					this.debounceConfigChange();
 				}
@@ -72,7 +84,7 @@ class ConfigMonitor {
 		} catch (error) {
 			// Ignore errors after monitoring stopped (watcher closed)
 			if (this.isMonitoring) {
-				console.error('Error in configuration monitor:', error.message);
+				console.error('[operator] Error in configuration monitor:', error.message);
 			}
 		}
 	}
@@ -91,7 +103,7 @@ class ConfigMonitor {
 			try {
 				await this.handleConfigChange();
 			} catch (error) {
-				console.error('Error handling configuration change:', error.message);
+				console.error('[operator] Error handling configuration change:', error.message);
 			}
 		}, this.debounceDelay);
 	}
@@ -113,18 +125,18 @@ class ConfigMonitor {
 			const configText = await Deno.readTextFile(this.configPath);
 			const newConfig = parseSLID(configText);
 
-			console.log('Configuration file changed, reloading...');
+			console.info('[operator] Configuration file changed, reloading...');
 
 			// Notify listener of configuration change
 			if (this.onConfigChange) {
 				try {
 					await this.onConfigChange(newConfig);
 				} catch (callbackError) {
-					console.error('Error in configuration change callback:', callbackError.message);
+					console.error('[console] Error in configuration change callback:', callbackError.message);
 				}
 			}
 		} catch (error) {
-			console.error('Failed to reload configuration:', error.message);
+			console.error('[console] Failed to reload configuration:', error.message);
 		}
 	}
 
@@ -143,7 +155,7 @@ class ConfigMonitor {
 			const stat = await Deno.stat(this.configPath);
 			return stat.mtime ? stat.mtime.getTime() : null;
 		} catch (error) {
-			console.error(`Failed to stat configuration file: ${error.message}`);
+			console.error(`[console] Failed to stat configuration file: ${error.message}`);
 			return null;
 		}
 	}
@@ -157,7 +169,7 @@ class ConfigMonitor {
 		}
 
 		this.isMonitoring = false;
-		console.log('Stopping configuration monitor');
+		console.info('[console] Stopping configuration monitor');
 
 		// Clear debounce timer
 		if (this.debounceTimer) {

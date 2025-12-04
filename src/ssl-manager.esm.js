@@ -105,17 +105,17 @@ export class SSLManager {
 				keyInfo.target !== this.lastKeyTarget;
 
 			if (certChanged || keyChanged) {
-				console.log('SSL certificate files changed:');
+				console.info('SSL certificate files changed:');
 				if (certChanged) {
-					console.log(`  Certificate: ${this.certFile}`);
+					console.info(`  Certificate: ${this.certFile}`);
 					if (certInfo.target !== this.lastCertTarget) {
-						console.log(`    Symlink target changed: ${this.lastCertTarget} -> ${certInfo.target}`);
+						console.debug(`    Symlink target changed: ${this.lastCertTarget} -> ${certInfo.target}`);
 					}
 				}
 				if (keyChanged) {
-					console.log(`  Key: ${this.keyFile}`);
+					console.info(`  Key: ${this.keyFile}`);
 					if (keyInfo.target !== this.lastKeyTarget) {
-						console.log(`    Symlink target changed: ${this.lastKeyTarget} -> ${keyInfo.target}`);
+						console.debug(`    Symlink target changed: ${this.lastKeyTarget} -> ${keyInfo.target}`);
 					}
 				}
 
@@ -145,19 +145,19 @@ export class SSLManager {
 		}
 
 		if (this.noSSL) {
-			console.log('SSL monitoring disabled (noSSL mode)');
+			console.info('SSL monitoring disabled (noSSL mode)');
 			return;
 		}
 
 		if (!this.certFile || !this.keyFile) {
-			console.log('SSL monitoring disabled (no certificate files configured)');
+			console.warn('SSL monitoring disabled (no certificate files configured)');
 			return;
 		}
 
-		console.log('Starting SSL certificate monitoring...');
-		console.log(`  Certificate: ${this.certFile}`);
-		console.log(`  Key: ${this.keyFile}`);
-		console.log(`  Check interval: ${this.checkIntervalHours} hour(s)`);
+		console.info('Starting SSL certificate monitoring...');
+		console.info(`  Certificate: ${this.certFile}`);
+		console.info(`  Key: ${this.keyFile}`);
+		console.info(`  Check interval: ${this.checkIntervalHours} hour(s)`);
 
 		this.isMonitoring = true;
 
@@ -168,7 +168,7 @@ export class SSLManager {
 		this.intervalId = setInterval(async () => {
 			const changed = await this.checkForChanges();
 			if (changed && this.reloadCallback) {
-				console.log('Triggering server reload due to certificate update...');
+				console.info('Triggering server reload due to certificate update...');
 				try {
 					await this.reloadCallback();
 				} catch (error) {
@@ -177,7 +177,7 @@ export class SSLManager {
 			}
 		}, this.checkIntervalMs);
 
-		console.log('SSL certificate monitoring started');
+		console.debug('SSL certificate monitoring started');
 	}
 
 	/**
@@ -188,7 +188,7 @@ export class SSLManager {
 			return;
 		}
 
-		console.log('Stopping SSL certificate monitoring...');
+		console.info('Stopping SSL certificate monitoring...');
 
 		if (this.intervalId) {
 			clearInterval(this.intervalId);
@@ -196,7 +196,7 @@ export class SSLManager {
 		}
 
 		this.isMonitoring = false;
-		console.log('SSL certificate monitoring stopped');
+		console.debug('SSL certificate monitoring stopped');
 	}
 
 	/**

@@ -98,11 +98,15 @@ Deno.test("loadConfig - loads existing SLID file", async () => {
 	assertEquals(config.at('hostname'), 'localhost');
 });
 
-Deno.test("loadConfig - returns empty NANOS for missing file", async () => {
-	const config = await loadConfig('nonexistent.slid');
-
-	assertExists(config);
-	assertEquals(config.size, 0);
+Deno.test("loadConfig - throws error for missing file", async () => {
+	try {
+		await loadConfig('nonexistent.slid');
+		// If we get here, the test should fail
+		throw new Error('Expected loadConfig to throw for missing file');
+	} catch (error) {
+		// Verify it's a NotFound error
+		assert(error instanceof Deno.errors.NotFound, 'Expected Deno.errors.NotFound');
+	}
 });
 
 // ============================================================================
@@ -119,8 +123,6 @@ Deno.test("OperatorProcess - creates instance", () => {
 	assertEquals(operator.httpsServer, null);
 	assertEquals(operator.isShuttingDown, false);
 	assertEquals(operator.isReloading, false);
-	assertExists(operator.pendingRequests);
-	assertEquals(operator.pendingRequests.size, 0);
 });
 
 Deno.test("OperatorProcess - initializes logger", () => {
@@ -405,8 +407,51 @@ Deno.test("OperatorProcess - initializeProcessPools with no pools config", async
 	operator.initializeLogger();
 	operator.initializeProcessManager();
 
-	// Should not throw with no pools configured
-	await operator.initializeProcessPools();
+	// Mock process creation to avoid actual process creation in tests
+	const originalCreate = operator.processManager.createProcess;
+	let createCalled = false;
+	operator.processManager.createProcess = async (processId, type, poolName, poolConfig) => {
+		createCalled = true;
+		assertEquals(type, 'responder');
+		assertEquals(poolName, 'standard');
+		assertExists(poolConfig);
+		// Return mock process in PoolManager format
+		return {
+			item: {
+				id: processId,
+				state: 'ready',
+				availableWorkers: 1,
+				totalWorkers: 1,
+				ipcConn: {
+					setRequestHandler: () => {},
+					clearRequestHandler: () => {},
+					writeMessage: async () => {}
+				}
+			},
+			isWorker: false
+		};
+	};
+
+	try {
+		// Should create default pool when none configured
+		await operator.initializeProcessPools();
+
+		// Verify default pool was created
+		assert(createCalled, 'Expected createProcess to be called for default pool');
+		assertExists(operator.configData.at('pools'));
+		assertExists(operator.configData.at('pools').at('standard'));
+
+		// Verify PoolManager was created
+		assertExists(operator.poolManagers.get('standard'), 'Expected PoolManager for standard pool');
+	} finally {
+		// Clean up: shutdown pool managers to stop scaling timers
+		for (const [poolName, poolManager] of operator.poolManagers) {
+			await poolManager.shutdown(0);
+		}
+
+		// Restore original
+		operator.processManager.createProcess = originalCreate;
+	}
 });
 
 Deno.test("OperatorProcess - initializeProcessPools with empty pools config", async () => {

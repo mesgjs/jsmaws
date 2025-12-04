@@ -5,6 +5,16 @@
 import { assertEquals, assertRejects } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { PoolManager, ItemState, ScalingStrategy } from '../src/pool-manager.esm.js';
 
+// Mock logger
+function createMockLogger () {
+	return {
+		debug: () => {},
+		info: () => {},
+		warn: () => {},
+		error: () => {},
+	};
+}
+
 // Mock worker factory
 function createMockWorkerFactory () {
 	let workerCount = 0;
@@ -40,9 +50,10 @@ function delay (ms) {
 Deno.test('PoolManager - Configuration Validation', async (t) => {
 	await t.step('should validate minProcs >= 0', () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		assertRejects(
 			async () => {
-				new PoolManager('test', { minProcs: -1, maxProcs: 10 }, factory);
+				new PoolManager('test', { minProcs: -1, maxProcs: 10 }, factory, logger);
 			},
 			Error,
 			'Invalid minProcs'
@@ -51,9 +62,10 @@ Deno.test('PoolManager - Configuration Validation', async (t) => {
 
 	await t.step('should validate maxProcs > 0', () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		assertRejects(
 			async () => {
-				new PoolManager('test', { minProcs: 0, maxProcs: 0 }, factory);
+				new PoolManager('test', { minProcs: 0, maxProcs: 0 }, factory, logger);
 			},
 			Error,
 			'Invalid maxProcs'
@@ -62,9 +74,10 @@ Deno.test('PoolManager - Configuration Validation', async (t) => {
 
 	await t.step('should validate minProcs <= maxProcs', () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		assertRejects(
 			async () => {
-				new PoolManager('test', { minProcs: 10, maxProcs: 5 }, factory);
+				new PoolManager('test', { minProcs: 10, maxProcs: 5 }, factory, logger);
 			},
 			Error,
 			'minProcs'
@@ -73,9 +86,10 @@ Deno.test('PoolManager - Configuration Validation', async (t) => {
 
 	await t.step('should validate static scaling requires minProcs == maxProcs', () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		assertRejects(
 			async () => {
-				new PoolManager('test', { minProcs: 2, maxProcs: 10, scaling: 'static' }, factory);
+				new PoolManager('test', { minProcs: 2, maxProcs: 10, scaling: 'static' }, factory, logger);
 			},
 			Error,
 			'Static scaling'
@@ -84,9 +98,10 @@ Deno.test('PoolManager - Configuration Validation', async (t) => {
 
 	await t.step('should validate minWorkers >= 1', () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		assertRejects(
 			async () => {
-				new PoolManager('test', { minProcs: 1, maxProcs: 10, minWorkers: 0 }, factory);
+				new PoolManager('test', { minProcs: 1, maxProcs: 10, minWorkers: 0 }, factory, logger);
 			},
 			Error,
 			'Invalid minWorkers'
@@ -95,9 +110,10 @@ Deno.test('PoolManager - Configuration Validation', async (t) => {
 
 	await t.step('should validate maxWorkers >= minWorkers', () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		assertRejects(
 			async () => {
-				new PoolManager('test', { minProcs: 1, maxProcs: 10, minWorkers: 4, maxWorkers: 2 }, factory);
+				new PoolManager('test', { minProcs: 1, maxProcs: 10, minWorkers: 4, maxWorkers: 2 }, factory, logger);
 			},
 			Error,
 			'maxWorkers'
@@ -106,13 +122,14 @@ Deno.test('PoolManager - Configuration Validation', async (t) => {
 
 	await t.step('should accept valid configuration', () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('test', {
 			minProcs: 2,
 			maxProcs: 10,
 			scaling: 'dynamic',
 			minWorkers: 1,
 			maxWorkers: 4,
-		}, factory);
+		}, factory, logger);
 		assertEquals(pool.config.minProcs, 2);
 		assertEquals(pool.config.maxProcs, 10);
 		assertEquals(pool.config.scaling, 'dynamic');
@@ -122,11 +139,12 @@ Deno.test('PoolManager - Configuration Validation', async (t) => {
 Deno.test('PoolManager - Static Scaling', async (t) => {
 	await t.step('should spawn exactly minProcs items', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('static-test', {
 			minProcs: 3,
 			maxProcs: 3,
 			scaling: 'static',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.items.size, 3);
@@ -136,11 +154,12 @@ Deno.test('PoolManager - Static Scaling', async (t) => {
 
 	await t.step('should not scale up or down', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('static-test', {
 			minProcs: 2,
 			maxProcs: 2,
 			scaling: 'static',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.items.size, 2);
@@ -167,11 +186,12 @@ Deno.test('PoolManager - Static Scaling', async (t) => {
 Deno.test('PoolManager - Dynamic Scaling', async (t) => {
 	await t.step('should spawn minProcs items on initialization', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('dynamic-test', {
 			minProcs: 2,
 			maxProcs: 10,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.items.size, 2);
@@ -181,11 +201,12 @@ Deno.test('PoolManager - Dynamic Scaling', async (t) => {
 
 	await t.step('should scale up when all items busy', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('dynamic-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.items.size, 1);
@@ -205,11 +226,12 @@ Deno.test('PoolManager - Dynamic Scaling', async (t) => {
 
 	await t.step('should not exceed maxProcs', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('dynamic-test', {
 			minProcs: 1,
 			maxProcs: 2,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -227,12 +249,13 @@ Deno.test('PoolManager - Dynamic Scaling', async (t) => {
 
 	await t.step('should scale down idle items after timeout', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('dynamic-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
 			idleTimeout: 1, // 1 second for testing
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -257,11 +280,12 @@ Deno.test('PoolManager - Dynamic Scaling', async (t) => {
 Deno.test('PoolManager - OnDemand Scaling', async (t) => {
 	await t.step('should start with 0 items', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('ondemand-test', {
 			minProcs: 0,
 			maxProcs: 10,
 			scaling: 'ondemand',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.items.size, 0);
@@ -271,11 +295,12 @@ Deno.test('PoolManager - OnDemand Scaling', async (t) => {
 
 	await t.step('should spawn items on demand', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('ondemand-test', {
 			minProcs: 0,
 			maxProcs: 10,
 			scaling: 'ondemand',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.items.size, 0);
@@ -289,12 +314,13 @@ Deno.test('PoolManager - OnDemand Scaling', async (t) => {
 
 	await t.step('should kill idle items after timeout', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('ondemand-test', {
 			minProcs: 0,
 			maxProcs: 10,
 			scaling: 'ondemand',
 			idleTimeout: 1, // 1 second for testing
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -318,11 +344,12 @@ Deno.test('PoolManager - OnDemand Scaling', async (t) => {
 Deno.test('PoolManager - Item Lifecycle', async (t) => {
 	await t.step('should mark items as busy and idle', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('lifecycle-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -343,12 +370,13 @@ Deno.test('PoolManager - Item Lifecycle', async (t) => {
 
 	await t.step('should recycle items after maxReqs', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('lifecycle-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
 			maxReqs: 3,
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		const initialSize = pool.items.size;
@@ -371,11 +399,12 @@ Deno.test('PoolManager - Item Lifecycle', async (t) => {
 
 	await t.step('should track request count', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('lifecycle-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -397,11 +426,12 @@ Deno.test('PoolManager - Item Lifecycle', async (t) => {
 Deno.test('PoolManager - Metrics', async (t) => {
 	await t.step('should track pool metrics', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('metrics-test', {
 			minProcs: 2,
 			maxProcs: 10,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -426,12 +456,13 @@ Deno.test('PoolManager - Metrics', async (t) => {
 
 	await t.step('should track spawned and recycled counts', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('metrics-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
 			maxReqs: 2,
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.metrics.totalSpawned, 1);
@@ -458,11 +489,12 @@ Deno.test('PoolManager - Metrics', async (t) => {
 Deno.test('PoolManager - Configuration Updates', async (t) => {
 	await t.step('should update configuration', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('config-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.config.minProcs, 1);
@@ -483,11 +515,12 @@ Deno.test('PoolManager - Configuration Updates', async (t) => {
 
 	await t.step('should handle scaling strategy change', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('config-test', {
 			minProcs: 2,
 			maxProcs: 10,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.scaleTimer !== null, true);
@@ -508,11 +541,12 @@ Deno.test('PoolManager - Configuration Updates', async (t) => {
 Deno.test('PoolManager - Worker vs Process Pools', async (t) => {
 	await t.step('should handle worker pools', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('worker-test', {
 			minProcs: 2,
 			maxProcs: 5,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -524,11 +558,12 @@ Deno.test('PoolManager - Worker vs Process Pools', async (t) => {
 
 	await t.step('should handle process pools', async () => {
 		const factory = createMockProcessFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('process-test', {
 			minProcs: 2,
 			maxProcs: 5,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 
@@ -542,11 +577,12 @@ Deno.test('PoolManager - Worker vs Process Pools', async (t) => {
 Deno.test('PoolManager - Shutdown', async (t) => {
 	await t.step('should gracefully shutdown all items', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('shutdown-test', {
 			minProcs: 3,
 			maxProcs: 10,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		assertEquals(pool.items.size, 3);
@@ -558,11 +594,12 @@ Deno.test('PoolManager - Shutdown', async (t) => {
 
 	await t.step('should prevent spawning during shutdown', async () => {
 		const factory = createMockWorkerFactory();
+		const logger = createMockLogger();
 		const pool = new PoolManager('shutdown-test', {
 			minProcs: 1,
 			maxProcs: 5,
 			scaling: 'dynamic',
-		}, factory);
+		}, factory, logger);
 
 		await pool.initialize();
 		pool.isShuttingDown = true;

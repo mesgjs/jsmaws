@@ -236,7 +236,7 @@ Deno.test('IPCConnection - read message with binary data split across chunks', a
 	// Split so that binary data spans multiple chunks
 	const textPart = new TextDecoder().decode(encoded).indexOf('\n') + 1;
 	const textBytes = new TextEncoder().encode(new TextDecoder().decode(encoded).substring(0, textPart));
-	
+
 	conn.queueRead(textBytes);
 	conn.queueRead(encoded.slice(textBytes.length, textBytes.length + 10));
 	conn.queueRead(encoded.slice(textBytes.length + 10));
@@ -309,10 +309,10 @@ Deno.test('IPCConnection - write message with binary data', async () => {
 
 	const written = conn.writeBuffer[0];
 	const text = new TextDecoder().decode(written);
-	
+
 	assertEquals(text.charCodeAt(0), 1); // SOH
 	assertEquals(text.includes('dataSize'), true);
-	
+
 	// Verify binary data is appended
 	const newlineIndex = text.indexOf('\n');
 	const textBytes = new TextEncoder().encode(text.substring(0, newlineIndex + 1));
@@ -327,7 +327,7 @@ Deno.test('IPCConnection - handle console output with embedded newlines', async 
 	// Simulate console output with multiple lines, then an IPC message
 	conn.queueRead(encodeLogLevel('log'));
 	conn.queueRead(new TextEncoder().encode('Line 1\nLine 2\nLine 3\n'));
-	
+
 	const message = createMessage({ type: 'AFTER_CONSOLE', id: '8' }, { test: true });
 	conn.queueRead(encodeMessage(message));
 
@@ -346,7 +346,7 @@ Deno.test('IPCConnection - handle interleaved log levels and console output', as
 	conn.queueRead(new TextEncoder().encode('Debug message\n'));
 	conn.queueRead(encodeLogLevel('info'));
 	conn.queueRead(new TextEncoder().encode('Info message\n'));
-	
+
 	const message = createMessage({ type: 'FINAL', id: '9' }, { done: true });
 	conn.queueRead(encodeMessage(message));
 
@@ -369,11 +369,11 @@ Deno.test('Message type constants are defined', () => {
 
 Deno.test('createMessage - creates valid NANOS structure', () => {
 	const message = createMessage({ type: 'TEST', id: 'test-123' }, { foo: 'bar', num: 42 });
-	
+
 	assertEquals(message instanceof NANOS, true);
 	assertEquals(message.at(0), 'TEST');
 	assertEquals(message.at('id'), 'test-123');
-	
+
 	const fields = message.at(1);
 	assertEquals(fields instanceof NANOS, true);
 	assertEquals(fields.at('foo'), 'bar');
@@ -386,7 +386,7 @@ Deno.test('IPCConnection - connection closed returns null', async () => {
 
 	// Don't queue any data - close connection immediately
 	conn.close();
-	
+
 	const result = await ipcConn.readMessage();
 	assertEquals(result, null);
 });
@@ -416,7 +416,7 @@ Deno.test('IPCConnection - handles very large binary data', async () => {
 	assertExists(result);
 	assertEquals(result.message.type, 'LARGE');
 	assertEquals(result.binaryData.length, largeData.length);
-	
+
 	// Verify data integrity
 	for (let i = 0; i < largeData.length; i++) {
 		if (result.binaryData[i] !== largeData[i]) {

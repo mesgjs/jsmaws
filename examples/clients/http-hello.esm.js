@@ -9,7 +9,7 @@
 
 async function testHTTP() {
 	const baseUrl = 'http://localhost:8080';
-	
+
 	const tests = [
 		{
 			name: 'Simple GET',
@@ -27,43 +27,50 @@ async function testHTTP() {
 			method: 'GET'
 		},
 		{
-			name: 'POST request',
+			name: 'POST request with JSON body',
 			url: `${baseUrl}/hello`,
 			method: 'POST',
-			body: JSON.stringify({ message: 'test' }),
+			body: JSON.stringify({ name: 'Jason', greeting: 'Howdy' }),
 			headers: { 'Content-Type': 'application/json' }
+		},
+		{
+			name: 'POST request with form-encoded body',
+			url: `${baseUrl}/hello`,
+			method: 'POST',
+			body: 'name=Norm&greeting=Hey',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
 		}
 	];
-	
+
 	for (const test of tests) {
 		console.log(`\n${'='.repeat(60)}`);
 		console.log(`Test: ${test.name}`);
 		console.log(`URL: ${test.url}`);
 		console.log(`Method: ${test.method}`);
-		
+
 		try {
 			const options = {
 				method: test.method,
 				headers: test.headers || {}
 			};
-			
+
 			if (test.body) {
 				options.body = test.body;
 				console.log(`Body: ${test.body}`);
 			}
-			
+
 			const response = await fetch(test.url, options);
-			
+
 			console.log(`\nResponse:`);
 			console.log(`  Status: ${response.status} ${response.statusText}`);
 			console.log(`  Headers:`);
 			for (const [key, value] of response.headers.entries()) {
 				console.log(`    ${key}: ${value}`);
 			}
-			
+
 			const body = await response.text();
 			console.log(`  Body: ${body}`);
-			
+
 			// Try to parse as JSON
 			try {
 				const json = JSON.parse(body);
@@ -71,12 +78,12 @@ async function testHTTP() {
 			} catch (e) {
 				// Not JSON
 			}
-			
+
 		} catch (error) {
 			console.error(`  Error: ${error.message}`);
 		}
 	}
-	
+
 	console.log(`\n${'='.repeat(60)}`);
 	console.log('All tests complete');
 }

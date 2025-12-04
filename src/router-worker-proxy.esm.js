@@ -59,7 +59,7 @@ export class RouterWorkerProxy {
 
 		const pending = this.pendingMessages.get(id);
 		if (!pending) {
-			console.warn(`[RouterWorkerProxy ${this.id}] Received response for unknown message: ${id}`);
+			console.warn(`[RouterWorkerProxy:${this.id}] Received response for unknown message: ${id}`);
 			return;
 		}
 
@@ -79,7 +79,7 @@ export class RouterWorkerProxy {
 	 * Handle worker error
 	 */
 	handleWorkerError (error) {
-		console.error(`[RouterWorkerProxy ${this.id}] Worker error:`, error);
+		console.error(`[RouterWorkerProxy:${this.id}] Worker error:`, error);
 
 		// Reject all pending messages
 		for (const [id, pending] of this.pendingMessages.entries()) {

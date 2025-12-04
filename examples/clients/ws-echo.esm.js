@@ -9,15 +9,15 @@
 
 async function testWebSocket() {
 	const url = 'ws://localhost:8080/ws-echo';
-	
+
 	console.log(`Connecting to ${url}...`);
-	
+
 	try {
 		const ws = new WebSocket(url);
-		
+
 		ws.onopen = () => {
 			console.log('Connected!\n');
-			
+
 			// Send test messages
 			const messages = [
 				'Hello, WebSocket!',
@@ -25,15 +25,15 @@ async function testWebSocket() {
 				JSON.stringify({ type: 'test', value: 42 }),
 				'Final message'
 			];
-			
+
 			let messageIndex = 0;
-			
+
 			const sendNext = () => {
 				if (messageIndex < messages.length) {
 					const msg = messages[messageIndex++];
 					console.log(`Sending: ${msg}`);
 					ws.send(msg);
-					
+
 					// Send next message after 1 second
 					setTimeout(sendNext, 1000);
 				} else {
@@ -44,13 +44,13 @@ async function testWebSocket() {
 					}, 1000);
 				}
 			};
-			
+
 			sendNext();
 		};
-		
+
 		ws.onmessage = (event) => {
 			console.log(`Received: ${event.data}`);
-			
+
 			// Try to parse as JSON
 			try {
 				const parsed = JSON.parse(event.data);
@@ -59,15 +59,15 @@ async function testWebSocket() {
 				// Not JSON, that's fine
 			}
 		};
-		
+
 		ws.onerror = (error) => {
 			console.error('WebSocket error:', error);
 		};
-		
+
 		ws.onclose = (event) => {
 			console.log(`\nConnection closed (code: ${event.code}, reason: ${event.reason || 'none'})`);
 		};
-		
+
 		// Keep process alive until WebSocket closes
 		await new Promise((resolve) => {
 			ws.onclose = (event) => {
@@ -75,7 +75,7 @@ async function testWebSocket() {
 				resolve();
 			};
 		});
-		
+
 	} catch (error) {
 		console.error('Error:', error.message);
 	}

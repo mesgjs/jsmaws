@@ -33,11 +33,94 @@ export const MessageType = {
 };
 
 /**
- * Generate unique message ID
+ * Create config update message
  */
-let messageIdCounter = 0;
-export function generateMessageId (prefix = 'MSG') {
-	return `${prefix}-${Date.now()}-${++messageIdCounter}`;
+export function createConfigUpdate (config) {
+	return createMessage({ type: MessageType.CONFIG_UPDATE }, {
+		pools: config.at('pools'),
+		mimeTypes: config.at('mimeTypes'),
+		routes: config.at('routes'),
+		fsRouting: config.at('fsRouting', false),
+	});
+}
+
+/**
+ * Create error message
+ * @param {string} id Request/connection ID
+ * @param {number} status HTTP status code
+ * @param {string} message Error message
+ * @param {string} details Additional error details (optional)
+ * @returns {NANOS} Error message
+ */
+export function createError (id, status, message, details) {
+	const fields = { status, message };
+	if (details !== undefined) {
+		fields.details = details;
+	}
+	return createMessage({ type: MessageType.WEB_ERROR, id }, fields);
+}
+
+/**
+ * Create frame message (unified protocol)
+ * @param {string} id Request/connection ID
+ * @param {Object} options Frame options
+ * @param {string} options.mode Connection mode: 'response' | 'stream' | 'bidi' (only in first frame)
+ * @param {number} options.status HTTP status code (only in first frame for response/stream modes)
+ * @param {NANOS} options.headers HTTP headers (only in first frame for response/stream modes)
+ * @param {Uint8Array|null} options.data Frame chunk data
+ * @param {boolean} options.final Last chunk of current frame
+ * @param {boolean} options.keepAlive Connection stays open (optional, sticky state)
+ * @param {number} options.availableWorkers Available workers (capacity reporting, only in first frame)
+ * @param {number} options.totalWorkers Total workers (capacity reporting, only in first frame)
+ * @param {number} options.initialCredits Bidi protocol parameter (only after status 101)
+ * @param {number} options.maxChunkSize Bidi protocol parameter (only after status 101)
+ * @param {number} options.maxBytesPerSecond Bidi protocol parameter (only after status 101)
+ * @param {number} options.idleTimeout Bidi protocol parameter (only after status 101)
+ * @param {number} options.maxBufferSize Bidi protocol parameter (only after status 101)
+ * @returns {NANOS} Frame message
+ */
+export function createFrame (id, options = {}) {
+	// Build capacity object if workers info provided
+	let capacity = null;
+	if (options.availableWorkers !== undefined || options.totalWorkers !== undefined) {
+		capacity = {
+			availableWorkers: options.availableWorkers,
+			totalWorkers: options.totalWorkers
+		};
+	}
+
+	// Copy all optional fields that are defined (except capacity fields which go at message level)
+	const optionalFields = [
+		'mode', 'status', 'headers', 'keepAlive',
+		'initialCredits', 'maxChunkSize', 'maxBytesPerSecond', 'idleTimeout', 'maxBufferSize'
+	];
+
+	const fields = {};
+	for (const field of optionalFields) {
+		if (options[field] !== undefined) {
+			fields[field] = options[field];
+		}
+	}
+	if (options.final) fields.final = true;
+
+	// Create message with capacity at message level
+	const message = new NANOS(MessageType.WEB_FRAME, { id });
+	message.setOpts({ transform: true });
+	if (capacity) {
+		message.push({ capacity });  // Add as named parameter
+	}
+	message.push([fields]);
+	if (options.data?.length) message.set('dataSize', options.data.length);
+	return message;
+}
+
+/**
+ * Create health check message
+ */
+export function createHealthCheck () {
+	return createMessage({ type: MessageType.HEALTH_CHECK }, {
+		timestamp: Date.now(),
+	});
 }
 
 /**
@@ -55,27 +138,80 @@ export function createMessage ({ type, id = generateMessageId(type) }, fields = 
 }
 
 /**
- * Parse a SLID-formatted IPC message
- * @param {string} slidText SLID message text
- * @returns {Object} Parsed message with type, id, capacity, and fields
+ * Create request message
+ * @param {Object} options Request options
+ * @param {string} options.method HTTP method
+ * @param {string} options.url Complete request URL
+ * @param {string} options.app Applet path
+ * @param {string} options.pool Pool name
+ * @param {NANOS} options.headers Request headers
+ * @param {number} options.bodySize Request body size
+ * @param {string} options.remote Remote address
+ * @param {Object} options.routeParams Route parameters (from pattern matching)
+ * @param {string} options.routeTail Route tail (from wildcard routes)
+ * @param {NANOS} options.routeSpec Route specification (for timeout resolution)
+ * @returns {NANOS} Request message
  */
-export function parseMessage (slidText) {
-	const message = parseSLID(slidText);
+export function createRequest ({ method, routeParams = {}, routeTail = '', ...fields }) {
+	return createMessage({ type: MessageType.WEB_REQUEST }, {
+		method: method.toLowerCase(),
+		routeParams,      // Renamed from 'params'
+		routeTail,        // Renamed from 'tail'
+		...fields,        // Pass through all other fields (url, app, pool, headers, etc.)
+	});
+}
 
-	if (message.next < 2) {
-		throw new Error('Invalid IPC message format: missing type or fields');
-	}
+/**
+ * Create route request message
+ */
+export function createRouteRequest (method, path, headers, remote) {
+	return createMessage({ type: MessageType.ROUTE_REQUEST }, {
+		method: method.toLowerCase(),
+		path,
+		headers,
+		bodySize: 0,
+		remote,
+	});
+}
 
-	const type = message.at(0);
-	const id = message.at('id');
-	const capacity = message.at('capacity'); // Extract capacity metadata
-	const fields = message.at(1);
+/**
+ * Create route response message
+ */
+export function createRouteResponse (id, pool, app, params, tail, status = 200) {
+	return createMessage({ type: MessageType.ROUTE_RESPONSE, id }, {
+		pool,
+		app,
+		params,
+		tail,
+		status,
+	});
+}
 
-	if (!(fields instanceof NANOS)) {
-		throw new Error('Invalid IPC message format: fields must be NANOS');
-	}
+/**
+ * Create scale-down message
+ */
+export function createScaleDown () {
+	return createMessage({ type: MessageType.SCALE_DOWN }, {});
+}
 
-	return { type, id, capacity, fields };
+/**
+ * Create shutdown message
+ */
+export function createShutdown (timeout = 30) {
+	return createMessage({ type: MessageType.SHUTDOWN }, { timeout });
+}
+
+/**
+ * Encode log level prefix for console interception
+ * @param {string} level Log level (debug, info, log, warn, error)
+ * @returns {Uint8Array} Encoded log level prefix
+ */
+export function encodeLogLevel (level) {
+	const message = new NANOS('log');
+	message.setOpts({ transform: true });
+	message.push([level]);
+	const slidText = message.toSLID();
+	return new TextEncoder().encode(`${SOH}${slidText}\n`);
 }
 
 /**
@@ -86,12 +222,12 @@ export function parseMessage (slidText) {
  */
 export function encodeMessage (message, binaryData = null) {
 	const encoder = new TextEncoder();
-	
+
 	// Add dataSize to message if binary data present
 	if (binaryData && binaryData.length > 0) {
 		message.push({ dataSize: binaryData.length });
 	}
-	
+
 	// Convert SLID message to string with boundary markers
 	const slidText = message.toSLID();
 	const slidBytes = encoder.encode(`${SOH}${slidText}\n`);
@@ -110,16 +246,11 @@ export function encodeMessage (message, binaryData = null) {
 }
 
 /**
- * Encode log level prefix for console interception
- * @param {string} level Log level (debug, info, log, warn, error)
- * @returns {Uint8Array} Encoded log level prefix
+ * Generate unique message ID
  */
-export function encodeLogLevel (level) {
-	const message = new NANOS('log');
-	message.setOpts({ transform: true });
-	message.push([level]);
-	const slidText = message.toSLID();
-	return new TextEncoder().encode(`${SOH}${slidText}\n`);
+let messageIdCounter = 0;
+export function generateMessageId (prefix = 'MSG') {
+	return `${prefix}-${Date.now()}-${++messageIdCounter}`;
 }
 
 /**
@@ -175,28 +306,72 @@ export function parseLogMessage (line) {
 }
 
 /**
+ * Parse a SLID-formatted IPC message
+ * @param {string} slidText SLID message text
+ * @returns {Object} Parsed message with type, id, capacity, and fields
+ */
+export function parseMessage (slidText) {
+	const message = parseSLID(slidText);
+
+	if (message.next < 2) {
+		throw new Error('Invalid IPC message format: missing type or fields');
+	}
+
+	const type = message.at(0);
+	const id = message.at('id');
+	const capacity = message.at('capacity'); // Extract capacity metadata
+	const fields = message.at(1);
+
+	if (!(fields instanceof NANOS)) {
+		throw new Error('Invalid IPC message format: fields must be NANOS');
+	}
+
+	return { type, id, capacity, fields };
+}
+
+/**
  * IPC connection handler for reading/writing messages
  */
 export class IPCConnection {
-	constructor (conn) {
+	constructor (conn, { logger = null } = {}) {
 		this.conn = conn;
 		this.buffer = new Uint8Array(0);  // UNIFIED buffer (all bytes)
 		this.decoder = new TextDecoder();
 		this.closed = false;
-		
+		this.logger = logger; // Optional logger (for operator), null uses console (for service processes)
+
 		// State for message parsing
 		this.pendingMessage = null;  // Message waiting for binary data
 		this.binaryBytesNeeded = 0;  // How many binary bytes to extract
-		
+
 		// Callbacks for non-IPC content
 		this.onConsoleOutput = null;  // (text, logLevel) => void
 		this.currentLogLevel = 'log'; // Track most recent log level
-		
+
 		// Event-driven handlers
 		this.requestHandlers = new Map(); // requestId -> { handler, timeout, startTime }
 		this.messageHandlers = new Map(); // messageType -> handler function
 		this.monitoring = false;
 		this.onCapacityUpdate = null; // (capacity) => void
+	}
+
+	/**
+	 * Log a message (uses logger if available, otherwise console)
+	 */
+	log (level, message) {
+		switch (level) { // Validate levels
+		case 'debug':
+		case 'info':
+		case 'log':
+		case 'warn':
+		case 'error':
+			if (typeof this.logger?.log === 'function') {
+				// Log with level-mapping
+				this.logger.log(level, message);
+			} else {
+				console[level](message);
+			}
+		}
 	}
 
 	/**
@@ -211,14 +386,14 @@ export class IPCConnection {
 				if (this.buffer.length === 0) return null;
 				throw new Error(`Connection closed while reading binary data (need ${count}, have ${this.buffer.length})`);
 			}
-			
+
 			// Append to buffer
 			const newBuffer = new Uint8Array(this.buffer.length + value.length);
 			newBuffer.set(this.buffer);
 			newBuffer.set(value, this.buffer.length);
 			this.buffer = newBuffer;
 		}
-		
+
 		// Extract requested bytes
 		const result = this.buffer.slice(0, count);
 		this.buffer = this.buffer.slice(count);
@@ -234,7 +409,7 @@ export class IPCConnection {
 			// Try to decode buffer to text, handling partial UTF-8 at end
 			let text;
 			let validBytes = this.buffer.length;
-			
+
 			while (validBytes > 0) {
 				try {
 					text = this.decoder.decode(this.buffer.slice(0, validBytes), { stream: false });
@@ -244,22 +419,22 @@ export class IPCConnection {
 					validBytes--;
 				}
 			}
-			
+
 			// Check for newline in decoded text
 			if (validBytes > 0) {
 				const newlineIndex = text.indexOf('\n');
 				if (newlineIndex !== -1) {
 					// Found complete line
 					const line = text.substring(0, newlineIndex);
-					
+
 					// Calculate bytes consumed (including \n)
 					const consumedBytes = new TextEncoder().encode(text.substring(0, newlineIndex + 1)).length;
 					this.buffer = this.buffer.slice(consumedBytes);
-					
+
 					return line;
 				}
 			}
-			
+
 			// Need more data
 			const { done, value } = await this.conn.read();
 			if (done) {
@@ -271,7 +446,7 @@ export class IPCConnection {
 				}
 				return null;
 			}
-			
+
 			// Append to buffer
 			const newBuffer = new Uint8Array(this.buffer.length + value.length);
 			newBuffer.set(this.buffer);
@@ -291,7 +466,7 @@ export class IPCConnection {
 			if (line === null) {
 				return null; // Connection closed
 			}
-			
+
 			// Check if line starts with SOH (IPC or log message)
 			if (!line.startsWith(SOH + '[(')) {
 				// Console output - forward to handler
@@ -300,7 +475,7 @@ export class IPCConnection {
 				}
 				continue;
 			}
-			
+
 			// Check if it's a complete SLID block (ends with ')]')
 			let slidBlock = line;
 			if (!line.endsWith(')]')) {
@@ -316,7 +491,7 @@ export class IPCConnection {
 					}
 				}
 			}
-			
+
 			// Single-line SLID block
 			const result = await this.parseSlidMessage(slidBlock);
 			if (result) return result;
@@ -334,12 +509,12 @@ export class IPCConnection {
 		try {
 			message = parseSLID(slidText);
 		} catch (error) {
-			console.warn('Failed to parse SLID message:', error.message);
+			this.log('warn', `Failed to parse SLID message: ${error.message}`);
 			return null;
 		}
-		
+
 		const type = message.at(0);
-		
+
 		// Check for log level message
 		if (type === 'log') {
 			const logLevel = message.at(1);
@@ -348,18 +523,18 @@ export class IPCConnection {
 			}
 			return null; // Continue reading
 		}
-		
+
 		// IPC message
 		const id = message.at('id');
 		const capacity = message.at('capacity'); // Extract capacity metadata
 		const fields = message.at(1);
 		const dataSize = message.at('dataSize', 0);
-		
+
 		if (!(fields instanceof NANOS)) {
-			console.warn('Invalid IPC message format: fields must be NANOS');
+			this.log('warn', 'Invalid IPC message format: fields must be NANOS');
 			return null;
 		}
-		
+
 		// Read binary data if present
 		let binaryData = null;
 		if (dataSize > 0) {
@@ -368,7 +543,7 @@ export class IPCConnection {
 				throw new Error('Connection closed while reading binary data');
 			}
 		}
-		
+
 		return {
 			message: { type, id, capacity, fields },
 			binaryData
@@ -480,26 +655,27 @@ export class IPCConnection {
 				if (!result) break; // Connection closed
 
 				const { message, binaryData } = result;
-				
+
 				// Update capacity from message metadata (if present)
 				if (message.capacity && this.onCapacityUpdate) {
 					this.onCapacityUpdate(message.capacity);
 				}
-				
+
 				// Check if this is part of a registered stream
 				const streamEntry = this.requestHandlers.get(message.id);
 				if (streamEntry) {
 					try {
 						await streamEntry.handler(message, binaryData);
-						
+
 						// Check if stream is complete (final frame with no keepAlive)
 						const final = message.fields.at('final', false);
-						const keepAlive = message.fields.at('keepAlive', false);
+						const keepAlive = message.fields.at('keepAlive', true); // streaming, so sticky true
+						this.log('debug', `request ${message.id} final ${final} keepAlive ${keepAlive}`);
 						if (final && !keepAlive) {
 							this.clearRequestHandler(message.id);
 						}
 					} catch (error) {
-						console.error(`Stream handler error for ${message.id}:`, error);
+						this.log('error', `Stream handler error for ${message.id}: ${error.message}`);
 						this.clearRequestHandler(message.id);
 					}
 					continue;
@@ -510,11 +686,11 @@ export class IPCConnection {
 				if (handler) {
 					await handler(message, binaryData);
 				} else {
-					console.warn(`No handler for message type: ${message.type} (id: ${message.id})`);
+					this.log('warn', `No handler for message type: ${message.type} (id: ${message.id})`);
 				}
 			} catch (error) {
 				if (this.monitoring) {
-					console.error('Monitoring error:', error);
+					this.log('error', `Monitoring error: ${error.message}`);
 				}
 			}
 		}
@@ -525,7 +701,7 @@ export class IPCConnection {
 	 */
 	stopMonitoring () {
 		this.monitoring = false;
-		
+
 		// Cleanup all pending streams
 		for (const [requestId, entry] of this.requestHandlers) {
 			clearTimeout(entry.timeout);
@@ -533,161 +709,6 @@ export class IPCConnection {
 		}
 		this.requestHandlers.clear();
 	}
-}
-
-/**
- * Create route request message
- */
-export function createRouteRequest (method, path, headers, remote) {
-	return createMessage({ type: MessageType.ROUTE_REQUEST }, {
-		method: method.toLowerCase(),
-		path,
-		headers,
-		bodySize: 0,
-		remote,
-	});
-}
-
-/**
- * Create route response message
- */
-export function createRouteResponse (id, pool, app, params, tail, status = 200) {
-	return createMessage({ type: MessageType.ROUTE_RESPONSE, id }, {
-		pool,
-		app,
-		params,
-		tail,
-		status,
-	});
-}
-
-/**
- * Create request message
- * @param {Object} options Request options
- * @param {string} options.method HTTP method
- * @param {string} options.url Complete request URL
- * @param {string} options.app Applet path
- * @param {string} options.pool Pool name
- * @param {NANOS} options.headers Request headers
- * @param {number} options.bodySize Request body size
- * @param {string} options.remote Remote address
- * @param {Object} options.routeParams Route parameters (from pattern matching)
- * @param {string} options.routeTail Route tail (from wildcard routes)
- * @param {NANOS} options.routeSpec Route specification (for timeout resolution)
- * @returns {NANOS} Request message
- */
-export function createRequest ({ method, routeParams = {}, routeTail = '', ...fields }) {
-	return createMessage({ type: MessageType.WEB_REQUEST }, {
-		method: method.toLowerCase(),
-		routeParams,      // Renamed from 'params'
-		routeTail,        // Renamed from 'tail'
-		...fields,        // Pass through all other fields (url, app, pool, headers, etc.)
-	});
-}
-
-/**
- * Create config update message
- */
-export function createConfigUpdate (config) {
-	return createMessage({ type: MessageType.CONFIG_UPDATE }, {
-		pools: config.at('pools'),
-		mimeTypes: config.at('mimeTypes'),
-		routes: config.at('routes'),
-		fsRouting: config.at('fsRouting', false),
-	});
-}
-
-/**
- * Create shutdown message
- */
-export function createShutdown (timeout = 30) {
-	return createMessage({ type: MessageType.SHUTDOWN }, { timeout });
-}
-
-/**
- * Create scale-down message
- */
-export function createScaleDown () {
-	return createMessage({ type: MessageType.SCALE_DOWN }, {});
-}
-
-/**
- * Create health check message
- */
-export function createHealthCheck () {
-	return createMessage({ type: MessageType.HEALTH_CHECK }, {
-		timestamp: Date.now(),
-	});
-}
-
-/**
- * Create frame message (unified protocol)
- * @param {string} id Request/connection ID
- * @param {Object} options Frame options
- * @param {string} options.mode Connection mode: 'response' | 'stream' | 'bidi' (only in first frame)
- * @param {number} options.status HTTP status code (only in first frame for response/stream modes)
- * @param {NANOS} options.headers HTTP headers (only in first frame for response/stream modes)
- * @param {Uint8Array|null} options.data Frame chunk data
- * @param {boolean} options.final Last chunk of current frame
- * @param {boolean} options.keepAlive Connection stays open (optional, sticky state)
- * @param {number} options.availableWorkers Available workers (capacity reporting, only in first frame)
- * @param {number} options.totalWorkers Total workers (capacity reporting, only in first frame)
- * @param {number} options.initialCredits Bidi protocol parameter (only after status 101)
- * @param {number} options.maxChunkSize Bidi protocol parameter (only after status 101)
- * @param {number} options.maxBytesPerSecond Bidi protocol parameter (only after status 101)
- * @param {number} options.idleTimeout Bidi protocol parameter (only after status 101)
- * @param {number} options.maxBufferSize Bidi protocol parameter (only after status 101)
- * @returns {NANOS} Frame message
- */
-export function createFrame (id, options = {}) {
-	// Build capacity object if workers info provided
-	let capacity = null;
-	if (options.availableWorkers !== undefined || options.totalWorkers !== undefined) {
-		capacity = {
-			availableWorkers: options.availableWorkers,
-			totalWorkers: options.totalWorkers
-		};
-	}
-	
-	// Copy all optional fields that are defined (except capacity fields which go at message level)
-	const optionalFields = [
-		'mode', 'status', 'headers', 'keepAlive',
-		'initialCredits', 'maxChunkSize', 'maxBytesPerSecond', 'idleTimeout', 'maxBufferSize'
-	];
-	
-	const fields = {};
-	for (const field of optionalFields) {
-		if (options[field] !== undefined) {
-			fields[field] = options[field];
-		}
-	}
-	if (options.final) fields.final = true;
-	
-	// Create message with capacity at message level
-	const message = new NANOS(MessageType.WEB_FRAME, { id });
-	message.setOpts({ transform: true });
-	if (capacity) {
-		message.push({ capacity });  // Add as named parameter
-	}
-	message.push([fields]);
-	if (options.data?.length) message.set('dataSize', options.data.length);
-	return message;
-}
-
-/**
- * Create error message
- * @param {string} id Request/connection ID
- * @param {number} status HTTP status code
- * @param {string} message Error message
- * @param {string} details Additional error details (optional)
- * @returns {NANOS} Error message
- */
-export function createError (id, status, message, details) {
-	const fields = { status, message };
-	if (details !== undefined) {
-		fields.details = details;
-	}
-	return createMessage({ type: MessageType.WEB_ERROR, id }, fields);
 }
 
 /**

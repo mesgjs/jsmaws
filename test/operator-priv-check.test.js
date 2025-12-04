@@ -19,17 +19,17 @@ function restoreUid() {
 
 Deno.test('validatePrivilegeConfiguration - running as root with uid/gid configured', () => {
 	mockUid(0); // Mock running as root
-	
+
 	try {
 		const config = new NANOS();
 		config.set('uid', 1000);
 		config.set('gid', 1000);
-		
+
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
 		operator.configData = config;
 		operator.initializeLogger();
-		
+
 		// Should not throw
 		operator.validatePrivilegeConfiguration();
 	} finally {
@@ -39,16 +39,16 @@ Deno.test('validatePrivilegeConfiguration - running as root with uid/gid configu
 
 Deno.test('validatePrivilegeConfiguration - running as root without uid/gid throws error', () => {
 	mockUid(0); // Mock running as root
-	
+
 	try {
 		const config = new NANOS();
 		// No uid/gid set
-		
+
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
 		operator.configData = config;
 		operator.initializeLogger();
-		
+
 		// Should throw
 		assertThrows(
 			() => operator.validatePrivilegeConfiguration(),
@@ -62,17 +62,17 @@ Deno.test('validatePrivilegeConfiguration - running as root without uid/gid thro
 
 Deno.test('validatePrivilegeConfiguration - running as root with only uid throws error', () => {
 	mockUid(0); // Mock running as root
-	
+
 	try {
 		const config = new NANOS();
 		config.set('uid', 1000);
 		// No gid set
-		
+
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
 		operator.configData = config;
 		operator.initializeLogger();
-		
+
 		// Should throw
 		assertThrows(
 			() => operator.validatePrivilegeConfiguration(),
@@ -86,17 +86,17 @@ Deno.test('validatePrivilegeConfiguration - running as root with only uid throws
 
 Deno.test('validatePrivilegeConfiguration - running as root with only gid throws error', () => {
 	mockUid(0); // Mock running as root
-	
+
 	try {
 		const config = new NANOS();
 		config.set('gid', 1000);
 		// No uid set
-		
+
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
 		operator.configData = config;
 		operator.initializeLogger();
-		
+
 		// Should throw
 		assertThrows(
 			() => operator.validatePrivilegeConfiguration(),
@@ -110,28 +110,28 @@ Deno.test('validatePrivilegeConfiguration - running as root with only gid throws
 
 Deno.test('validatePrivilegeConfiguration - not running as root with uid/gid configured logs warning', () => {
 	mockUid(1000); // Mock running as non-root user
-	
+
 	try {
 		const config = new NANOS();
 		config.set('uid', 1000);
 		config.set('gid', 1000);
-		
+
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
 		operator.configData = config;
 		operator.initializeLogger();
-		
+
 		// Capture logger warnings
 		const warnings = [];
 		const originalWarn = operator.logger.warn;
 		operator.logger.warn = (msg) => warnings.push(msg);
-		
+
 		// Should not throw, but should log warning
 		operator.validatePrivilegeConfiguration();
-		
+
 		assertEquals(warnings.length, 1);
 		assertEquals(warnings[0].includes('not running as root'), true);
-		
+
 		// Restore logger
 		operator.logger.warn = originalWarn;
 	} finally {
@@ -141,16 +141,16 @@ Deno.test('validatePrivilegeConfiguration - not running as root with uid/gid con
 
 Deno.test('validatePrivilegeConfiguration - not running as root without uid/gid is fine', () => {
 	mockUid(1000); // Mock running as non-root user
-	
+
 	try {
 		const config = new NANOS();
 		// No uid/gid set
-		
+
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
 		operator.configData = config;
 		operator.initializeLogger();
-		
+
 		// Should not throw or warn
 		operator.validatePrivilegeConfiguration();
 	} finally {
@@ -160,28 +160,28 @@ Deno.test('validatePrivilegeConfiguration - not running as root without uid/gid 
 
 Deno.test('validatePrivilegeConfiguration - not running as root with only uid logs warning', () => {
 	mockUid(1000); // Mock running as non-root user
-	
+
 	try {
 		const config = new NANOS();
 		config.set('uid', 1000);
 		// No gid set
-		
+
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
 		operator.configData = config;
 		operator.initializeLogger();
-		
+
 		// Capture logger warnings
 		const warnings = [];
 		const originalWarn = operator.logger.warn;
 		operator.logger.warn = (msg) => warnings.push(msg);
-		
+
 		// Should not throw, but should log warning
 		operator.validatePrivilegeConfiguration();
-		
+
 		assertEquals(warnings.length, 1);
 		assertEquals(warnings[0].includes('not running as root'), true);
-		
+
 		// Restore logger
 		operator.logger.warn = originalWarn;
 	} finally {

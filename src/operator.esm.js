@@ -19,6 +19,7 @@ import { Configuration } from './configuration.esm.js';
 import { createConfigMonitor } from './config-monitor.esm.js';
 import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
+import { PoolManager } from './pool-manager.esm.js';
 import {
 	createRequest,
 	createFrame,
@@ -36,17 +37,28 @@ const DEFAULT_CONFIG_FILE = 'jsmaws.slid';
  * @returns {Promise<NANOS>} Parsed configuration
  */
 async function loadConfig (configPath) {
-	try {
-		const configText = await Deno.readTextFile(configPath);
-		const config = parseSLID(configText);
-		return config;
-	} catch (error) {
-		if (error instanceof Deno.errors.NotFound) {
-			console.warn(`Configuration file not found: ${configPath}`);
-			return new NANOS();
-		}
-		throw error;
-	}
+	const configText = await Deno.readTextFile(configPath);
+	const config = parseSLID(configText);
+	return config;
+}
+
+/**
+ * Get default pool configuration when none is provided
+ * @returns {NANOS} Default pools configuration
+ */
+function getDefaultPoolsConfig () {
+	return parseSLID(`[(
+		standard=[
+			minProcs=1
+			maxProcs=20
+			scaling=dynamic
+			minWorkers=1
+			maxWorkers=4
+			maxReqs=100
+			reqTimeout=60
+			conTimeout=300
+		]
+	)]`);
 }
 
 /**
@@ -70,7 +82,7 @@ class ServerConfig {
 	 * @returns {ServerConfig}
 	 */
 	static fromNANOS (config) {
-		return new ServerConfig(Object.fromEntries(config.entries()));
+		return new ServerConfig(config.toObject());
 	}
 }
 
@@ -89,10 +101,11 @@ class OperatorProcess {
 		this.router = null;
 		this.configMonitor = null;
 		this.processManager = null;
+		this.poolManagers = new Map(); // poolName -> PoolManager
+		this.affinityMap = new Map(); // appletPath -> Set<processIds>
 		this.logger = null;
 		this.isShuttingDown = false;
 		this.isReloading = false;
-		this.pendingRequests = new Map(); // requestId -> {resolve, reject, timeout, controller, writer}
 		this.bidiConnections = new Map(); // requestId -> bidirectional connection state
 		this.healthCheckInterval = null;
 	}
@@ -131,7 +144,7 @@ class OperatorProcess {
 			},
 		}, handler);
 
-		this.logger.info(`HTTP server started on port ${this.config.httpPort}`);
+		// this.logger.info(`HTTP server started on port ${this.config.httpPort}`);
 	}
 
 	/**
@@ -165,7 +178,7 @@ class OperatorProcess {
 				},
 			}, handler);
 
-			this.logger.info(`HTTPS server started on port ${this.config.httpsPort}`);
+			// this.logger.info(`HTTPS server started on port ${this.config.httpsPort}`);
 		} catch (error) {
 			this.logger.error(`Failed to start HTTPS server: ${error.message}`);
 			if (!this.config.noSSL) {
@@ -230,7 +243,7 @@ class OperatorProcess {
 	initializeRouter () {
 		this.configuration = new Configuration(this.configData);
 		this.router = new Router(this.configuration);
-		this.logger.info(`Router initialized with ${this.router.routes.length} route(s)`);
+		this.logger.debug(`Router initialized with ${this.router.routes.length} route(s)`);
 	}
 
 	/**
@@ -240,6 +253,14 @@ class OperatorProcess {
 		this.logger.info('Configuration updated; reloading...');
 		this.configData = newConfig;
 
+		// Apply default pool config if pools section is missing
+		let poolsConfig = this.configData.at('pools');
+		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
+			this.logger.warn('No pools configured in reload, using defaults');
+			poolsConfig = getDefaultPoolsConfig();
+			this.configData.set('pools', poolsConfig);
+		}
+
 		// Update server config
 		this.config = ServerConfig.fromNANOS(newConfig);
 
@@ -247,10 +268,13 @@ class OperatorProcess {
 		if (this.configuration && this.router) {
 			this.configuration.updateConfig(newConfig);
 			this.router.updateConfig();
-			this.logger.info(`Router updated with ${this.router.routes.length} route(s)`);
+			this.logger.debug(`Router updated with ${this.router.routes.length} route(s)`);
 		}
 
-		// Send config update to all service processes
+		// Update process pools (shutdown old, create new, reconfigure existing)
+		await this.updateProcessPools();
+
+		// Send config update to all remaining service processes
 		if (this.processManager) {
 			for (const [processId, proc] of this.processManager.processes) {
 				try {
@@ -264,7 +288,159 @@ class OperatorProcess {
 	}
 
 	/**
-	 * Handle HTTPS requests
+	 * Update process pools based on new configuration
+	 * Strategy: Reconfig existing first, add new in parallel, shutdown removed in parallel
+	 *
+	 * This approach:
+	 * 1. Updates existing pools immediately (PoolManager.updateConfig handles scaling)
+	 * 2. Spins up new pools in parallel (fast startup)
+	 * 3. Shuts down removed pools in parallel with timeout tracking
+	 */
+	async updateProcessPools () {
+		this.logger.info('Updating process pools');
+		const newPoolsConfig = this.configData.at('pools');
+		if (!newPoolsConfig || !(newPoolsConfig instanceof NANOS)) {
+			this.logger.error('updateProcessPools called but no pools config available');
+			return;
+		}
+
+		const stopTime = this.configData.at('shutdownDelay', 30);
+		const newPoolNames = new Set(newPoolsConfig.keys());
+		const oldPoolNames = new Set(this.poolManagers.keys());
+
+		// Identify pools to remove, reconfigure, and add
+		const poolsToRemove = new Set();
+		const poolsToReconfig = new Set();
+		const poolsToAdd = new Set();
+
+		for (const poolName of oldPoolNames) {
+			if (poolName === '@router') continue; // Skip router pool (handled separately)
+
+			if (!newPoolNames.has(poolName)) {
+				poolsToRemove.add(poolName);
+			} else {
+				poolsToReconfig.add(poolName);
+			}
+		}
+
+		for (const poolName of newPoolNames) {
+			if (poolName === '@router') continue; // Skip router pool
+
+			if (!oldPoolNames.has(poolName)) {
+				poolsToAdd.add(poolName);
+			}
+		}
+
+		// Phase 1: Reconfigure existing pools (synchronous, fast)
+		for (const poolName of poolsToReconfig) {
+			const poolManager = this.poolManagers.get(poolName);
+			const newPoolConfig = newPoolsConfig.at(poolName);
+
+			try {
+				// Convert NANOS to plain object for PoolManager
+				const configObj = newPoolConfig instanceof NANOS ? newPoolConfig.toObject() : newPoolConfig;
+				poolManager.updateConfig(configObj);
+				this.logger.info(`Pool '${poolName}' reconfigured`);
+			} catch (error) {
+				this.logger.error(`Failed to reconfigure pool '${poolName}': ${error.message}`);
+			}
+		}
+
+		// Phase 2: Create new pools (parallel)
+		const addPromises = [];
+		for (const poolName of poolsToAdd) {
+			this.logger.info(`Creating new pool: ${poolName}`);
+			const poolConfig = newPoolsConfig.at(poolName);
+
+			const addPromise = (async () => {
+				try {
+					// Convert NANOS to plain object for PoolManager
+					const configObj = poolConfig instanceof NANOS ? poolConfig.toObject() : poolConfig;
+
+					// Create item factory for this pool
+					const itemFactory = async (itemId) => {
+						return await this.processManager.createProcess(
+							itemId,
+							ProcessType.RESPONDER,
+							poolName,
+							poolConfig
+						);
+					};
+
+					// Create and initialize PoolManager
+					const poolManager = new PoolManager(poolName, configObj, itemFactory, this.logger);
+					await poolManager.initialize();
+
+					this.poolManagers.set(poolName, poolManager);
+					return { poolName, success: true };
+				} catch (error) {
+					this.logger.error(`Failed to create pool '${poolName}': ${error.message}`);
+					return { poolName, success: false };
+				}
+			})();
+
+			addPromises.push(addPromise);
+		}
+
+		// Wait for all new pools to be created
+		await Promise.all(addPromises);
+
+		// Phase 3: Shutdown removed pools (parallel with timeout tracking)
+		const removePromises = [];
+		let completedShutdowns = 0;
+		for (const poolName of poolsToRemove) {
+			this.logger.info(`Shutting down removed pool: ${poolName}`);
+			const poolManager = this.poolManagers.get(poolName);
+
+			if (poolManager) {
+				const removePromise = (async () => {
+					try {
+						await poolManager.shutdown(stopTime);
+						this.poolManagers.delete(poolName);
+						++completedShutdowns;
+
+						// Clean up affinity map entries for this pool
+						for (const [appletPath, itemIds] of this.affinityMap.entries()) {
+							for (const itemId of itemIds) {
+								if (itemId.startsWith(`${poolName}-`)) {
+									itemIds.delete(itemId);
+								}
+							}
+							if (itemIds.size === 0) {
+								this.affinityMap.delete(appletPath);
+							}
+						}
+					} catch (error) {
+						this.logger.error(`Error shutting down pool '${poolName}': ${error.message}`);
+					}
+				})();
+
+				removePromises.push(removePromise);
+			}
+		}
+
+		// Wait for shutdowns with timeout (stopTime + 5s grace period)
+		const shutdownTimeout = (stopTime + 5) * 1000;
+		const timeoutPromise = Promise.withResolvers();
+		const timer = setTimeout(timeoutPromise.resolve, shutdownTimeout);
+
+		const shutdownResults = await Promise.race([
+			Promise.all(removePromises),
+			timeoutPromise.promise
+		]);
+		clearTimeout(timer); // In case timeout didn't already fire
+
+		// Log summary
+		this.logger.info(
+			`Pool update summary: ${poolsToAdd.size} added, ` +
+			`${poolsToReconfig.size} reconfigured, ` +
+			`${completedShutdowns}/${poolsToRemove.size} completed shutdown`
+		);
+	}
+
+	/**
+	 * Handle HTTPS requests.
+	 * Returns a Response.
 	 */
 	async handleHttpsRequest (req) {
 		const startTime = Date.now();
@@ -359,60 +535,73 @@ class OperatorProcess {
 	}
 
 	/**
-	 * Forward request to service process via IPC
+	 * Forward request to service process via IPC.
+	 * Returns a Response.
 	 */
 	async forwardToServiceProcess (req, route, match, remote) {
 		// Determine pool name from route (default to 'standard')
 		const poolName = route.spec.at('pool', 'standard');
 		const appletPath = match.app || route.app;
 
-		// Find best process for this request
-		const process = this.processManager.findProcessForRequest(poolName, appletPath);
+		// Get pool manager
+		const poolManager = this.poolManagers.get(poolName);
+		if (!poolManager) {
+			this.logger.error(`Pool not found: ${poolName}`);
+			return new Response(
+				JSON.stringify({ error: '503 Service Unavailable', message: 'Pool not configured' }),
+				{ status: 503, headers: { 'Content-Type': 'application/json' } }
+			);
+		}
 
-		if (!process) {
+		// Get available process from pool (with affinity preference)
+		const poolItem = await this.getProcessWithAffinity(poolManager, appletPath);
+
+		if (!poolItem) {
 			this.logger.warn(`No available process in pool ${poolName}`);
 			return new Response(
 				JSON.stringify({ error: '503 Service Unavailable', message: 'No available workers' }),
-				{
-					status: 503,
-					headers: { 'Content-Type': 'application/json' },
-				}
+				{ status: 503, headers: { 'Content-Type': 'application/json' } }
 			);
 		}
+
+		const process = poolItem.item;
+
+		// Mark as busy
+		poolManager.markItemBusy(poolItem.id);
 
 		// Capture route spec in closure scope (not on process object to avoid race conditions)
 		const routeSpec = route.spec || null;
 
-		// Read request body
-		const bodyBytes = req.body ? await req.arrayBuffer() : new ArrayBuffer(0);
-		const bodySize = bodyBytes.byteLength;
-
-		// Convert headers to NANOS format
-		const headersNanos = new NANOS().fromEntries(req.headers.entries());
-
-		// Create IPC request message with complete URL and route spec
-		const requestMsg = createRequest({
-			method: req.method,
-			url: req.url,                    // Complete URL
-			app: appletPath,
-			pool: poolName,
-			headers: headersNanos,
-			bodySize,
-			remote,
-			routeParams: match.params || {}, // Renamed from params
-			routeTail: match.tail || '',     // Renamed from tail
-			routeSpec: route.spec || null,   // Add route spec for timeout resolution
-		});
-
-		// Send request to process using stream handler
 		try {
-			const url = new URL(req.url);
-			this.logger.debug(`Sending WEB_REQUEST to ${process.id} for ${req.method} ${url.pathname}`);
-
 			// Update affinity
 			if (appletPath) {
-				this.processManager.updateAffinity(process.id, appletPath);
+				this.updateAffinity(poolItem.id, appletPath);
 			}
+
+			// Read request body
+			const bodyBytes = req.body ? await req.arrayBuffer() : new ArrayBuffer(0);
+			const bodySize = bodyBytes.byteLength;
+
+			// Convert headers to NANOS format
+			const headersNanos = new NANOS().fromEntries(req.headers.entries());
+
+			// Create IPC request message with complete URL and route spec
+			const requestMsg = createRequest({
+				method: req.method,
+				url: req.url,                    // Complete URL
+				app: appletPath,
+				pool: poolName,
+				headers: headersNanos,
+				bodySize,
+				remote,
+				routeParams: match.params || {},
+				routeTail: match.tail || '',
+				routeSpec: route.spec || null,   // Add route spec for timeout resolution
+			});
+
+			// Send request to process using stream handler
+			const url = new URL(req.url);
+			this.logger.debug(`Sending WEB_REQUEST to ${process.id} for ${req.method} ${url.pathname}`);
 
 			// Get timeout configuration for initial request
 			const timeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
@@ -437,6 +626,8 @@ class OperatorProcess {
 						if (!firstFrame) {
 							firstFrame = message;
 							firstData = binaryData;
+							// Clear this handler immediately - handleResponseStream will register a new one
+							process.ipcConn.clearRequestHandler(requestMsg.at('id'));
 							resolve({ message: firstFrame, binaryData: firstData });
 						}
 					},
@@ -466,7 +657,48 @@ class OperatorProcess {
 					headers: { 'Content-Type': 'application/json' },
 				}
 			);
+		} finally {
+			// Mark as idle (triggers recycling check)
+			await poolManager.markItemIdle(poolItem.id);
 		}
+	}
+
+	/**
+	 * Get process with affinity preference
+	 * @param {PoolManager} poolManager Pool manager to get process from
+	 * @param {string} appletPath Applet path for affinity
+	 * @returns {Promise<PoolItem|null>} Pool item or null if none available
+	 */
+	async getProcessWithAffinity (poolManager, appletPath) {
+		// Strategy 1: Find process with affinity
+		if (appletPath) {
+			const affinitySet = this.affinityMap.get(appletPath);
+			if (affinitySet) {
+				for (const itemId of affinitySet) {
+					const item = poolManager.items.get(itemId);
+					if (item && item.isAvailable()) {
+						return item;
+					}
+				}
+			}
+		}
+
+		// Strategy 2: Get any available process
+		return await poolManager.getAvailableItem();
+	}
+
+	/**
+	 * Update affinity tracking
+	 * @param {string} itemId Pool item ID
+	 * @param {string} appletPath Applet path
+	 */
+	updateAffinity (itemId, appletPath) {
+		if (!appletPath) return;
+
+		if (!this.affinityMap.has(appletPath)) {
+			this.affinityMap.set(appletPath, new Set());
+		}
+		this.affinityMap.get(appletPath).add(itemId);
 	}
 
 	/**
@@ -533,11 +765,11 @@ class OperatorProcess {
 					// (handler was already registered in forwardToServiceProcess)
 					// We need to replace it with one that feeds the controller
 					process.ipcConn.clearRequestHandler(requestId);
-					
+
 					// Get timeout configuration from route/pool hierarchy (captured in closure)
 					const streamTimeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
 					const streamConTimeout = streamTimeouts.conTimeout * 1000;
-					
+
 					process.ipcConn.setRequestHandler(
 						requestId,
 						async (message, binaryData) => {
@@ -852,33 +1084,48 @@ class OperatorProcess {
 	 * Initialize service process pools
 	 */
 	async initializeProcessPools () {
-		const poolsConfig = this.configData.at('pools');
+		let poolsConfig = this.configData.at('pools');
 		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
 			this.logger.warn('No pools configured, using defaults');
-			return;
+			poolsConfig = getDefaultPoolsConfig();
+			// Store back in config for consistency
+			this.configData.set('pools', poolsConfig);
 		}
 
-		// Spawn initial processes for each pool
+		// Create PoolManager for each pool
 		for (const [poolName, poolConfig] of poolsConfig.entries()) {
 			if (poolName === '@router') {
 				// Router pool - only spawn if fsRouting is enabled
 				const fsRouting = this.configData.at('fsRouting', false);
 				if (fsRouting) {
-					const minProcs = poolConfig.at('minProcs', 1);
-					this.logger.info(`Initializing router pool with ${minProcs} process(es)`);
-
-					for (let i = 0; i < minProcs; i++) {
-						await this.processManager.spawnProcess(ProcessType.ROUTER, poolName, poolConfig);
-					}
+					this.logger.info(`Initializing router pool '${poolName}' (filesystem routing)`);
+					// Router pool uses PoolManager (already implemented in router-process)
+					// This is handled separately by router-process.esm.js
+					// For now, we don't create a PoolManager here since router processes
+					// manage their own worker pools internally
 				}
 			} else {
-				// Responder pool
-				const minProcs = poolConfig.at('minProcs', 1);
-				this.logger.info(`Initializing pool '${poolName}' with ${minProcs} process(es)`);
+				// Responder pool - create PoolManager
+				this.logger.info(`Initializing pool '${poolName}' with PoolManager`);
 
-				for (let i = 0; i < minProcs; i++) {
-					await this.processManager.spawnProcess(ProcessType.RESPONDER, poolName, poolConfig);
-				}
+				// Convert NANOS to plain object for PoolManager
+				const configObj = poolConfig instanceof NANOS ? poolConfig.toObject() : poolConfig;
+
+				// Create item factory for this pool
+				const itemFactory = async (itemId) => {
+					return await this.processManager.createProcess(
+						itemId,
+						ProcessType.RESPONDER,
+						poolName,
+						poolConfig
+					);
+				};
+
+				// Create and initialize PoolManager
+				const poolManager = new PoolManager(poolName, configObj, itemFactory, this.logger);
+				await poolManager.initialize();
+
+				this.poolManagers.set(poolName, poolManager);
 			}
 		}
 	}
@@ -1014,6 +1261,8 @@ class OperatorProcess {
 			return;
 		}
 
+		const stopTime = this.configData.at('shutdownDelay', 30);
+
 		this.isShuttingDown = true;
 		this.logger.info('Shutting down JSMAWS operator process...');
 
@@ -1033,21 +1282,35 @@ class OperatorProcess {
 			this.sslManager.stopMonitoring();
 		}
 
-		// Shutdown service processes
-		if (this.processManager) {
-			await this.processManager.shutdown();
-		}
+		const tasks = [];
 
 		// Shutdown HTTP server
 		if (this.httpServer) {
-			await this.httpServer.shutdown();
-			this.logger.info('HTTP server stopped');
+			tasks.push(this.httpServer.shutdown().then(() => this.logger.info('HTTP server stopped')));
 		}
 
 		// Shutdown HTTPS server
 		if (this.httpsServer) {
-			await this.httpsServer.shutdown();
-			this.logger.info('HTTPS server stopped');
+			tasks.push(this.httpsServer.shutdown().then(() => this.logger.info('HTTPS server stopped')));
+		}
+
+		// Shutdown all pool managers
+		if (this.poolManagers) {
+			for (const [poolName, poolManager] of this.poolManagers) {
+				this.logger.info(`Shutting down pool: ${poolName}`);
+				tasks.push(poolManager.shutdown(stopTime));
+			}
+		}
+
+		// Shutdown any remaining processes not in pools
+		if (this.processManager) {
+			tasks.push(this.processManager.shutdown(stopTime));
+		}
+
+		// Allow for graceful shutdown, but give it a hard limit before simply exiting
+		if (tasks.length) {
+			const timeout = new Promise((resolve) => setTimeout(resolve, (stopTime + 5) * 1000));
+			await Promise.race([Promise.all(tasks), timeout]);
 		}
 
 		// Close logger

@@ -37,7 +37,8 @@ import { ServiceProcess } from './service-process.esm.js';
 class ResponderProcess extends ServiceProcess {
 	constructor (processId, poolName) {
 		super('responder', processId);
-		this.poolName = poolName || Deno.env.get('JSMAWS_POOL') || 'standard';
+		if (typeof poolName !== 'string' || !poolName) throw new Error('ResponderProcess missing required pool name');
+		this.poolName = poolName;
 
 		// Track active requests and workers
 		this.activeRequests = new Map(); // requestId -> { worker, timeout, isStreaming }
@@ -72,7 +73,7 @@ class ResponderProcess extends ServiceProcess {
 	 * Handle configuration update from operator
 	 */
 	async handleConfigUpdate (fields) {
-		console.log(`[${this.processId}] Received configuration update`);
+		console.info(`[${this.processId}] Received configuration update`);
 
 		// Configuration instance is already updated by ServiceProcess base class
 		// Just need to extract relevant settings
@@ -92,7 +93,7 @@ class ResponderProcess extends ServiceProcess {
 			this.maxConcurrentRequests = poolConfig.at('maxWorkers', 10);
 		}
 
-		console.log(`[${this.processId}] Configuration updated`);
+		console.debug(`[${this.processId}] Configuration updated`);
 	}
 
 	/**
@@ -122,8 +123,8 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-		* Get message handlers for responder-specific messages
-		*/
+	 * Get message handlers for responder-specific messages
+	 */
 	getMessageHandlers () {
 		const baseHandlers = super.getMessageHandlers();
 
@@ -136,8 +137,8 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-		* Handle web request from operator
-		*/
+	 * Handle web request from operator
+	 */
 	async handleWebRequest (id, fields, binaryData) {
 		try {
 			// Validate required fields
@@ -169,11 +170,12 @@ class ResponderProcess extends ServiceProcess {
 			const timeouts = this.config.getTimeoutConfig(this.poolName, routeSpec);
 			const { reqTimeout, idleTimeout, conTimeout } = timeouts;
 
-			console.log(`[${this.processId}] Timeouts: req=${reqTimeout}s, idle=${idleTimeout}s, con=${conTimeout}s`);
+			console.debug(`[${this.processId}] Timeouts: req=${reqTimeout}s, idle=${idleTimeout}s, con=${conTimeout}s`);
 
 			// Set up request timeout
 			const timeout = reqTimeout ? setTimeout(() => {
 				if (this.activeRequests.has(id)) {
+					// Warn? Or debug?
 					console.warn(`[${this.processId}] Request ${id} timed out after ${reqTimeout}s`);
 					this.cleanupRequest(id);
 					this.sendErrorResponse(id, 504, 'Gateway Timeout').catch(console.error);
@@ -190,7 +192,7 @@ class ResponderProcess extends ServiceProcess {
 
 			// Handle messages from applet worker
 			worker.onmessage = (event) => {
-				console.log(`[${this.processId}] Worker onmessage fired for request ${id}`);
+				console.debug(`[${this.processId}] Worker onmessage fired for request ${id}`);
 				this.handleAppletMessage(id, event.data);
 			};
 
@@ -252,7 +254,7 @@ class ResponderProcess extends ServiceProcess {
 	async handleAppletMessage (id, data) {
 		const { type } = data;
 
-		console.log(`[${this.processId}] Received message from applet: type=${type}, id=${id}`);
+		console.debug(`[${this.processId}] Received message from applet: type=${type}, id=${id}`);
 
 		if (type !== 'frame' && type !== 'error') {
 			console.warn(`[${this.processId}] Unknown message type: ${type}`);
@@ -336,7 +338,7 @@ class ResponderProcess extends ServiceProcess {
 		// If final frame message (final is truthy), flush remaining buffer
 		// It defaults to false, allowing applets to send multiple chunks without specifying final: false each time
 		if (final) {
-			await this.flushFrameBuffer(id, requestInfo, true);
+			await this.flushFrameBuffer(id, requestInfo, true, keepAlive);
 
 			// Update keepAlive status if specified
 			if (keepAlive !== undefined) {
@@ -363,7 +365,7 @@ class ResponderProcess extends ServiceProcess {
 		return setTimeout(() => {
 			const requestInfo = this.activeRequests.get(id);
 			if (requestInfo && requestInfo.keepAlive) {
-				console.warn(`[${this.processId}] Connection ${id} idle timeout after ${idleTimeout}s`);
+				console.debug(`[${this.processId}] Connection ${id} idle timeout after ${idleTimeout}s`);
 				this.cleanupRequest(id);
 				this.sendErrorResponse(id, 408, 'Request Timeout').catch(console.error);
 			}
@@ -390,7 +392,7 @@ class ResponderProcess extends ServiceProcess {
 		return setTimeout(() => {
 			const requestInfo = this.activeRequests.get(id);
 			if (requestInfo && requestInfo.keepAlive) {
-				console.warn(`[${this.processId}] Connection ${id} lifetime timeout after ${conTimeout}s`);
+				console.debug(`[${this.processId}] Connection ${id} lifetime timeout after ${conTimeout}s`);
 				this.cleanupRequest(id);
 				this.sendErrorResponse(id, 408, 'Request Timeout').catch(console.error);
 			}
@@ -433,10 +435,10 @@ class ResponderProcess extends ServiceProcess {
 			availableWorkers,
 			totalWorkers: this.maxConcurrentRequests
 		});
-		
-		console.log(`[${this.processId}] Sending first frame to operator...`);
+
+		console.debug(`[${this.processId}] Sending first frame to operator...`);
 		await this.ipcConn.writeMessage(firstFrameMsg, frameData);
-		console.log(`[${this.processId}] First frame sent successfully`);
+		console.debug(`[${this.processId}] First frame sent successfully`);
 
 		// Handle bidi mode initialization
 		if (mode === 'bidi' && status === 101) {
@@ -562,7 +564,7 @@ class ResponderProcess extends ServiceProcess {
 		const conn = this.bidiConnections.get(id);
 		if (!conn) return;
 
-		console.log(`[${this.processId}] Closing bidi connection ${id}: ${reason}`);
+		console.debug(`[${this.processId}] Closing bidi connection ${id}: ${reason}`);
 
 		// Terminate worker
 		conn.worker.terminate();
@@ -624,11 +626,12 @@ class ResponderProcess extends ServiceProcess {
 	/**
 	 * Flush frame buffer to operator with chunking optimization
 	 */
-	async flushFrameBuffer (id, requestInfo, final) {
+	async flushFrameBuffer (id, requestInfo, final, keepAlive = undefined) {
+		keepAlive = (keepAlive !== undefined) ? { keepAlive } : {};
 		if (!requestInfo.frameBuffer || requestInfo.frameBuffer.length === 0) {
 			if (final) {
 				// Send final frame signal even if no data
-				const frameMsg = createFrame(id, { data: null, final: true });
+				const frameMsg = createFrame(id, { data: null, final: true, ...keepAlive });
 				await this.ipcConn.writeMessage(frameMsg);
 			}
 			return;
@@ -651,28 +654,28 @@ class ResponderProcess extends ServiceProcess {
 		// Apply responder's chunking logic to forward to operator
 		if (totalSize < this.chunkingConfig.maxDirectWrite) {
 			// Small: Direct write
-			const frameMsg = createFrame(id, { data: combined, final });
+			const frameMsg = createFrame(id, { data: combined, final, ...keepAlive });
 			const startTime = performance.now();
 			await this.ipcConn.writeMessage(frameMsg, combined);
 			const writeDuration = performance.now() - startTime;
 			this.detectBackpressure(writeDuration);
 		} else if (totalSize < this.chunkingConfig.autoChunkThresh) {
 			// Medium: Direct write with backpressure detection
-			const frameMsg = createFrame(id, { data: combined, final });
+			const frameMsg = createFrame(id, { data: combined, final, ...keepAlive });
 			const startTime = performance.now();
 			await this.ipcConn.writeMessage(frameMsg, combined);
 			const writeDuration = performance.now() - startTime;
 			this.detectBackpressure(writeDuration);
 		} else {
 			// Large: Send in chunks to operator
-			await this.sendInChunks(id, combined, final);
+			await this.sendInChunks(id, combined, final, keepAlive);
 		}
 	}
 
 	/**
 	 * Send data in chunks to operator
 	 */
-	async sendInChunks (id, data, final) {
+	async sendInChunks (id, data, final, keepAlive = {}) {
 		const { chunkSize } = this.chunkingConfig;
 		let offset = 0;
 
@@ -681,7 +684,7 @@ class ResponderProcess extends ServiceProcess {
 			const chunk = data.slice(offset, end);
 			const isLast = (end === data.length) && final;
 
-			const frameMsg = createFrame(id, { data: chunk, final: isLast });
+			const frameMsg = createFrame(id, { data: chunk, final: isLast, ...keepAlive });
 			const startTime = performance.now();
 			await this.ipcConn.writeMessage(frameMsg, chunk);
 			const writeDuration = performance.now() - startTime;
@@ -739,7 +742,7 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async sendErrorResponse (id, status, message) {
 		const errorBody = new TextEncoder().encode(JSON.stringify({ error: message }));
-		
+
 		// Send error as a single frame
 		const frameMsg = createFrame(id, {
 			mode: 'response',
@@ -749,7 +752,7 @@ class ResponderProcess extends ServiceProcess {
 			final: true,
 			keepAlive: false
 		});
-		
+
 		const startTime = performance.now();
 		await this.ipcConn.writeMessage(frameMsg, errorBody);
 		const writeDuration = performance.now() - startTime;
@@ -762,7 +765,7 @@ class ResponderProcess extends ServiceProcess {
 	 * Handle health check from operator
 	 */
 	async handleHealthCheck (id, fields) {
-		console.log(`[${this.processId}] Health check received`);
+		console.debug(`[${this.processId}] Health check received`);
 
 		// Report backpressure state at process level
 		const availableWorkers = this.bpAvailWorkers();
@@ -789,28 +792,31 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleShutdown (fields) {
 		const timeout = fields.at('timeout', 30);
-		console.log(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
+		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
 
 		this.isShuttingDown = true;
 
 		// Wait for active requests to complete (with timeout)
 		const shutdownStart = Date.now();
 		while (this.activeRequests.size > 0 && (Date.now() - shutdownStart) < timeout * 1000) {
-			console.log(`[${this.processId}] Waiting for ${this.activeRequests.size} active requests...`);
+			console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active requests...`);
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 		}
 
-		// Terminate any remaining workers
+		// Terminate any remaining workers and error-out their connections.
+		const tasks = [];
 		for (const [id, requestInfo] of this.activeRequests.entries()) {
-			console.log(`[${this.processId}] Terminating worker for request ${id}`);
+			console.debug(`[${this.processId}] Terminating worker for request ${id}`);
 			clearTimeout(requestInfo.timeout);
 			requestInfo.worker.terminate();
+			tasks.push(this.sendErrorResponse(id, 503, 'Service Unavailable').catch((e) => {}));
 		}
+		if (tasks.length) await Promise.all(tasks);
 		this.activeRequests.clear();
 		this.bidiConnections.clear();
 
 		// Log shutdown complete BEFORE closing IPC (which closes stdout)
-		console.log(`[${this.processId}] Shutdown complete`);
+		console.info(`[${this.processId}] Shutdown complete`);
 
 		// Close IPC connection (this closes stdout, so no more console.log after this)
 		if (this.ipcConn) {
@@ -821,8 +827,8 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-		* Log startup information after configuration is loaded
-		*/
+	 * Log startup information after configuration is loaded
+	 */
 	async onStarted () {
 		console.log(`[${this.processId}] Pool: ${this.poolName}, max concurrent: ${this.maxConcurrentRequests}`);
 	}
@@ -834,7 +840,8 @@ class ResponderProcess extends ServiceProcess {
 async function main () {
 	const processId = Deno.env.get('JSMAWS_PID'); // process id string
 	const poolName = Deno.env.get('JSMAWS_POOL');
-	console.log(`Responder main pid ${processId} pool ${poolName}`);
+	console.debug(`Responder main pid ${processId} pool ${poolName}`);
+	// TODO: poolName is always undefined?!
 	await ServiceProcess.run(ResponderProcess, processId, poolName);
 }
 
@@ -845,7 +852,6 @@ if (import.meta.main) {
 		Deno.exit(1);
 	});
 }
-console.log('Responder loaded');
 
 // Export for testing
 export { ResponderProcess };

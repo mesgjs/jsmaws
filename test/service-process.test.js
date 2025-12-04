@@ -51,37 +51,51 @@ class MockServiceProcess extends ServiceProcess {
 }
 
 /**
- * Mock IPC connection for testing
+ * Mock IPC connection for testing event-driven architecture
  */
 class MockIPCConnection {
 	constructor () {
-		this.messages = [];
-		this.readIndex = 0;
+		this.messageHandlers = new Map();
 		this.writtenMessages = [];
 		this.closed = false;
+		this.monitoring = false;
 	}
 
-	addMessage (type, id, fields) {
-		// Store in the format that readMessage returns: { message: { type, id, fields }, binaryData }
-		this.messages.push({
-			message: { type, id, fields },
-			binaryData: null
-		});
+	// Register message handler (event-driven)
+	onMessage (type, handler) {
+		this.messageHandlers.set(type, handler);
 	}
 
-	readMessage () {
-		if (this.readIndex >= this.messages.length) {
-			return null;
+	// Simulate receiving a message (for testing)
+	async simulateMessage (type, id, fields, binaryData = null) {
+		const handler = this.messageHandlers.get(type);
+		if (handler) {
+			const message = { type, id, fields };
+			await handler(message, binaryData);
 		}
-		return this.messages[this.readIndex++];
 	}
 
+	// Write message
 	writeMessage (message, binaryData = null) {
 		this.writtenMessages.push({ message, binaryData });
 	}
 
-	close () {
+	// Start monitoring (no-op for mock)
+	async startMonitoring () {
+		this.monitoring = true;
+		// In real implementation, this would block and read messages
+		// For testing, we just set the flag
+	}
+
+	// Stop monitoring
+	stopMonitoring () {
+		this.monitoring = false;
+	}
+
+	// Close connection
+	async close () {
 		this.closed = true;
+		this.stopMonitoring();
 	}
 }
 
@@ -107,111 +121,112 @@ Deno.test('ServiceProcess - getMessageHandlers returns base handlers', () => {
 	assertEquals(handlers.has(MessageType.SHUTDOWN), true);
 });
 
-Deno.test('ServiceProcess - processMessages handles CONFIG_UPDATE', async () => {
+Deno.test('ServiceProcess - setupMessageHandlers registers CONFIG_UPDATE handler', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-
-	// Add config update message - fields should be a NANOS with the data
-	const fields = new NANOS({ test: 'value' });
-	mockConn.addMessage(MessageType.CONFIG_UPDATE, 'cfg-1', fields);
-
 	process.ipcConn = mockConn;
 
-	// Process one message
-	const processPromise = process.processMessages();
+	// Setup handlers
+	process.setupMessageHandlers();
 
-	// Wait a bit for message processing
-	await new Promise(resolve => setTimeout(resolve, 100));
+	// Verify handler is registered
+	assertEquals(mockConn.messageHandlers.has(MessageType.CONFIG_UPDATE), true);
 
-	// Trigger shutdown to exit loop
-	process.isShuttingDown = true;
-	await processPromise;
+	// Simulate receiving a config update message
+	const fields = new NANOS({ test: 'value' });
+	await mockConn.simulateMessage(MessageType.CONFIG_UPDATE, 'cfg-1', fields);
 
 	assertEquals(process.configUpdateCalled, true);
 	assertEquals(process.config.get('test'), 'value');
 });
 
-Deno.test('ServiceProcess - processMessages handles HEALTH_CHECK', async () => {
+Deno.test('ServiceProcess - setupMessageHandlers registers HEALTH_CHECK handler', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-
-	// Add health check message
-	const fields = new NANOS({ timestamp: Date.now() });
-	mockConn.addMessage(MessageType.HEALTH_CHECK, 'hc-1', fields);
-
 	process.ipcConn = mockConn;
 
-	// Process one message
-	const processPromise = process.processMessages();
+	// Setup handlers
+	process.setupMessageHandlers();
 
-	// Wait a bit for message processing
-	await new Promise(resolve => setTimeout(resolve, 100));
+	// Verify handler is registered
+	assertEquals(mockConn.messageHandlers.has(MessageType.HEALTH_CHECK), true);
 
-	// Trigger shutdown to exit loop
-	process.isShuttingDown = true;
-	await processPromise;
+	// Simulate receiving a health check message
+	const fields = new NANOS({ timestamp: Date.now() });
+	await mockConn.simulateMessage(MessageType.HEALTH_CHECK, 'hc-1', fields);
 
 	assertEquals(process.healthCheckCalled, true);
 	assertEquals(mockConn.writtenMessages.length, 1);
 	assertEquals(mockConn.writtenMessages[0].message.at(0), MessageType.HEALTH_CHECK);
 });
 
-Deno.test('ServiceProcess - processMessages handles SHUTDOWN', async () => {
+Deno.test('ServiceProcess - setupMessageHandlers registers SHUTDOWN handler', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-
-	// Add shutdown message
-	const fields = new NANOS({ timeout: 30 });
-	mockConn.addMessage(MessageType.SHUTDOWN, 'halt-1', fields);
-
 	process.ipcConn = mockConn;
 
-	// Process messages
-	await process.processMessages();
+	// Setup handlers
+	process.setupMessageHandlers();
+
+	// Verify handler is registered
+	assertEquals(mockConn.messageHandlers.has(MessageType.SHUTDOWN), true);
+
+	// Simulate receiving a shutdown message
+	const fields = new NANOS({ timeout: 30 });
+	await mockConn.simulateMessage(MessageType.SHUTDOWN, 'halt-1', fields);
 
 	assertEquals(process.shutdownCalled, true);
 	assertEquals(process.isShuttingDown, true);
 	assertEquals(mockConn.closed, true);
 });
 
-Deno.test('ServiceProcess - processMessages handles unknown message type', async () => {
+Deno.test('ServiceProcess - setupMessageHandlers handles handler errors gracefully', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
-
-	// Add unknown message type
-	const fields = new NANOS();
-	mockConn.addMessage('UNKNOWN_TYPE', 'unk-1', fields);
-
 	process.ipcConn = mockConn;
 
-	// Process one message
-	const processPromise = process.processMessages();
+	// Override handler to throw error
+	process.handleConfigUpdate = () => {
+		throw new Error('Handler error');
+	};
 
-	// Wait a bit for message processing
-	await new Promise(resolve => setTimeout(resolve, 100));
+	// Setup handlers
+	process.setupMessageHandlers();
 
-	// Trigger shutdown to exit loop
-	process.isShuttingDown = true;
-	await processPromise;
+	// Simulate message - should not crash
+	const fields = new NANOS({ test: 'value' });
+	await mockConn.simulateMessage(MessageType.CONFIG_UPDATE, 'cfg-1', fields);
 
-	// Should not crash, just log warning
-	assertEquals(process.configUpdateCalled, false);
-	assertEquals(process.healthCheckCalled, false);
-	assertEquals(process.shutdownCalled, false);
+	// Process should still be functional
+	assertEquals(process.isShuttingDown, false);
 });
 
-Deno.test('ServiceProcess - processMessages exits on connection close', async () => {
+Deno.test('ServiceProcess - startMonitoring is called during start', async () => {
 	const process = new MockServiceProcess('test-123');
 	const mockConn = new MockIPCConnection();
 
-	// No messages - readMessage will return null
-	process.ipcConn = mockConn;
+	// Mock the IPC connection creation
+	process.createIPCConnection = () => {
+		process.ipcConn = mockConn;
+	};
 
-	// Process messages - should exit immediately
-	await process.processMessages();
+	// Mock waitForInitialConfig to avoid actual IPC
+	process.waitForInitialConfig = async () => {
+		process.config = new Configuration();
+	};
 
-	// Should exit cleanly without calling handlers
-	assertEquals(process.configUpdateCalled, false);
+	// Start the process (will call startMonitoring)
+	const startPromise = process.start();
+
+	// Wait a bit for setup
+	await new Promise(resolve => setTimeout(resolve, 50));
+
+	// Verify monitoring was started
+	assertEquals(mockConn.monitoring, true);
+
+	// Cleanup - close connection to exit monitoring
+	await mockConn.close();
+	await startPromise;
 });
 
 Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async () => {
