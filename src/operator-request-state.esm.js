@@ -93,6 +93,11 @@ export async function handleFirstFrame (context, message, binaryData, operator) 
 		const response = new Response(binaryData, { status, headers });
 		context.responsePromise.resolve(response);
 
+		// Mark pool item idle now that request is complete
+		if (context.poolManager && context.poolItemId) {
+			await context.poolManager.markItemIdle(context.poolItemId);
+		}
+
 	} else if (mode === 'response' || mode === 'stream') {
 		// Transition: multi-chunk and/or multi-frame response, start streaming
 		context.state = RequestState.STREAMING_RESPONSE;
@@ -170,7 +175,12 @@ export async function handleStreamFrame (context, message, binaryData, operator)
 	if (final && !keepAlive) {
 		context.streamController.close();
 		context.state = RequestState.COMPLETED;
-		operator.logger.debug(`[${context.requestId}] STREAMING_RESPONSE → COMPLETED`);
+		operator.logger.debug(`[${context.requestId}] was STREAMING_RESPONSE now COMPLETED`);
+
+		// Mark pool item idle now that stream is closed
+		if (context.poolManager && context.poolItemId) {
+			await context.poolManager.markItemIdle(context.poolItemId);
+		}
 	}
 }
 

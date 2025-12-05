@@ -594,11 +594,12 @@ export class OperatorProcess {
 			// Return Response promise that will be resolved by state machine
 			const response = await context.responsePromise.promise;
 
-			// For non-bidi connections, mark idle immediately
-			// For bidi connections, markItemIdle will be called when connection closes
-			if (context.mode !== 'bidi') {
-				await poolManager.markItemIdle(poolItem.id);
-			}
+			// Note: markItemIdle() is called by the state machine when connections actually close:
+			// - Single-frame responses: in handleFirstFrame() after response is sent
+			// - Streaming responses: in handleStreamFrame() when final frame arrives
+			// - Bidi connections: in socket.onclose handler when WebSocket closes
+			// This ensures processes are only marked idle after connections fully complete,
+			// preventing premature recycling of processes with active streaming/bidi connections.
 
 			return response;
 
