@@ -8,14 +8,13 @@
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { MessageType } from './ipc-protocol.esm.js';
+import { MessageType, createFrame } from './ipc-protocol.esm.js';
 
 /**
  * Request state machine states
  */
 export const RequestState = {
 	WAITING_FIRST_FRAME: 'waiting_first_frame',
-	WAITING_BIDI_PARAMS: 'waiting_bidi_params',
 	STREAMING_RESPONSE: 'streaming_response',
 	BIDI_ACTIVE: 'bidi_active',
 	COMPLETED: 'completed'
@@ -32,80 +31,83 @@ export class RequestContext {
 		this.poolName = poolName;
 		this.routeSpec = routeSpec;
 		this.originalRequest = req;  // For WebSocket upgrade
-		
+
 		// State machine
 		this.state = RequestState.WAITING_FIRST_FRAME;
-		
+
 		// Response promise
 		this.responsePromise = Promise.withResolvers();
-		
+
 		// Response data (populated from first frame)
 		this.mode = null;
 		this.status = null;
 		this.headers = null;
 		this.keepAlive = false;
-		
+
 		// Stream controller (for response/stream modes)
 		this.streamController = null;
-		
+
 		// Bidi connection state
 		this.bidiState = null;
-		
+
 		// Protocol parameters (for bidi)
 		this.protocolParams = null;
 	}
 }
 
 /**
- * Handle first frame in state machine
+ * Handle first app response frame
  */
 export async function handleFirstFrame (context, message, binaryData, operator) {
-	// Extract data from MESSAGE (not from code flow)
+	// Extract connection data from message
 	const mode = message.fields.at('mode');
 	const status = message.fields.at('status', 200);
 	const headers = operator.convertHeaders(message.fields.at('headers'));
 	const keepAlive = message.fields.at('keepAlive', false);
 	const final = message.fields.at('final', false);
-	
-	// Store in context (state as data)
+
+	// Save in context
 	context.mode = mode;
 	context.status = status;
 	context.headers = headers;
 	context.keepAlive = keepAlive;
-	
+
 	operator.logger.debug(`[${context.requestId}] First frame: mode=${mode}, status=${status}, final=${final}, keepAlive=${keepAlive}`);
-	
-	// Transition based on MESSAGE DATA
+
+	// Transition based on mode, state
 	if (mode === 'bidi' && status === 101) {
-		// Transition: need protocol params before creating Response
-		context.state = RequestState.WAITING_BIDI_PARAMS;
-		operator.logger.debug(`[${context.requestId}] WAITING_FIRST_FRAME → WAITING_BIDI_PARAMS`);
-		// Don't resolve responsePromise yet
-		
+		// Bidi upgrade: immediately initialize connection
+		// The first frame (status 101) should have no data (policy enforced by responder)
+		context.state = RequestState.BIDI_ACTIVE;
+		operator.logger.debug(`[${context.requestId}] was WAITING_FIRST_FRAME now BIDI_ACTIVE`);
+
+		// Initialize bidi connection immediately (sets up WebSocket)
+		await initializeBidiConnection(context, message, binaryData, operator);
+
 	} else if (mode === 'response' && final && !keepAlive) {
-		// Transition: single-frame response, complete immediately
+		// Transition: single-frame, single-chunk response, complete immediately
 		context.state = RequestState.COMPLETED;
-		operator.logger.debug(`[${context.requestId}] WAITING_FIRST_FRAME → COMPLETED`);
-		
+		operator.logger.debug(`[${context.requestId}] was WAITING_FIRST_FRAME now COMPLETED`);
+
 		// Create Response and resolve promise
 		const response = new Response(binaryData, { status, headers });
 		context.responsePromise.resolve(response);
-		
+
 	} else if (mode === 'response' || mode === 'stream') {
-		// Transition: multi-frame response, start streaming
+		// Transition: multi-chunk and/or multi-frame response, start streaming
 		context.state = RequestState.STREAMING_RESPONSE;
-		operator.logger.debug(`[${context.requestId}] WAITING_FIRST_FRAME → STREAMING_RESPONSE`);
-		
+		operator.logger.debug(`[${context.requestId}] was WAITING_FIRST_FRAME now STREAMING_RESPONSE`);
+
 		// Create ReadableStream
 		const stream = new ReadableStream({
 			start (controller) {
 				context.streamController = controller;
-				
+
 				// Enqueue first data if present
 				if (binaryData && binaryData.length > 0) {
 					controller.enqueue(binaryData);
 				}
-				
+
 				// Close if first frame was final
 				if (final && !keepAlive) {
 					controller.close();
@@ -113,51 +115,43 @@ export async function handleFirstFrame (context, message, binaryData, operator) 
 				}
 			}
 		});
-		
+
 		// Create Response and resolve promise
 		const response = new Response(stream, { status, headers });
 		context.responsePromise.resolve(response);
-		
+
 	} else {
 		throw new Error(`Unknown mode: ${mode}`);
 	}
 }
 
 /**
- * Handle bidi params frame in state machine
+ * Initialize bidirectional connection - derive params from configuration
+ * Called directly from handleFirstFrame when status 101 is received
  */
-export async function handleBidiParams (context, message, binaryData, operator) {
-	// Extract protocol parameters from MESSAGE
-	const initialCredits = message.fields.at('initialCredits');
-	const maxChunkSize = message.fields.at('maxChunkSize');
-	const maxBytesPerSecond = message.fields.at('maxBytesPerSecond');
-	const idleTimeout = message.fields.at('idleTimeout');
-	const maxBufferSize = message.fields.at('maxBufferSize');
-	
-	// Validate we got params
-	if (!initialCredits || !maxChunkSize) {
-		const error = new Error('Missing protocol parameters in bidi params frame');
-		context.responsePromise.reject(error);
-		context.state = RequestState.COMPLETED;
-		return;
-	}
-	
+export async function initializeBidiConnection (context, message, binaryData, operator) {
+	// Derive params from configuration (same as responder will use)
+	// routeSpec already contains pool name
+	const bidiParams = operator.configuration.getBidiParams({
+		routeSpec: context.routeSpec
+	});
+
 	// Store params in context (state as data)
 	context.protocolParams = {
-		initialCredits,
-		maxChunkSize,
-		maxBytesPerSecond,
-		idleTimeout,
-		maxBufferSize
+		initialCredits: bidiParams.initialCredits,
+		maxChunkSize: bidiParams.maxChunkSize,
+		maxBytesPerSecond: bidiParams.maxBytesPerSecond,
+		idleTimeout: bidiParams.idleTimeout,
+		maxBufferSize: bidiParams.maxBufferSize
 	};
-	
-	// Transition to active bidi
-	context.state = RequestState.BIDI_ACTIVE;
-	operator.logger.debug(`[${context.requestId}] WAITING_BIDI_PARAMS → BIDI_ACTIVE`);
-	
-	// Complete WebSocket upgrade
-	const response = await completeWebSocketUpgrade(context, operator);
+
+	// Complete transport-specific upgrade (currently only WebSocket supported)
+	// Future: Add support for other bidirectional transports here
+	const response = await completeBidiUpgrade(context, operator);
 	context.responsePromise.resolve(response);
+
+	// Note: First frame (status 101) has no data by policy
+	// Subsequent data frames will be handled by handleBidiFrame
 }
 
 /**
@@ -166,12 +160,12 @@ export async function handleBidiParams (context, message, binaryData, operator) 
 export async function handleStreamFrame (context, message, binaryData, operator) {
 	const final = message.fields.at('final', false);
 	const keepAlive = message.fields.at('keepAlive', context.keepAlive);
-	
+
 	// Enqueue data
 	if (binaryData && binaryData.length > 0) {
 		context.streamController.enqueue(binaryData);
 	}
-	
+
 	// Check for completion
 	if (final && !keepAlive) {
 		context.streamController.close();
@@ -186,17 +180,22 @@ export async function handleStreamFrame (context, message, binaryData, operator)
 export async function handleBidiFrame (context, message, binaryData, operator) {
 	const final = message.fields.at('final', false);
 	const keepAlive = message.fields.at('keepAlive', true);
-	
+
 	// Forward to WebSocket
 	if (binaryData && binaryData.length > 0) {
 		context.bidiState.socket.send(binaryData);
 	}
-	
+
 	// Check for completion
 	if (final && !keepAlive) {
 		context.bidiState.socket.close(1000, 'Normal closure');
 		context.state = RequestState.COMPLETED;
 		operator.logger.debug(`[${context.requestId}] BIDI_ACTIVE → COMPLETED`);
+
+		// Mark pool item idle now that connection is closed
+		if (context.poolManager && context.poolItemId) {
+			await context.poolManager.markItemIdle(context.poolItemId);
+		}
 	}
 }
 
@@ -205,13 +204,12 @@ export async function handleBidiFrame (context, message, binaryData, operator) {
  */
 export function handleRequestError (context, error, operator) {
 	operator.logger.error(`[${context.requestId}] Error in state ${context.state}: ${error.message}`);
-	
+
 	// Reject promise if not yet resolved
-	if (context.state === RequestState.WAITING_FIRST_FRAME || 
-	    context.state === RequestState.WAITING_BIDI_PARAMS) {
+	if (context.state === RequestState.WAITING_FIRST_FRAME) {
 		context.responsePromise.reject(error);
 	}
-	
+
 	// Close stream if active
 	if (context.streamController) {
 		try {
@@ -220,7 +218,7 @@ export function handleRequestError (context, error, operator) {
 			// Ignore if already closed
 		}
 	}
-	
+
 	// Close WebSocket if active
 	if (context.bidiState?.socket) {
 		try {
@@ -229,7 +227,7 @@ export function handleRequestError (context, error, operator) {
 			// Ignore if already closed
 		}
 	}
-	
+
 	context.state = RequestState.COMPLETED;
 }
 
@@ -243,30 +241,26 @@ export function createRequestHandler (context, operator) {
 			handleRequestError(context, message, operator);
 			return;
 		}
-		
+
 		// State machine dispatch based on CURRENT STATE (data)
 		switch (context.state) {
 			case RequestState.WAITING_FIRST_FRAME:
 				await handleFirstFrame(context, message, binaryData, operator);
 				break;
-				
-			case RequestState.WAITING_BIDI_PARAMS:
-				await handleBidiParams(context, message, binaryData, operator);
-				break;
-				
+
 			case RequestState.STREAMING_RESPONSE:
 				await handleStreamFrame(context, message, binaryData, operator);
 				break;
-				
+
 			case RequestState.BIDI_ACTIVE:
 				await handleBidiFrame(context, message, binaryData, operator);
 				break;
-				
+
 			case RequestState.COMPLETED:
 				// Ignore late messages
 				operator.logger.debug(`[${context.requestId}] Ignoring message for completed request`);
 				break;
-				
+
 			default:
 				operator.logger.error(`[${context.requestId}] Unknown state: ${context.state}`);
 		}
@@ -274,20 +268,21 @@ export function createRequestHandler (context, operator) {
 }
 
 /**
- * Complete WebSocket upgrade (helper for state machine)
+ * Complete bidirectional transport upgrade (helper for state machine)
+ * Currently only WebSocket is supported, but designed to be extensible
  */
-async function completeWebSocketUpgrade (context, operator) {
+async function completeBidiUpgrade (context, operator) {
 	const { requestId, originalRequest, protocolParams } = context;
-	
+
 	// Verify WebSocket upgrade headers
 	const connectionHeader = originalRequest.headers.get('connection');
 	if (!connectionHeader || !connectionHeader.toLowerCase().includes('upgrade')) {
 		throw new Error('Invalid Connection header for WebSocket upgrade');
 	}
-	
+
 	// Upgrade to WebSocket
 	const { socket, response } = Deno.upgradeWebSocket(originalRequest);
-	
+
 	// Track connection state
 	const connState = {
 		socket,
@@ -302,10 +297,10 @@ async function completeWebSocketUpgrade (context, operator) {
 		maxBufferSize: protocolParams.maxBufferSize,
 		lastActivity: Date.now(),
 	};
-	
+
 	// Store in context
 	context.bidiState = connState;
-	
+
 	// Handle WebSocket messages from client
 	socket.onmessage = async (event) => {
 		try {
@@ -316,26 +311,50 @@ async function completeWebSocketUpgrade (context, operator) {
 			operator.bidiConnections.delete(requestId);
 		}
 	};
-	
+
 	// Handle WebSocket close from client
-	socket.onclose = () => {
+	socket.onclose = async () => {
 		operator.logger.debug(`Bidi connection ${requestId} closed by client`);
 		operator.bidiConnections.delete(requestId);
 		context.state = RequestState.COMPLETED;
+
+		// Notify responder that connection is closed by sending final frame
+		try {
+			const closeFrame = createFrame(requestId, {
+				data: null,
+				final: true,
+				keepAlive: false
+			});
+			await connState.process.ipcConn.writeMessage(closeFrame);
+		} catch (error) {
+			operator.logger.error(`Failed to send close frame to responder: ${error.message}`);
+		}
+
+		// Mark pool item idle now that connection is closed
+		if (context.poolManager && context.poolItemId) {
+			await context.poolManager.markItemIdle(context.poolItemId);
+		}
+
 		operator.cleanupRequestContext(requestId);
 	};
-	
+
 	// Handle WebSocket errors
-	socket.onerror = (error) => {
+	socket.onerror = async (error) => {
 		operator.logger.error(`Bidi connection ${requestId} error: ${error}`);
 		operator.bidiConnections.delete(requestId);
 		context.state = RequestState.COMPLETED;
+
+		// Mark pool item idle on error
+		if (context.poolManager && context.poolItemId) {
+			await context.poolManager.markItemIdle(context.poolItemId);
+		}
+
 		operator.cleanupRequestContext(requestId);
 	};
-	
+
 	// Store in legacy bidiConnections map for compatibility
 	operator.bidiConnections.set(requestId, connState);
-	
+
 	return response;
 }
 

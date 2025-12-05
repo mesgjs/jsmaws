@@ -128,9 +128,15 @@ class ResponderProcess extends ServiceProcess {
 	getMessageHandlers () {
 		const baseHandlers = super.getMessageHandlers();
 
-		// Add responder-specific handler
+		// Add responder-specific handlers
 		baseHandlers.set(MessageType.WEB_REQUEST, async (id, fields, binaryData) => {
 			await this.handleWebRequest(id, fields, binaryData);
+		});
+
+		baseHandlers.set(MessageType.WEB_FRAME, async (id, fields, binaryData) => {
+			// Handle incoming bidi frames from operator (client to applet)
+			const final = fields.at('final', false);
+			await this.handleOperatorBidiFrame(id, binaryData, final);
 		});
 
 		return baseHandlers;
@@ -182,12 +188,13 @@ class ResponderProcess extends ServiceProcess {
 				}
 			}, reqTimeout * 1000) : null;
 
-			// Track active request with timeout configuration
+			// Track active request with timeout configuration and routeSpec
 			this.activeRequests.set(id, {
 				worker,
 				timeout,
 				isStreaming: false,
-				timeouts: { reqTimeout, idleTimeout, conTimeout }
+				timeouts: { reqTimeout, idleTimeout, conTimeout },
+				routeSpec  // Store for bidi params resolution
 			});
 
 			// Handle messages from applet worker
@@ -407,6 +414,14 @@ class ResponderProcess extends ServiceProcess {
 
 		console.log(`[${this.processId}] First frame: mode=${mode}, status=${status}, final=${final}, keepAlive=${keepAlive}, dataSize=${frameData?.length || 0}`);
 
+		// Enforce policy: status 101 (bidi upgrade) must not have data
+		if (status === 101 && frameData && frameData.length > 0) {
+			console.error(`[${this.processId}] Policy violation: status 101 frame must not contain data`);
+			this.cleanupRequest(id);
+			await this.sendErrorResponse(id, 500, 'Internal Server Error');
+			return;
+		}
+
 		// Store connection state
 		requestInfo.mode = mode;
 		requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
@@ -509,21 +524,23 @@ class ResponderProcess extends ServiceProcess {
 	 * Initialize bidirectional connection
 	 */
 	async initializeBidiConnection (id, requestInfo) {
-		const maxChunkSize = this.chunkingConfig.chunkSize;
-		const bidiConfig = this.config.bidiFlowControl || {};
-		const initialCredits = (bidiConfig.initialCredits || 10) * maxChunkSize;
+		// Get bidi parameters from configuration (same as operator will use)
+		// routeSpec already contains pool name, so we can pass just routeSpec
+		const bidiParams = this.config.getBidiParams({
+			routeSpec: requestInfo.routeSpec
+		});
 
 		const connState = {
 			worker: requestInfo.worker,
-			outboundCredits: initialCredits,
-			inboundCredits: initialCredits,
+			outboundCredits: bidiParams.initialCredits,
+			inboundCredits: bidiParams.initialCredits,
 			outboundBuffer: [],
 			inboundBuffer: [],
-			maxBufferSize: bidiConfig.maxBufferSize || 1048576,
+			maxBufferSize: bidiParams.maxBufferSize,
 			totalBuffered: { outbound: 0, inbound: 0 },
-			maxCredits: initialCredits,
-			maxBytesPerSecond: bidiConfig.maxBytesPerSecond || 10485760,
-			idleTimeout: bidiConfig.idleTimeout || 60,
+			maxCredits: bidiParams.initialCredits,
+			maxBytesPerSecond: bidiParams.maxBytesPerSecond,
+			idleTimeout: bidiParams.idleTimeout,
 			lastActivity: Date.now()
 		};
 
@@ -534,27 +551,18 @@ class ResponderProcess extends ServiceProcess {
 			type: 'frame',
 			id,
 			mode: 'bidi',
-			initialCredits,
-			maxChunkSize,
-			maxBytesPerSecond: connState.maxBytesPerSecond,
-			idleTimeout: connState.idleTimeout,
-			maxBufferSize: connState.maxBufferSize,
+			initialCredits: bidiParams.initialCredits,
+			maxChunkSize: bidiParams.maxChunkSize,
+			maxBytesPerSecond: bidiParams.maxBytesPerSecond,
+			idleTimeout: bidiParams.idleTimeout,
+			maxBufferSize: bidiParams.maxBufferSize,
 			data: null,
 			final: false,
 			keepAlive: true
 		});
 
-		// Send protocol parameters to operator (via IPC) - second frame after status 101
-		const frameMsg = createFrame(id, {
-			final: false,
-			keepAlive: true,
-			initialCredits,
-			maxChunkSize,
-			maxBytesPerSecond: connState.maxBytesPerSecond,
-			idleTimeout: connState.idleTimeout,
-			maxBufferSize: connState.maxBufferSize
-		});
-		await this.ipcConn.writeMessage(frameMsg);
+		// NOTE: No longer send params frame to operator
+		// The operator will derive the same params from configuration
 	}
 
 	/**
@@ -579,7 +587,15 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleOperatorBidiFrame (id, frameData, final) {
 		const conn = this.bidiConnections.get(id);
-		if (!conn) return;
+		if (!conn) {
+			// Connection doesn't exist - might have been closed already
+			// Clean up active request if it still exists
+			if (this.activeRequests.has(id)) {
+				console.debug(`[${this.processId}] Cleaning up orphaned request ${id}`);
+				this.cleanupRequest(id);
+			}
+			return;
+		}
 
 		const chunkSize = frameData?.length || 0;
 
@@ -621,6 +637,13 @@ class ResponderProcess extends ServiceProcess {
 
 		// Update last activity
 		conn.lastActivity = Date.now();
+
+		// Handle connection close from client side
+		// When operator detects WebSocket close, it should send a final frame
+		if (final) {
+			console.debug(`[${this.processId}] Bidi connection ${id} closed by client (final frame received)`);
+			this.closeBidiConnection(id, 'Client closed connection');
+		}
 	}
 
 	/**

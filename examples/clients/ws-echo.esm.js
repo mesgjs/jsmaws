@@ -14,6 +14,8 @@ async function testWebSocket() {
 
 	try {
 		const ws = new WebSocket(url);
+		ws.binaryType = 'arraybuffer';
+		const decoder = new TextDecoder('utf-8');
 
 		ws.onopen = () => {
 			console.log('Connected!\n');
@@ -31,7 +33,7 @@ async function testWebSocket() {
 			const sendNext = () => {
 				if (messageIndex < messages.length) {
 					const msg = messages[messageIndex++];
-					console.log(`Sending: ${msg}`);
+					console.log(`Sending: "${msg}"`);
 					ws.send(msg);
 
 					// Send next message after 1 second
@@ -49,12 +51,13 @@ async function testWebSocket() {
 		};
 
 		ws.onmessage = (event) => {
-			console.log(`Received: ${event.data}`);
+			const data = decoder.decode(event.data);
+			console.log(`Received: "${data}"`);
 
 			// Try to parse as JSON
 			try {
-				const parsed = JSON.parse(event.data);
-				console.log('  Parsed:', parsed);
+				const parsed = JSON.parse(data);
+				console.log('Parsed:', parsed);
 			} catch (e) {
 				// Not JSON, that's fine
 			}
@@ -62,10 +65,6 @@ async function testWebSocket() {
 
 		ws.onerror = (error) => {
 			console.error('WebSocket error:', error);
-		};
-
-		ws.onclose = (event) => {
-			console.log(`\nConnection closed (code: ${event.code}, reason: ${event.reason || 'none'})`);
 		};
 
 		// Keep process alive until WebSocket closes

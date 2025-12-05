@@ -381,7 +381,8 @@ Deno.test('ResponderProcess - initialize bidi connection', async () => {
 		worker,
 		timeout: setTimeout(() => {}, 1000),
 		mode: 'bidi',
-		keepAlive: true
+		keepAlive: true,
+		routeSpec: null  // No route-specific config
 	};
 	process.activeRequests.set('req-6', requestInfo);
 
@@ -400,9 +401,9 @@ Deno.test('ResponderProcess - initialize bidi connection', async () => {
 	assertExists(appletMsg.initialCredits);
 	assertExists(appletMsg.maxChunkSize);
 
-	// Should have sent protocol parameters to operator
-	const operatorMsg = process.ipcConn.getLastMessage();
-	assertExists(operatorMsg);
+	// Should NOT have sent params frame to operator (params are config-derived now)
+	// The IPC messages array should be empty
+	assertEquals(process.ipcConn.messages.length, 0);
 
 	clearTimeout(requestInfo.timeout);
 	process.bidiConnections.delete('req-6');

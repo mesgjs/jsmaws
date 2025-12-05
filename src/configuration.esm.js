@@ -176,6 +176,72 @@ export class Configuration {
 	}
 
 	/**
+	 * Get bidirectional flow control parameters with hierarchy: route > pool > global
+	 * @param {Object} options - Options object
+	 * @param {string} [options.poolName] - Pool name (optional if routeSpec has pool field)
+	 * @param {NANOS|null} [options.routeSpec] - Route specification (optional)
+	 * @returns {Object} Bidi parameters with all flow control settings
+	 */
+	getBidiParams ({ poolName, routeSpec } = {}) {
+		// Extract poolName from routeSpec if not explicitly provided
+		if (!poolName && routeSpec) {
+			poolName = routeSpec.at('pool');
+		}
+
+		// Default to 'standard' pool
+		poolName = poolName || 'standard';
+
+		// Global defaults (lowest priority)
+		const bidiConfig = this.config.at('bidiFlowControl') || { at (_n, d) { return d; } };
+		const chunkSize = this.chunking.chunkSize;
+
+		const defaults = {
+			initialCredits: (bidiConfig.at('initialCredits', 10)) * chunkSize,
+			maxChunkSize: chunkSize,
+			maxBytesPerSecond: bidiConfig.at('maxBytesPerSecond', 10485760),
+			idleTimeout: bidiConfig.at('idleTimeout', 60),
+			maxBufferSize: bidiConfig.at('maxBufferSize', 1048576)
+		};
+
+		// Pool overrides (medium priority)
+		const poolConfig = this.getPoolConfig(poolName);
+		const poolBidiConfig = poolConfig?.at('bidiFlowControl');
+
+		// Determine pool's maxChunkSize (may override global)
+		const poolMaxChunkSize = poolConfig?.at('maxChunkSize', defaults.maxChunkSize) ?? defaults.maxChunkSize;
+
+		const poolParams = {
+			initialCredits: poolBidiConfig?.at('initialCredits')
+				? poolBidiConfig.at('initialCredits') * poolMaxChunkSize
+				: defaults.initialCredits,
+			maxChunkSize: poolMaxChunkSize,
+			maxBytesPerSecond: poolBidiConfig?.at('maxBytesPerSecond', defaults.maxBytesPerSecond) ?? defaults.maxBytesPerSecond,
+			idleTimeout: poolBidiConfig?.at('idleTimeout', defaults.idleTimeout) ?? defaults.idleTimeout,
+			maxBufferSize: poolBidiConfig?.at('maxBufferSize', defaults.maxBufferSize) ?? defaults.maxBufferSize
+		};
+
+		// Route overrides (highest priority)
+		if (routeSpec) {
+			const routeBidiConfig = routeSpec.at('bidiFlowControl');
+
+			// Determine route's maxChunkSize (may override pool)
+			const routeMaxChunkSize = routeSpec.at('maxChunkSize', poolParams.maxChunkSize);
+
+			return {
+				initialCredits: routeBidiConfig?.at('initialCredits')
+					? routeBidiConfig.at('initialCredits') * routeMaxChunkSize
+					: poolParams.initialCredits,
+				maxChunkSize: routeMaxChunkSize,
+				maxBytesPerSecond: routeBidiConfig?.at('maxBytesPerSecond', poolParams.maxBytesPerSecond) ?? poolParams.maxBytesPerSecond,
+				idleTimeout: routeBidiConfig?.at('idleTimeout', poolParams.idleTimeout) ?? poolParams.idleTimeout,
+				maxBufferSize: routeBidiConfig?.at('maxBufferSize', poolParams.maxBufferSize) ?? poolParams.maxBufferSize
+			};
+		}
+
+		return poolParams;
+	}
+
+	/**
 	 * Get MIME types configuration
 	 * @returns {NANOS} MIME types mapping
 	 */

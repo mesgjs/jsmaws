@@ -39,7 +39,7 @@ export const ProcessState = {
  * Managed service process
  */
 class ManagedProcess {
-	constructor (id, type, poolName, process, ipcConn) {
+	constructor (id, type, poolName, process, ipcConn, processManager) {
 		this.id = id;
 		this.type = type;
 		this.poolName = poolName;
@@ -52,6 +52,14 @@ class ManagedProcess {
 		this.availableWorkers = 0;
 		this.totalWorkers = 0;
 		this.affinity = new Set(); // Applet paths this process has loaded
+		this.processManager = processManager;
+	}
+
+	/**
+	 * Add applet to affinity set
+	 */
+	addAffinity (appletPath) {
+		this.affinity.add(appletPath);
 	}
 
 	/**
@@ -62,10 +70,24 @@ class ManagedProcess {
 	}
 
 	/**
+	 * Check if process has affinity for applet
+	 */
+	hasAffinity (appletPath) {
+		return this.affinity.has(appletPath);
+	}
+
+	/**
 	 * Check if process has capacity
 	 */
 	hasCapacity () {
 		return this.state === ProcessState.READY && this.availableWorkers > 0;
+	}
+
+	/**
+	 * Shutdown (typically for recycling, so default is fast)
+	 */
+	shutdown (timeout = 5) {
+		this.processManager.shutdownProcess(this, timeout);
 	}
 
 	/**
@@ -83,20 +105,6 @@ class ManagedProcess {
 		} else {
 			this.state = ProcessState.BUSY;
 		}
-	}
-
-	/**
-	 * Add applet to affinity set
-	 */
-	addAffinity (appletPath) {
-		this.affinity.add(appletPath);
-	}
-
-	/**
-	 * Check if process has affinity for applet
-	 */
-	hasAffinity (appletPath) {
-		return this.affinity.has(appletPath);
 	}
 }
 
@@ -230,7 +238,8 @@ export class ProcessManager {
 			type,
 			poolName,
 			process,
-			ipcConn
+			ipcConn,
+			this
 		);
 
 		// Store process
@@ -270,6 +279,8 @@ export class ProcessManager {
 			return;
 		}
 
+		if (managedProc.state === ProcessState.STOPPING) return;
+
 		const processId = managedProc.id;
 		this.logger.info(`Shutting down process: ${processId}`);
 
@@ -292,7 +303,7 @@ export class ProcessManager {
 				this.logger.warn(`Process ${processId} did not exit within ${timeout}s, forcing termination`);
 				managedProc.process.kill('SIGKILL');
 			} else {
-				this.logger.info(`Process ${processId} exited with code ${status.code}`);
+				this.logger.debug(`Process ${processId} exited with code ${status.code}`);
 			}
 		} catch (error) {
 			this.logger.error(`Error shutting down process ${processId}: ${error.message}`);
@@ -336,7 +347,7 @@ export class ProcessManager {
 		(async () => {
 			const status = await managedProc.process.status;
 
-			this.logger.warn(`Process ${managedProc.id} exited with code ${status.code}`);
+			if (status.code) this.logger.warn(`Process ${managedProc.id} exited with code ${status.code}`);
 
 			// Mark as dead
 			managedProc.state = ProcessState.DEAD;

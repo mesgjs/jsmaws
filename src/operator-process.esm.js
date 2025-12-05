@@ -127,7 +127,7 @@ export class OperatorProcess {
 	/**
 	 * Start the HTTP server (for redirects and ACME challenges)
 	 */
-	async startHttpServer () {
+	startHttpServer () {
 		const handler = (req) => this.handleHttpRequest(req);
 
 		this.httpServer = Deno.serve({
@@ -557,7 +557,7 @@ export class OperatorProcess {
 			});
 
 			const requestId = requestMsg.at('id');
-			
+
 			const url = new URL(req.url);
 			this.logger.debug(`Sending WEB_REQUEST to ${process.id} for ${req.method} ${url.pathname}`);
 
@@ -573,10 +573,14 @@ export class OperatorProcess {
 				routeSpec,
 				req
 			);
-			
+
+			// Store pool manager and item ID for cleanup
+			context.poolManager = poolManager;
+			context.poolItemId = poolItem.id;
+
 			// Store context
 			this.requestContexts.set(requestId, context);
-			
+
 			// Register SINGLE handler (never cleared until completion)
 			process.ipcConn.setRequestHandler(
 				requestId,
@@ -588,10 +592,20 @@ export class OperatorProcess {
 			await process.ipcConn.writeMessage(requestMsg, new Uint8Array(bodyBytes));
 
 			// Return Response promise that will be resolved by state machine
-			return await context.responsePromise.promise;
-			
+			const response = await context.responsePromise.promise;
+
+			// For non-bidi connections, mark idle immediately
+			// For bidi connections, markItemIdle will be called when connection closes
+			if (context.mode !== 'bidi') {
+				await poolManager.markItemIdle(poolItem.id);
+			}
+
+			return response;
+
 		} catch (error) {
 			this.logger.error(`IPC communication error with ${process.id}: ${error.message}`);
+			// Mark idle on error
+			await poolManager.markItemIdle(poolItem.id);
 			return new Response(
 				JSON.stringify({ error: '502 Bad Gateway', message: 'Service process error' }),
 				{
@@ -599,8 +613,6 @@ export class OperatorProcess {
 					headers: { 'Content-Type': 'application/json' },
 				}
 			);
-		} finally {
-			await poolManager.markItemIdle(poolItem.id);
 		}
 	}
 
@@ -889,15 +901,23 @@ export class OperatorProcess {
 			tasks.push(this.httpsServer.shutdown().then(() => this.logger.info('HTTPS server stopped')));
 		}
 
+		const poolTasks = [];
 		if (this.poolManagers) {
 			for (const [poolName, poolManager] of this.poolManagers) {
 				this.logger.info(`Shutting down pool: ${poolName}`);
-				tasks.push(poolManager.shutdown(stopTime));
+				poolTasks.push(poolManager.shutdown(stopTime));
 			}
 		}
 
 		if (this.processManager) {
-			tasks.push(this.processManager.shutdown(stopTime));
+			const pmShutdown = () => this.processManager.shutdown(stopTime);
+			if (poolTasks.length) {
+				tasks.push(Promise.all(poolTasks).then(() => pmShutdown()));
+			} else {
+				tasks.push(pmShutdown());
+			}
+		} else {
+			tasks.push(...poolTasks);
 		}
 
 		if (tasks.length) {
@@ -905,10 +925,7 @@ export class OperatorProcess {
 			await Promise.race([Promise.all(tasks), timeout]);
 		}
 
-		if (this.logger) {
-			await this.logger.close();
-		}
-
 		this.logger.info('JSMAWS operator process shutdown complete');
+		await this.logger.close();
 	}
 }
