@@ -26,6 +26,7 @@ import {
 	MessageType,
 	createFrame,
 	createError,
+	createAppletOutput,
 	validateMessage,
 } from './ipc-protocol.esm.js';
 import { ServiceProcess } from './service-process.esm.js';
@@ -98,26 +99,43 @@ class ResponderProcess extends ServiceProcess {
 
 	/**
 	 * Spawn applet worker for request handling
+	 * Uses bootstrap module to lock down environment before applet loads
 	 */
 	spawnAppletWorker (appletPath) {
 		// Determine permissions based on applet path
-		const isUrlBased = appletPath.startsWith('https://') || appletPath.startsWith('http://');
+		const appletURL = new URL(appletPath, import.meta.url);
+		const appletHref = appletURL.href;
+		const isUrlBased = appletHref.startsWith('https://') || appletHref.startsWith('http://');
+		const bootstrapURL = new URL('./applets/bootstrap.esm.js', import.meta.url);
+
+		const readable = [bootstrapURL.pathname];
+		if (!isUrlBased) readable.push(appletURL.pathname);
 
 		const permissions = {
-			read: isUrlBased ? false : [appletPath],
+			read: readable,
 			net: true, // Always allow network for module loading
 			write: false,
 			run: false,
 			env: false,
 		};
 
-		// Create Web Worker for applet
-		const worker = new Worker(new URL(appletPath, import.meta.url).href, {
+		// Create Web Worker with bootstrap module (not applet directly)
+		const worker = new Worker(bootstrapURL.href, {
 			type: 'module',
 			deno: { permissions },
 		});
-		if (worker) console.debug(`[${this.processId}] Created worker for applet "${appletPath}"`);
-		else console.error(`[${this.processId}] Failed to create worker for applet "${appletPath}"`);
+
+		if (worker) {
+			console.debug(`[${this.processId}] Created worker with bootstrap for applet "${appletPath}"`);
+
+			// Send bootstrap message with applet path
+			worker.postMessage({
+				type: 'bootstrap',
+				appletPath: appletHref,
+			});
+		} else {
+			console.error(`[${this.processId}] Failed to create worker for applet "${appletPath}"`);
+		}
 
 		return worker;
 	}
@@ -263,6 +281,12 @@ class ResponderProcess extends ServiceProcess {
 
 		console.debug(`[${this.processId}] Received message from applet: type=${type}, id=${id}`);
 
+		// Handle console output from bootstrap
+		if (type === 'console') {
+			await this.handleAppletConsoleOutput(id, data);
+			return;
+		}
+
 		if (type !== 'frame' && type !== 'error') {
 			console.warn(`[${this.processId}] Unknown message type: ${type}`);
 			return;
@@ -285,6 +309,20 @@ class ResponderProcess extends ServiceProcess {
 			await this.sendErrorResponse(id, 500, 'Internal Server Error');
 			this.cleanupRequest(id);
 		}
+	}
+
+	/**
+	 * Handle console output from applet (via bootstrap)
+	 * Operator has applet path from routing and process ID from IPC handler binding
+	 */
+	async handleAppletConsoleOutput (id, data) {
+		const { level, content } = data;
+
+		// Forward to operator via IPC using proper message creation
+		const outputMsg = createAppletOutput(id, { level });
+		const binaryData = new TextEncoder().encode(content);
+
+		await this.ipcConn.writeMessage(outputMsg, binaryData);
 	}
 
 	/**
@@ -413,6 +451,22 @@ class ResponderProcess extends ServiceProcess {
 		const { mode, status, headers, keepAlive, data: frameData, final } = data;
 
 		console.log(`[${this.processId}] First frame: mode=${mode}, status=${status}, final=${final}, keepAlive=${keepAlive}, dataSize=${frameData?.length || 0}`);
+
+		// Determine effective response type
+		// mode=response keepAlive=true makes it streaming
+		const effectiveType = (mode === 'response' && keepAlive) ? 'stream': mode;
+
+		// Check if pool allows this response type
+		const allowedTypes = this.config.getAllowedResponseTypes(this.poolName);
+		if (!allowedTypes.has(effectiveType)) {
+			console.error(
+				`[${this.processId}] Pool "${this.poolName}" does not allow ` +
+				`response type "${effectiveType}" (mode=${mode}, keepAlive=${keepAlive})`
+			);
+			this.cleanupRequest(id);
+			await this.sendErrorResponse(id, 500, 'Internal Server Error');
+			return;
+		}
 
 		// Enforce policy: status 101 (bidi upgrade) must not have data
 		if (status === 101 && frameData && frameData.length > 0) {

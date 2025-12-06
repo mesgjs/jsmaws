@@ -6,14 +6,14 @@
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-console.log('[WebSocket] Applet loaded');
-self.onmessage = async (event) => {
+console.log('Applet loaded');
+self.onmessage = (event) => {
 	const { type, id, headers, mode, data, initialCredits, maxChunkSize } = event.data;
-	console.log('[WebSocket] Message type:', type);
-	console.log('[WebSocket] Headers:', headers);
+	console.log('Applet received message:', type);
 
 	if (type === 'request' && headers?.upgrade?.toLowerCase() === 'websocket') {
 		// Accept WebSocket upgrade
+		console.log('Accepting WebSocket upgrade');
 		self.postMessage({
 			type: 'frame',
 			id,
@@ -28,7 +28,6 @@ self.onmessage = async (event) => {
 			final: true,
 			keepAlive: true
 		});
-		console.log('[WebSocket] 101 upgrade sent');
 
 		// Responder will send protocol parameters next
 		return;
@@ -37,7 +36,7 @@ self.onmessage = async (event) => {
 	if (type === 'frame' && mode === 'bidi') {
 		// Check for protocol parameters (first frame from responder)
 		if (initialCredits !== undefined) {
-			console.log(`[WebSocket] Connection ready with ${initialCredits} credits, max chunk ${maxChunkSize}`);
+			console.log(`Bidi connection ready with ${initialCredits} credits, max chunk ${maxChunkSize}`);
 
 			// Send welcome message
 			const welcome = new TextEncoder().encode(JSON.stringify({

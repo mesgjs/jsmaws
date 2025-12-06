@@ -185,9 +185,16 @@ Deno.test('ResponderProcess - spawn applet worker', () => {
 	try {
 		const worker = process.spawnAppletWorker('/path/to/applet.esm.js');
 		assertExists(worker);
-		assertEquals(worker.path, 'file:///path/to/applet.esm.js');
+
+		// Worker should be created with bootstrap module, not applet directly
+		assert(worker.path.endsWith('/applets/bootstrap.esm.js'));
 		assert(worker.options.deno.permissions.net); // Network always allowed
 		assertEquals(worker.options.deno.permissions.write, false);
+
+		// Should have sent bootstrap message with applet path
+		assertEquals(worker.messages.length, 1);
+		assertEquals(worker.messages[0].type, 'bootstrap');
+		assert(worker.messages[0].appletPath.includes('/path/to/applet.esm.js'));
 	} finally {
 		globalThis.Worker = originalWorker;
 	}

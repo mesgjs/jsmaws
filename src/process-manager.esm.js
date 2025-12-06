@@ -212,6 +212,11 @@ export class ProcessManager {
 			this.logger.debug(`${processId} health check response: ${status}`);
 		});
 
+		// Register handler for applet console output
+		ipcConn.onMessage(MessageType.APPLET_OUTPUT, async (message, binaryData) => {
+			await this.onAppletOutput(processId, message, binaryData);
+		});
+
 		// Create separate reader for stderr (console output only)
 		const stderrReader = process.stderr.getReader();
 		const stderrConn = new IPCConnection({
@@ -266,6 +271,30 @@ export class ProcessManager {
 
 		// Return in PoolManager format
 		return { item: managedProc, isWorker: false };
+	}
+
+	/**
+	 * Handle applet console output
+	 */
+	async onAppletOutput (processId, message, binaryData) {
+		const requestId = message.id;
+		const level = message.fields.at('level', 'log');
+		const content = (binaryData && binaryData.length) ? new TextDecoder().decode(binaryData) : '';
+		const logger = this.logger;
+
+		// Look up request context to get applet path
+		const context = globalThis.OperatorProcess?.instance?.requestContexts.get(requestId);
+		if (!context) {
+			logger.warn(`Console output for unknown request ${requestId}`);
+			return;
+		}
+
+		// Log with the applet's file component if available, otherwise use the request ID
+		const appFile = context.app?.split('/').pop();
+		const prefix = `[Applet:${appFile || requestId}]`;
+
+		// Log as responder at appropriate applet level
+		logger.asComponent(processId, () => logger.log(level, `${prefix} ${content}`));
 	}
 
 	/**

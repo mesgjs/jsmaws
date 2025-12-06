@@ -26,11 +26,22 @@ export const MessageType = {
 	WEB_REQUEST: 'WREQ',
 	WEB_FRAME: 'WFRM',        // Unified frame protocol (all layers)
 	WEB_ERROR: 'WERR',        // Error responses
+	APPLET_OUTPUT: 'APLOUT',
 	CONFIG_UPDATE: 'CFG',
 	SHUTDOWN: 'HALT',
 	SCALE_DOWN: 'RIF',
 	HEALTH_CHECK: 'HCHK',
 };
+
+/**
+ * Create applet output message
+ * @param {string} id Request ID
+ * @param {Object} fields Message fields { level, content }
+ * @returns {NANOS} Applet output message
+ */
+export function createAppletOutput (id, fields) {
+	return createMessage({ type: MessageType.APPLET_OUTPUT, id }, fields);
+}
 
 /**
  * Create config update message
@@ -661,27 +672,30 @@ export class IPCConnection {
 					this.onCapacityUpdate(message.capacity);
 				}
 
-				// Check if this is part of a registered stream
-				const streamEntry = this.requestHandlers.get(message.id);
-				if (streamEntry) {
-					try {
-						await streamEntry.handler(message, binaryData);
+				// Request handlers are only for frame messages (WEB_FRAME)
+				// All other message types go to global handlers
+				if (message.type === MessageType.WEB_FRAME) {
+					const streamEntry = this.requestHandlers.get(message.id);
+					if (streamEntry) {
+						try {
+							await streamEntry.handler(message, binaryData);
 
-						// Check if stream is complete (final frame with no keepAlive)
-						const final = message.fields.at('final', false);
-						const keepAlive = message.fields.at('keepAlive', true); // streaming, so sticky true
-						this.log('debug', `request ${message.id} final ${final} keepAlive ${keepAlive}`);
-						if (final && !keepAlive) {
+							// Check if stream is complete (final frame with no keepAlive)
+							const final = message.fields.at('final', false);
+							const keepAlive = message.fields.at('keepAlive', true); // streaming, so sticky true
+							this.log('debug', `request ${message.id} final ${final} keepAlive ${keepAlive}`);
+							if (final && !keepAlive) {
+								this.clearRequestHandler(message.id);
+							}
+						} catch (error) {
+							this.log('error', `Stream handler error for ${message.id}: ${error.message}`);
 							this.clearRequestHandler(message.id);
 						}
-					} catch (error) {
-						this.log('error', `Stream handler error for ${message.id}: ${error.message}`);
-						this.clearRequestHandler(message.id);
+						continue;
 					}
-					continue;
 				}
 
-				// Otherwise, dispatch to global handler
+				// Dispatch to global handler
 				const handler = this.messageHandlers.get(message.type);
 				if (handler) {
 					await handler(message, binaryData);

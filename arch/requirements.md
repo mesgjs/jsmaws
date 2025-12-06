@@ -227,13 +227,13 @@ Add optional configuration to `jsmaws.slid` for tuning:
 
 ```slid
 [(
-  # Response chunking configuration
+  /* Response chunking configuration */
   chunking=[
-    maxDirectWrite=65536      # < 64KB: direct write (no flow-control)
-    autoChunkThresh=10485760  # >= 10MB: chunked streaming
-    chunkSize=65536           # Chunk size for streaming
-    maxWriteBuffer=1048576    # 1MB: legacy, unused with timing-based detection
-    bpWriteTimeThresh=50      # 50ms: write time indicating backpressure
+    maxDirectWrite=65536      /* < 64KB: direct write (no flow-control) */
+    autoChunkThresh=10485760  /* >= 10MB: chunked streaming */
+    chunkSize=65536           /* Chunk size for streaming */
+    maxWriteBuffer=1048576    /* 1MB: legacy, unused with timing-based detection */
+    bpWriteTimeThresh=50      /* 50ms: write time indicating backpressure */
   ]
 )]
 ```

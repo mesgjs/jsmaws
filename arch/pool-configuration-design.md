@@ -76,6 +76,14 @@ Based on research into servlet containers and application servers (see [`service
   - Processes beyond `minProcs` exit after being idle this long
   - **Note**: This is process idle timeout, not connection idle timeout
 
+- **`resType`**: Allowed response types (default: all types allowed)
+  - List of allowed response types: `response`, `stream`, `bidi`
+  - Omit to allow all types (backward compatible)
+  - `mode=response keepAlive=true` is treated as `stream` type
+  - Responder enforces restrictions and terminates violating applets
+  - Example: `resType=[response]` for fast pool (no streaming)
+  - Example: `resType=[stream bidi]` for stream pool (no regular responses)
+
 ### Timeout Parameters
 
 JSMAWS implements a three-tier timeout hierarchy for request processing and connection management. These timeouts can be configured at global, pool, and route levels.
@@ -278,6 +286,7 @@ stream=[
   reqTimeout=0
   idleTimeout=60
   conTimeout=3600
+  resType=[stream bidi]
 ]
 ```
 
@@ -288,6 +297,7 @@ stream=[
 - Long connection timeout (1 hour)
 - Spawned on demand, killed when connection closes
 - Exactly one worker per process (enforced)
+- **Restricted to streaming and bidirectional only** (no regular responses)
 
 **Note**: `maxReqs=1` means each process handles exactly one connection, then exits. This is effectively "oneshot per connection" but the process persists for the duration of that connection. `maxWorkers=1` is enforced to ensure one connection per process.
 
@@ -359,13 +369,13 @@ These are more similar - both are request-response pools. The difference is **wo
 ### Validation Errors
 
 ```slid
-# ERROR: minProcs > maxProcs
+/* ERROR: minProcs > maxProcs */
 bad=[minProcs=10 maxProcs=5 scaling=dynamic]
 
-# ERROR: static requires minProcs == maxProcs
+/* ERROR: static requires minProcs == maxProcs */
 bad=[minProcs=2 maxProcs=10 scaling=static]
 
-# ERROR: undefined pool reference
+/* ERROR: undefined pool reference */
 [(routes=[
   [path=/api/* pool=undefined applet=@*]
 ])]
@@ -383,7 +393,7 @@ pools=[
   stream=[minProcs=1 maxProcs=50 scaling=ondemand maxWorkers=1 maxReqs=1 conTimeout=3600]
 ]
 
-# Response chunking configuration (global defaults)
+/* Response chunking configuration (global defaults) */
 chunking=[
   maxDirectWrite=65536
   autoChunkThresh=10485760
@@ -424,19 +434,19 @@ chunking=[
 ### Advanced (Custom Pools)
 ```slid
 [(pools=[
-  # Static files - high capacity, minimal overhead
+  /* Static files - high capacity, minimal overhead */
   static=[minProcs=4 maxProcs=4 scaling=static minWorkers=4 maxWorkers=8 maxReqs=10000 reqTimeout=2]
   
-  # Public API - moderate capacity, strict timeout
+  /* Public API - moderate capacity, strict timeout */
   public=[minProcs=2 maxProcs=15 scaling=dynamic minWorkers=1 maxWorkers=4 maxReqs=500 reqTimeout=30]
   
-  # Admin API - low capacity, longer timeout
+  /* Admin API - low capacity, longer timeout */
   admin=[minProcs=1 maxProcs=5 scaling=dynamic minWorkers=1 maxWorkers=2 maxReqs=100 reqTimeout=120]
   
-  # Background jobs - on-demand, long timeout
+  /* Background jobs - on-demand, long timeout */
   batch=[minProcs=0 maxProcs=3 scaling=ondemand minWorkers=1 maxWorkers=1 reqTimeout=600]
   
-  # WebSocket - per-connection processes
+  /* WebSocket - per-connection processes */
   websocket=[minProcs=0 maxProcs=100 scaling=ondemand maxWorkers=1 maxReqs=1 conTimeout=7200]
 ])]
 
@@ -472,7 +482,7 @@ chunking=[
 Future enhancement: Expose pool metrics for monitoring:
 
 ```slid
-# Potential metrics endpoint
+/* Potential metrics endpoint */
 [path=/metrics pool=fast handler=metrics]
 ```
 

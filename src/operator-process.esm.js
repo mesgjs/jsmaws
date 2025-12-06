@@ -571,7 +571,8 @@ export class OperatorProcess {
 				process,
 				poolName,
 				routeSpec,
-				req
+				req,
+				appletPath,
 			);
 
 			// Store pool manager and item ID for cleanup
@@ -721,8 +722,8 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Initialize service process pools
-	 */
+		* Initialize service process pools
+		*/
 	async initializeProcessPools () {
 		let poolsConfig = this.configData.at('pools');
 		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {

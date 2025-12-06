@@ -48,6 +48,8 @@ async function main () {
 
 	// Create and start operator
 	const operator = new OperatorProcess(config, configFile);
+	globalThis.OperatorProcess = OperatorProcess;
+	OperatorProcess.instance = operator;
 	operator.configData = configData; // Store full config
 	operator.initializeLogger();
 

@@ -242,6 +242,24 @@ export class Configuration {
 	}
 
 	/**
+	 * Get allowed response types for a pool
+	 * @param {string} poolName Pool name
+	 * @returns {Set<string>} Set of allowed response types ('response', 'stream', 'bidi')
+	 */
+	getAllowedResponseTypes (poolName) {
+		const poolConfig = this.getPoolConfig(poolName);
+		const resType = poolConfig?.at('resType');
+
+		if (!resType) {
+			// Default: all types allowed (backward compatible)
+			return new Set(['response', 'stream', 'bidi']);
+		}
+
+		// Convert NANOS array to Set
+		return new Set(Array.from(resType.values()));
+	}
+
+	/**
 	 * Get MIME types configuration
 	 * @returns {NANOS} MIME types mapping
 	 */

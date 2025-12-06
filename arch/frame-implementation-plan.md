@@ -674,12 +674,12 @@ function send404(id) {
 Add new section:
 
 ```slid
-# Bidirectional flow control configuration
+/* Bidirectional flow control configuration */
 bidiFlowControl=[
-	initialCredits=10          # Initial credit multiplier (× maxChunkSize)
-	maxBufferSize=1048576      # 1MB max buffer per direction per connection
-	maxBytesPerSecond=10485760 # 10MB/s rate limit per connection
-	idleTimeout=60             # 60 seconds idle timeout
+	initialCredits=10          /* Initial credit multiplier (× maxChunkSize) */
+	maxBufferSize=1048576      /* 1MB max buffer per direction per connection */
+	maxBytesPerSecond=10485760 /* 10MB/s rate limit per connection */
+	idleTimeout=60             /* 60 seconds idle timeout */
 ]
 ```
 

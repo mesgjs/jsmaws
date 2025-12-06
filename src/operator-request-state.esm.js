@@ -25,12 +25,13 @@ export const RequestState = {
  * Stores all state as data rather than in code flow
  */
 export class RequestContext {
-	constructor (requestId, process, poolName, routeSpec, req) {
+	constructor (requestId, process, poolName, routeSpec, req, app) {
 		this.requestId = requestId;
 		this.process = process;
 		this.poolName = poolName;
 		this.routeSpec = routeSpec;
 		this.originalRequest = req;  // For WebSocket upgrade
+		this.app = app;
 
 		// State machine
 		this.state = RequestState.WAITING_FIRST_FRAME;
