@@ -48,80 +48,6 @@ class Route {
 	}
 
 	/**
-	 * Set configuration instance
-	 * @param {Configuration} config Configuration instance
-	 */
-	setConfig (config) {
-		this.config = config;
-	}
-
-	/**
-	 * Parse route specification from NANOS object
-	 */
-	parseSpec () {
-		// Parse path specification
-		const pathSpec = this.spec.at('path');
-		if (pathSpec) {
-			this.pathParts = this.parsePath(pathSpec);
-		}
-
-		// Parse regex pattern
-		const regexSpec = this.spec.at('regex');
-		if (regexSpec) {
-			try {
-				this.regexPattern = new RegExp(regexSpec);
-			} catch (error) {
-				console.error(`Invalid regex pattern: ${regexSpec}`, error);
-			}
-		}
-
-		// Parse pool name
-		const poolSpec = this.spec.at('pool');
-		if (poolSpec) {
-			this.pool = poolSpec;
-		}
-
-		// Parse HTTP methods
-		const methodSpec = this.spec.at('method');
-		if (methodSpec) {
-			this.method = this.parseMethod(methodSpec);
-		}
-
-		// Parse response code
-		const responseSpec = this.spec.at('response');
-		if (responseSpec) {
-			this.response = responseSpec;
-		}
-
-		// Parse redirect href
-		const hrefSpec = this.spec.at('href');
-		if (hrefSpec) {
-			this.href = hrefSpec;
-		}
-
-		// Parse applet path (including @static for static file serving)
-		const appSpec = this.spec.at('app');
-		if (appSpec) {
-			this.app = appSpec;
-		}
-
-		// Parse local root
-		const rootSpec = this.spec.at('root');
-		if (rootSpec) {
-			this.root = rootSpec;
-		}
-
-		// Parse response headers - work with NANOS directly
-		const headersSpec = this.spec.at('headers');
-		if (headersSpec && headersSpec instanceof NANOS) {
-			this.headers = headersSpec;
-		}
-
-		// Classify route type based on parsed data
-		this.classifyRoute();
-	}
-
-	/**
 	 * Classify route as filesystem, virtual, or neither
 	 * 
 	 * Classification rules:
@@ -153,68 +79,37 @@ class Route {
 	}
 
 	/**
-	 * Parse path specification into parts
-	 * @param {string} pathSpec Path specification like "api/:id/users"
-	 * @returns {Array} Array of path parts with metadata
+	 * Check if this route fully matches a request (including filesystem verification for FS routes)
+	 * @param {string} pathname URL pathname
+	 * @param {string} method HTTP method
+	 * @returns {Promise<Object|null>} Match result with extracted parameters, or null if no match
 	 */
-	parsePath (pathSpec) {
-		if (!pathSpec) return [];
-
-		const parts = pathSpec.split('/').filter(p => p.length > 0);
-		return parts.map(part => {
-			if (part.startsWith(':?')) {
-				return { type: 'optional-param', name: part.substring(2) };
-			} else if (part === ':*') {
-				return { type: 'tail' };
-			} else if (part.startsWith(':')) {
-				return { type: 'param', name: part.substring(1) };
-			} else if (part === '@*') {
-				return { type: 'applet-any' };
-			} else if (part.startsWith('@')) {
-				return { type: 'applet-named', name: part.substring(1) };
-			} else {
-				return { type: 'literal', value: part };
-			}
-		});
-	}
-
-	/**
-	 * Parse method specification
-	 * @param {string|NANOS} methodSpec Method specification
-	 * @returns {Array} Array of lowercase method names
-	 */
-	parseMethod (methodSpec) {
-		if (typeof methodSpec === 'string') {
-			if (methodSpec === 'any') {
-				return ['any'];
-			} else if (methodSpec === 'read') {
-				return ['get', 'head'];
-			} else if (methodSpec === 'write') {
-				return ['patch', 'post', 'put'];
-			} else if (methodSpec === 'modify') {
-				return ['delete', 'patch', 'put'];
-			}
-			return [methodSpec.toLowerCase()];
+	async match (pathname, method) {
+		const routingConfig = this.config?.routing;
+		const fsRouting = routingConfig?.fsRouting;
+		const rawRoot = this.root || routingConfig?.root;
+		const root = rawRoot.endsWith('/') ? rawRoot : (rawRoot + '/');
+		if (this.isFilesystem && (!fsRouting || !root)) {
+			// Void ex facie
+			return null;
 		}
 
-		if (methodSpec instanceof NANOS) {
-			// Iterate through NANOS values
-			const methods = [];
-			for (const m of methodSpec.values()) {
-				if (m === 'read') {
-					methods.push('get', 'head');
-				} else if (m === 'write') {
-					methods.push('patch', 'post', 'put');
-				} else if (m === 'modify') {
-					methods.push('delete', 'patch', 'put');
-				} else {
-					methods.push(m.toLowerCase());
-				}
-			}
-			return methods;
+		// First, try path matching
+		const pathMatch = this.matchPath(pathname, method);
+		if (!pathMatch) {
+			return null;
 		}
 
-		return ['get'];
+		// Attach local or global request root for both FS and virtual routes
+		pathMatch.root = root ? new URL(root, import.meta.url).pathname : null;
+
+		// For filesystem routes, also verify the file exists
+		if (this.isFilesystem) {
+			return await this.verifyFilesystem(pathMatch);
+		}
+
+		// For non-filesystem routes, path match is sufficient
+		return pathMatch;
 	}
 
 	/**
@@ -225,7 +120,7 @@ class Route {
 	 */
 	matchPath (pathname, method) {
 		// Skip filesystem routes when fsRouting is disabled
-		if (this.isFilesystem && this.config && !this.config.routing.fsRouting) {
+		if (this.isFilesystem && !this.config?.routing?.fsRouting) {
 			return null;
 		}
 
@@ -341,70 +236,174 @@ class Route {
 	}
 
 	/**
-	 * Check if this route fully matches a request (including filesystem verification for FS routes)
-	 * @param {string} pathname URL pathname
-	 * @param {string} method HTTP method
-	 * @returns {Promise<Object|null>} Match result with extracted parameters, or null if no match
+	 * Parse method specification
+	 * @param {string|NANOS} methodSpec Method specification
+	 * @returns {Array} Array of lowercase method names
 	 */
-	async match (pathname, method) {
-		const routingConfig = this.config?.routing;
-		const fsRouting = routingConfig?.fsRouting;
-		const hasRoot = this.root || routingConfig?.root;
-		if (this.isFilesystem && (!fsRouting || !hasRoot)) {
-			// Void ex facie
-			return null;
+	parseMethod (methodSpec) {
+		if (typeof methodSpec === 'string') {
+			if (methodSpec === 'any') {
+				return ['any'];
+			} else if (methodSpec === 'read') {
+				return ['get', 'head'];
+			} else if (methodSpec === 'write') {
+				return ['patch', 'post', 'put'];
+			} else if (methodSpec === 'modify') {
+				return ['delete', 'patch', 'put'];
+			}
+			return [methodSpec.toLowerCase()];
 		}
 
-		// First, try path matching
-		const pathMatch = this.matchPath(pathname, method);
-		if (!pathMatch) {
-			return null;
+		if (methodSpec instanceof NANOS) {
+			// Iterate through NANOS values
+			const methods = [];
+			for (const m of methodSpec.values()) {
+				if (m === 'read') {
+					methods.push('get', 'head');
+				} else if (m === 'write') {
+					methods.push('patch', 'post', 'put');
+				} else if (m === 'modify') {
+					methods.push('delete', 'patch', 'put');
+				} else {
+					methods.push(m.toLowerCase());
+				}
+			}
+			return methods;
 		}
 
-		// For filesystem routes, also verify the file exists
-		if (this.isFilesystem) {
-			return await this.verifyFilesystem(pathMatch);
-		}
-
-		// For non-filesystem routes, path match is sufficient
-		return pathMatch;
+		return ['get'];
 	}
 
 	/**
-		* Verify filesystem route exists (async)
+	 * Parse path specification into parts
+	 * @param {string} pathSpec Path specification like "api/:id/users"
+	 * @returns {Array} Array of path parts with metadata
+	 */
+	parsePath (pathSpec) {
+		if (!pathSpec) return [];
+
+		const parts = pathSpec.split('/').filter(p => p.length > 0);
+		return parts.map(part => {
+			if (part.startsWith(':?')) {
+				return { type: 'optional-param', name: part.substring(2) };
+			} else if (part === ':*') {
+				return { type: 'tail' };
+			} else if (part.startsWith(':')) {
+				return { type: 'param', name: part.substring(1) };
+			} else if (part === '@*') {
+				return { type: 'applet-any' };
+			} else if (part.startsWith('@')) {
+				return { type: 'applet-named', name: part.substring(1) };
+			} else {
+				return { type: 'literal', value: part };
+			}
+		});
+	}
+
+	/**
+	 * Parse route specification from NANOS object
+	 */
+	parseSpec () {
+		// Parse path specification
+		const pathSpec = this.spec.at('path');
+		if (pathSpec) {
+			this.pathParts = this.parsePath(pathSpec);
+		}
+
+		// Parse regex pattern
+		const regexSpec = this.spec.at('regex');
+		if (regexSpec) {
+			try {
+				this.regexPattern = new RegExp(regexSpec);
+			} catch (error) {
+				console.error(`Invalid regex pattern: ${regexSpec}`, error);
+			}
+		}
+
+		// Parse pool name
+		const poolSpec = this.spec.at('pool');
+		if (poolSpec) {
+			this.pool = poolSpec;
+		}
+
+		// Parse HTTP methods
+		const methodSpec = this.spec.at('method');
+		if (methodSpec) {
+			this.method = this.parseMethod(methodSpec);
+		}
+
+		// Parse response code
+		const responseSpec = this.spec.at('response');
+		if (responseSpec) {
+			this.response = responseSpec;
+		}
+
+		// Parse redirect href
+		const hrefSpec = this.spec.at('href');
+		if (hrefSpec) {
+			this.href = hrefSpec;
+		}
+
+		// Parse applet path (including @static for static file serving)
+		const appSpec = this.spec.at('app');
+		if (appSpec) {
+			this.app = appSpec;
+		}
+
+		// Parse local root
+		const rootSpec = this.spec.at('root');
+		if (rootSpec) {
+			this.root = rootSpec;
+		}
+
+		// Parse response headers - work with NANOS directly
+		const headersSpec = this.spec.at('headers');
+		if (headersSpec && headersSpec instanceof NANOS) {
+			this.headers = headersSpec;
+		}
+
+		// Classify route type based on parsed data
+		this.classifyRoute();
+	}
+
+	/**
+	 * Set configuration instance
+	 * @param {Configuration} config Configuration instance
+	 */
+	setConfig (config) {
+		this.config = config;
+	}
+
+	/**
+		* Verify filesystem applet route exists (async)
 		* This method should be called after matchPath() for filesystem routes
-		* @param {Object} matchResult Result from matchPath()
+		* @param {Object} match from matchPath()
 		* @returns {Promise<Object|null>} Match result with resolved app path, or null if not found
 		*/
-	async verifyFilesystem (matchResult) {
-		if (!this.isFilesystem || !matchResult || !matchResult.app) {
-			return matchResult;
+	async verifyFilesystem (match) {
+		if (!this.isFilesystem || !match || !match.app) {
+			return match;
 		}
 
 		if (!this.config) {
 			throw new Error('Route configuration not set');
 		}
 
-		// Use local root if specified, otherwise global root from config
-		let basePath = this.root || this.config.routing.root;
-
-		// Ensure basePath ends with / for consistent path construction
-		if (basePath && !basePath.endsWith('/')) {
-			basePath += '/';
+		const root = match.root;
+		if (!root) {
+			throw new Error('No root path for filesystem verification');
 		}
 
-		const extensions = this.config.routing.extensions;
-		const appPath = matchResult.app;
-
 		// If appPath already has a .js extension, check it directly
+		const appPath = match.app;
 		if (appPath.endsWith('.js')) {
-			const fullPath = `${basePath}${appPath}`;
+			const fullPath = `${root}${appPath}`;
 			try {
 				const stat = await Deno.stat(fullPath);
 				if (stat.isFile) {
 					// Return FULL absolute path for responder to load
-					matchResult.app = fullPath;
-					return matchResult;
+					match.app = fullPath;
+					return match;
 				}
 			} catch (error) {
 				// File doesn't exist
@@ -414,16 +413,17 @@ class Route {
 
 		// Try each extension in order
 		// Note: Even if appPath exists as a directory, we still check for appPath.esm.js, appPath.js
+		const extensions = this.config.routing.extensions;
 		for (const ext of extensions) {
-			const fullPath = `${basePath}${appPath}${ext}`;
+			const fullPath = `${root}${appPath}${ext}`;
 			try {
 				const stat = await Deno.stat(fullPath);
 				if (stat.isFile) {
 					// File exists, return FULL absolute path for responder to load
-					matchResult.app = fullPath;
-					return matchResult;
+					match.app = fullPath;
+					return match;
 				}
-			} catch (error) {
+			} catch (_error) {
 				// File doesn't exist with this extension, try next
 				continue;
 			}
@@ -442,29 +442,6 @@ class Router {
 		this.config = config; // Configuration instance
 		this.routes = [];
 		this.parseConfig();
-	}
-
-	/**
-	 * Parse configuration and create routes
-	 */
-	parseConfig () {
-		// Parse routes - routes is a NANOS containing route specifications
-		const routesSpec = this.config.routes;
-		if (routesSpec && routesSpec instanceof NANOS) {
-			// Iterate through NANOS values (each is a route specification)
-			this.routes = [];
-			for (const routeSpec of routesSpec.values()) {
-				const route = new Route(routeSpec, this.config);
-
-				// Skip filesystem routes when fsRouting is disabled
-				if (!this.config.routing.fsRouting && route.isFilesystem) {
-					console.error(`Skipping filesystem route (fsRouting disabled): ${route.spec.at('path', '(no path)')}`);
-					continue;
-				}
-
-				this.routes.push(route);
-			}
-		}
 	}
 
 	/**
@@ -491,6 +468,29 @@ class Router {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Parse configuration and create routes
+	 */
+	parseConfig () {
+		// Parse routes - routes is a NANOS containing route specifications
+		const routesSpec = this.config.routes;
+		if (routesSpec && routesSpec instanceof NANOS) {
+			// Iterate through NANOS values (each is a route specification)
+			this.routes = [];
+			for (const routeSpec of routesSpec.values()) {
+				const route = new Route(routeSpec, this.config);
+
+				// Skip filesystem routes when fsRouting is disabled
+				if (!this.config.routing.fsRouting && route.isFilesystem) {
+					console.error(`Skipping filesystem route (fsRouting disabled): ${route.spec.at('path', '(no path)')}`);
+					continue;
+				}
+
+				this.routes.push(route);
+			}
+		}
 	}
 
 	/**
@@ -525,9 +525,9 @@ if (typeof self !== 'undefined' && self.postMessage) {
 				case 'config': {
 					// Update router configuration
 					const { config: slidConfig } = data;
-					if (router && config) {
-						const configNanos = NANOS.parseSLID(slidConfig);
-						config.updateConfig(configNanos);
+					if (router && slidConfig) {
+						const nanosConfig = NANOS.parseSLID(slidConfig);
+						config.updateConfig(nanosConfig);
 						router.updateConfig();
 						self.postMessage({ type: 'config-res', id, success: true });
 					} else {
@@ -553,9 +553,9 @@ if (typeof self !== 'undefined' && self.postMessage) {
 								pool: result.route.pool,
 								method: result.route.method,
 								response: result.route.response,
-								href: result.route.href,
-								app: result.route.app,
-								root: result.route.root,
+								href: result.route.href, // target href for redirects
+								app: result.route.app, // *route* app, *if present*
+								root: result.route.root, // *route* root, *if present*
 								isFilesystem: result.route.isFilesystem,
 								isVirtual: result.route.isVirtual,
 							},

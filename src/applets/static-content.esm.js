@@ -13,23 +13,6 @@
  */
 
 /**
- * Send 403 Forbidden response
- */
-function send403 (id) {
-	self.postMessage({
-		type: 'frame',
-		id,
-		mode: 'response',
-		status: 403,
-		headers: { 'Content-Type': 'text/plain' },
-		data: new TextEncoder().encode('Access denied'),
-		final: true,
-		keepAlive: false
-	});
-	self.close();
-}
-
-/**
  * Send 404 Not Found response
  */
 function send404 (id) {
@@ -89,24 +72,36 @@ function getMimeType (filePath, mimeTypes, explicitMimeType) {
  * Handle full file request (no Range header)
  */
 async function handleFullRequest (id, resolvedPath, fileSize, contentType, chunkSize) {
-	const file = await Deno.open(resolvedPath, { read: true });
+	// Try to open file - if it fails (e.g., permission denied), return 404
+	let file;
+	try {
+		file = await Deno.open(resolvedPath, { read: true });
+	} catch (_error) {
+		send404(id);
+		return;
+	}
 
-	// For small files (< chunkSize), send complete frame in single message
-	if (fileSize < chunkSize) {
+	const message = {
+		type: 'frame',
+		id,
+		mode: 'response',
+		status: 200,
+		headers: {
+			'content-type': contentType,
+			'content-length': fileSize.toString(),
+			'accept-ranges': 'bytes'
+		},
+	};
+
+	// For small files (<= chunkSize), send complete frame in single message
+	if (fileSize <= chunkSize) {
 		const buffer = new Uint8Array(fileSize);
 		await file.read(buffer);
 		file.close();
 
+		console.debug('@static sending one-and-done');
 		self.postMessage({
-			type: 'frame',
-			id,
-			mode: 'response',
-			status: 200,
-			headers: {
-				'Content-Type': contentType,
-				'Content-Length': fileSize.toString(),
-				'Accept-Ranges': 'bytes'
-			},
+			...message,
 			data: buffer,
 			final: true,
 			keepAlive: false
@@ -116,16 +111,9 @@ async function handleFullRequest (id, resolvedPath, fileSize, contentType, chunk
 	}
 
 	// For larger files, send first frame message with headers
+	console.debug('@static sending response frame');
 	self.postMessage({
-		type: 'frame',
-		id,
-		mode: 'response',
-		status: 200,
-		headers: {
-			'Content-Type': contentType,
-			'Content-Length': fileSize.toString(),
-			'Accept-Ranges': 'bytes'
-		},
+		...message,
 		data: null,
 		keepAlive: false
 		// final omitted (defaults to false)
@@ -135,6 +123,7 @@ async function handleFullRequest (id, resolvedPath, fileSize, contentType, chunk
 	const buffer = new Uint8Array(chunkSize);
 	let final = false;
 
+	console.debug('@static chunking file content');
 	for (;;) {
 		const bytesRead = await file.read(buffer);
 		if (bytesRead === null) break;
@@ -164,7 +153,7 @@ async function handleFullRequest (id, resolvedPath, fileSize, contentType, chunk
 			type: 'frame',
 			id,
 			data: null,
-			final
+			final: true,
 		});
 	}
 
@@ -192,8 +181,16 @@ async function handleRangeRequest (id, resolvedPath, fileSize, rangeHeader, cont
 	}
 
 	const rangeSize = end - start + 1;
-	const file = await Deno.open(resolvedPath, { read: true });
-	await file.seek(start, Deno.SeekMode.Start);
+	
+	// Try to open file - if it fails (e.g., permission denied), return 404
+	let file;
+	try {
+		file = await Deno.open(resolvedPath, { read: true });
+		await file.seek(start, Deno.SeekMode.Start);
+	} catch (_error) {
+		send404(id);
+		return;
+	}
 
 	// Send first frame message with partial content headers
 	self.postMessage({
@@ -257,8 +254,10 @@ async function handleRangeRequest (id, resolvedPath, fileSize, rangeHeader, cont
 /**
  * Main message handler
  */
+console.debug('@static loaded');
 self.onmessage = async (event) => {
 	const { type, id, url, headers, routeParams, routeTail, config } = event.data;
+	console.debug(`@static ${id} type ${type} root ${config?.root} tail ${routeTail}`);
 
 	if (type !== 'request') return;
 
@@ -281,7 +280,7 @@ self.onmessage = async (event) => {
 		// Security: Prevent directory traversal
 		const resolvedPath = await Deno.realPath(filePath).catch(() => null);
 		if (!resolvedPath || !resolvedPath.startsWith(root)) {
-			send403(id);
+			send404(id);
 			return;
 		}
 

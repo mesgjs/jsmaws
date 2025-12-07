@@ -39,72 +39,20 @@ export class Configuration {
 	}
 
 	/**
-	 * Get routing configuration
-	 * @returns {Object} Routing context with root, appRoot, extensions, fsRouting
+	 * Get bidirectional flow control configuration
+	 * @returns {Object} Bidi flow control context with credit and buffer settings
 	 */
-	get routing () {
-		if (!this._routing) {
-			const rootSpec = this.config.at('root', '');
-			const appRootSpec = this.config.at('appRoot', '');
-			const extensionsSpec = this.config.at('extensions', new NANOS(['.esm.js', '.js']));
-
-			this._routing = {
-				root: rootSpec.endsWith('/') ? rootSpec : (rootSpec ? rootSpec + '/' : ''),
-				appRoot: appRootSpec.endsWith('/') ? appRootSpec : (appRootSpec ? appRootSpec + '/' : ''),
-				extensions: extensionsSpec instanceof NANOS ? Array.from(extensionsSpec.values()) : ['.esm.js', '.js'],
-				fsRouting: this.config.at('fsRouting', false)
+	get bidiFlowControl () {
+		if (!this._bidiFlowControl) {
+			const bidiConfig = this.config.at('bidiFlowControl') || { at (_n, d) { return d; } };
+			this._bidiFlowControl = {
+				initialCredits: bidiConfig.at('initialCredits', 10),
+				maxBufferSize: bidiConfig.at('maxBufferSize', 1048576),
+				maxBytesPerSecond: bidiConfig.at('maxBytesPerSecond', 10485760),
+				idleTimeout: bidiConfig.at('idleTimeout', 60)
 			};
 		}
-		return this._routing;
-	}
-
-	/**
-	 * Get pools configuration
-	 * @returns {NANOS} Pools configuration
-	 */
-	get pools () {
-		if (!this._pools) {
-			this._pools = this.config.at('pools', new NANOS());
-		}
-		return this._pools;
-	}
-
-	/**
-	 * Get specific pool configuration
-	 * @param {string} poolName Pool name (e.g., '@router', 'standard', 'fast')
-	 * @returns {NANOS|null} Pool configuration or null if not found
-	 */
-	getPoolConfig (poolName) {
-		return this.pools.at(poolName, null);
-	}
-
-	/**
-	 * Get IPC configuration
-	 * @returns {Object} IPC context with timeout, bufferSize, etc.
-	 */
-	get ipc () {
-		if (!this._ipc) {
-			this._ipc = {
-				timeout: this.config.at('ipcTimeout', 30000),
-				bufferSize: this.config.at('ipcBufferSize', 65536),
-			};
-		}
-		return this._ipc;
-	}
-
-	/**
-	 * Get logging configuration
-	 * @returns {Object} Logging context with level, destination, etc.
-	 */
-	get logging () {
-		if (!this._logging) {
-			this._logging = {
-				level: this.config.at('logLevel', 'info'),
-				destination: this.config.at('logDestination', 'console'),
-				format: this.config.at('logFormat', 'apache'),
-			};
-		}
-		return this._logging;
+		return this._bidiFlowControl;
 	}
 
 	/**
@@ -125,54 +73,41 @@ export class Configuration {
 	}
 
 	/**
-	 * Get bidirectional flow control configuration
-	 * @returns {Object} Bidi flow control context with credit and buffer settings
+	 * Create Configuration from SLID string
+	 * @param {string} slidString SLID-formatted configuration string
+	 * @returns {Configuration} New Configuration instance
 	 */
-	get bidiFlowControl () {
-		if (!this._bidiFlowControl) {
-			const bidiConfig = this.config.at('bidiFlowControl') || { at (_n, d) { return d; } };
-			this._bidiFlowControl = {
-				initialCredits: bidiConfig.at('initialCredits', 10),
-				maxBufferSize: bidiConfig.at('maxBufferSize', 1048576),
-				maxBytesPerSecond: bidiConfig.at('maxBytesPerSecond', 10485760),
-				idleTimeout: bidiConfig.at('idleTimeout', 60)
-			};
-		}
-		return this._bidiFlowControl;
+	static fromSLID (slidString) {
+		const nanos = NANOS.parseSLID(slidString);
+		return new Configuration(nanos);
 	}
 
 	/**
-	 * Get timeout configuration with hierarchy: route > pool > global
-	 * @param {string} poolName Pool name
-	 * @param {NANOS|null} routeSpec Route specification (optional)
-	 * @returns {Object} Timeout configuration with reqTimeout, idleTimeout, conTimeout
+	 * Get raw configuration value
+	 * @param {string|Array} path Path to configuration value
+	 * @param {*} defaultValue Default value if not found
+	 * @returns {*} Configuration value
 	 */
-	getTimeoutConfig (poolName, routeSpec = null) {
-		// Global defaults (lowest priority)
-		const defaults = {
-			reqTimeout: this.config.at('reqTimeout', 30),
-			idleTimeout: this.config.at('idleTimeout', 0),
-			conTimeout: this.config.at('conTimeout', 0),
-		};
+	get (path, defaultValue = undefined) {
+		return this.config.at(path, defaultValue);
+	}
 
-		// Pool overrides (medium priority)
+	/**
+	 * Get allowed response types for a pool
+	 * @param {string} poolName Pool name
+	 * @returns {Set<string>} Set of allowed response types ('response', 'stream', 'bidi')
+	 */
+	getAllowedResponseTypes (poolName) {
 		const poolConfig = this.getPoolConfig(poolName);
-		const poolTimeouts = {
-			reqTimeout: poolConfig?.at('reqTimeout', defaults.reqTimeout) ?? defaults.reqTimeout,
-			idleTimeout: poolConfig?.at('idleTimeout', defaults.idleTimeout) ?? defaults.idleTimeout,
-			conTimeout: poolConfig?.at('conTimeout', defaults.conTimeout) ?? defaults.conTimeout,
-		};
+		const resType = poolConfig?.at('resType');
 
-		// Route overrides (highest priority)
-		if (routeSpec) {
-			return {
-				reqTimeout: routeSpec.at('reqTimeout', poolTimeouts.reqTimeout),
-				idleTimeout: routeSpec.at('idleTimeout', poolTimeouts.idleTimeout),
-				conTimeout: routeSpec.at('conTimeout', poolTimeouts.conTimeout),
-			};
+		if (!resType) {
+			// Default: all types allowed (backward compatible)
+			return new Set(['response', 'stream', 'bidi']);
 		}
 
-		return poolTimeouts;
+		// Convert NANOS array to Set
+		return new Set(Array.from(resType.values()));
 	}
 
 	/**
@@ -242,61 +177,75 @@ export class Configuration {
 	}
 
 	/**
-	 * Get allowed response types for a pool
+	 * Get specific pool configuration
+	 * @param {string} poolName Pool name (e.g., '@router', 'standard', 'fast')
+	 * @returns {NANOS|null} Pool configuration or null if not found
+	 */
+	getPoolConfig (poolName) {
+		return this.pools.at(poolName, null);
+	}
+
+	/**
+	 * Get timeout configuration with hierarchy: route > pool > global
 	 * @param {string} poolName Pool name
-	 * @returns {Set<string>} Set of allowed response types ('response', 'stream', 'bidi')
+	 * @param {NANOS|null} routeSpec Route specification (optional)
+	 * @returns {Object} Timeout configuration with reqTimeout, idleTimeout, conTimeout
 	 */
-	getAllowedResponseTypes (poolName) {
+	getTimeoutConfig (poolName, routeSpec = null) {
+		// Global defaults (lowest priority)
+		const defaults = {
+			reqTimeout: this.config.at('reqTimeout', 30),
+			idleTimeout: this.config.at('idleTimeout', 0),
+			conTimeout: this.config.at('conTimeout', 0),
+		};
+
+		// Pool overrides (medium priority)
 		const poolConfig = this.getPoolConfig(poolName);
-		const resType = poolConfig?.at('resType');
+		const poolTimeouts = {
+			reqTimeout: poolConfig?.at('reqTimeout', defaults.reqTimeout) ?? defaults.reqTimeout,
+			idleTimeout: poolConfig?.at('idleTimeout', defaults.idleTimeout) ?? defaults.idleTimeout,
+			conTimeout: poolConfig?.at('conTimeout', defaults.conTimeout) ?? defaults.conTimeout,
+		};
 
-		if (!resType) {
-			// Default: all types allowed (backward compatible)
-			return new Set(['response', 'stream', 'bidi']);
+		// Route overrides (highest priority)
+		if (routeSpec) {
+			return {
+				reqTimeout: routeSpec.at('reqTimeout', poolTimeouts.reqTimeout),
+				idleTimeout: routeSpec.at('idleTimeout', poolTimeouts.idleTimeout),
+				conTimeout: routeSpec.at('conTimeout', poolTimeouts.conTimeout),
+			};
 		}
 
-		// Convert NANOS array to Set
-		return new Set(Array.from(resType.values()));
+		return poolTimeouts;
 	}
 
 	/**
-	 * Get MIME types configuration
-	 * @returns {NANOS} MIME types mapping
+	 * Get IPC configuration
+	 * @returns {Object} IPC context with timeout, bufferSize, etc.
 	 */
-	get mimeTypes () {
-		return this.config.at('mimeTypes', new NANOS());
-	}
-
-	/**
-	 * Get routes configuration
-	 * @returns {NANOS} Routes configuration
-	 */
-	get routes () {
-		return this.config.at('routes', new NANOS());
-	}
-
-	/**
-	 * Update configuration (invalidates all caches)
-	 * @param {NANOS|Object} newConfig New configuration (NANOS or plain object from postMessage)
-	 */
-	updateConfig (newConfig) {
-		// Normalize config to NANOS if it's a plain object (from postMessage)
-		if (newConfig instanceof NANOS) {
-			this.config = newConfig;
-		} else {
-			// Recursively convert plain objects to NANOS
-			this.config = new NANOS();
-			this.config.setOpts({ transform: true });
-			this.config.push(newConfig);
+	get ipc () {
+		if (!this._ipc) {
+			this._ipc = {
+				timeout: this.config.at('ipcTimeout', 30000),
+				bufferSize: this.config.at('ipcBufferSize', 65536),
+			};
 		}
+		return this._ipc;
+	}
 
-		// Invalidate all cached values
-		this._routing = null;
-		this._pools = null;
-		this._ipc = null;
-		this._logging = null;
-		this._chunking = null;
-		this._bidiFlowControl = null;
+	/**
+	 * Get logging configuration
+	 * @returns {Object} Logging context with level, destination, etc.
+	 */
+	get logging () {
+		if (!this._logging) {
+			this._logging = {
+				level: this.config.at('logLevel', 'info'),
+				destination: this.config.at('logDestination', 'console'),
+				format: this.config.at('logFormat', 'apache'),
+			};
+		}
+		return this._logging;
 	}
 
 	/**
@@ -317,13 +266,50 @@ export class Configuration {
 	}
 
 	/**
-	 * Get raw configuration value
-	 * @param {string|Array} path Path to configuration value
-	 * @param {*} defaultValue Default value if not found
-	 * @returns {*} Configuration value
+	 * Get MIME types configuration
+	 * @returns {NANOS} MIME types mapping
 	 */
-	get (path, defaultValue = undefined) {
-		return this.config.at(path, defaultValue);
+	get mimeTypes () {
+		return this.config.at('mimeTypes', new NANOS());
+	}
+
+	/**
+	 * Get pools configuration
+	 * @returns {NANOS} Pools configuration
+	 */
+	get pools () {
+		if (!this._pools) {
+			this._pools = this.config.at('pools', new NANOS());
+		}
+		return this._pools;
+	}
+
+	/**
+	 * Get routes configuration
+	 * @returns {NANOS} Routes configuration
+	 */
+	get routes () {
+		return this.config.at('routes', new NANOS());
+	}
+
+	/**
+	 * Get routing configuration
+	 * @returns {Object} Routing context with root, appRoot, extensions, fsRouting
+	 */
+	get routing () {
+		if (!this._routing) {
+			const rootSpec = this.config.at('root', '');
+			const appRootSpec = this.config.at('appRoot', '');
+			const extensionsSpec = this.config.at('extensions', new NANOS(['.esm.js', '.js']));
+
+			this._routing = {
+				root: rootSpec.endsWith('/') ? rootSpec : (rootSpec ? rootSpec + '/' : ''),
+				appRoot: appRootSpec.endsWith('/') ? appRootSpec : (appRootSpec ? appRootSpec + '/' : ''),
+				extensions: extensionsSpec instanceof NANOS ? Array.from(extensionsSpec.values()) : ['.esm.js', '.js'],
+				fsRouting: this.config.at('fsRouting', false)
+			};
+		}
+		return this._routing;
 	}
 
 	/**
@@ -353,12 +339,26 @@ export class Configuration {
 	}
 
 	/**
-	 * Create Configuration from SLID string
-	 * @param {string} slidString SLID-formatted configuration string
-	 * @returns {Configuration} New Configuration instance
+	 * Update configuration (invalidates all caches)
+	 * @param {NANOS|Object} newConfig New configuration (NANOS or plain object from postMessage)
 	 */
-	static fromSLID (slidString) {
-		const nanos = NANOS.parseSLID(slidString);
-		return new Configuration(nanos);
+	updateConfig (newConfig) {
+		// Normalize config to NANOS if it's a plain object (from postMessage)
+		if (newConfig instanceof NANOS) {
+			this.config = newConfig;
+		} else {
+			// Recursively convert plain objects to NANOS
+			this.config = new NANOS();
+			this.config.setOpts({ transform: true });
+			this.config.push(newConfig);
+		}
+
+		// Invalidate all cached values
+		this._routing = null;
+		this._pools = null;
+		this._ipc = null;
+		this._logging = null;
+		this._chunking = null;
+		this._bidiFlowControl = null;
 	}
 }

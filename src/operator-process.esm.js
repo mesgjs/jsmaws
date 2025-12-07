@@ -503,6 +503,7 @@ export class OperatorProcess {
 	async forwardToServiceProcess (req, route, match, remote) {
 		const poolName = route.spec.at('pool', 'standard');
 		const appletPath = match.app || route.app;
+		const root = match.root;
 
 		// Get pool manager
 		const poolManager = this.poolManagers.get(poolName);
@@ -547,6 +548,7 @@ export class OperatorProcess {
 				method: req.method,
 				url: req.url,
 				app: appletPath,
+				root,
 				pool: poolName,
 				headers: headersNanos,
 				bodySize,

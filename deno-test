@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+exec deno test -A -q --unstable-worker-options "$@"

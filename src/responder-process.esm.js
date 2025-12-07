@@ -103,6 +103,13 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	spawnAppletWorker (appletPath) {
 		// Determine permissions based on applet path
+		let readAny = false, keepDeno = false;
+		switch (appletPath) {
+		case '@static':
+			appletPath = './applets/static-content.esm.js';
+			readAny = keepDeno = true;
+			break;
+		}
 		const appletURL = new URL(appletPath, import.meta.url);
 		const appletHref = appletURL.href;
 		const isUrlBased = appletHref.startsWith('https://') || appletHref.startsWith('http://');
@@ -112,7 +119,7 @@ class ResponderProcess extends ServiceProcess {
 		if (!isUrlBased) readable.push(appletURL.pathname);
 
 		const permissions = {
-			read: readable,
+			read: readAny || readable,
 			net: true, // Always allow network for module loading
 			write: false,
 			run: false,
@@ -132,6 +139,7 @@ class ResponderProcess extends ServiceProcess {
 			worker.postMessage({
 				type: 'bootstrap',
 				appletPath: appletHref,
+				keepDeno,
 			});
 		} else {
 			console.error(`[${this.processId}] Failed to create worker for applet "${appletPath}"`);
@@ -235,9 +243,9 @@ class ResponderProcess extends ServiceProcess {
 			// Check for built-in applets and prepare configuration
 			let builtinConfig = null;
 			if (app === '@static') {
-				const mimeTypes = this.config.mimeTypes;
+				const mimeTypes = this.config.mimeTypes || {};
 				builtinConfig = {
-					root: root || this.config.routing.root, // Use route root or fall back to global
+					root,
 					mimeTypes: mimeTypes.toSLID(), // Serialize NANOS to SLID for worker
 				};
 			}

@@ -1,22 +1,31 @@
 [(
   /* Example JSMAWS configuration for testing applets */
   /* Run with: deno run -A src/operator.esm.js examples/jsmaws-examples.slid */
-  
+
   /* Disable SSL for local testing */
   noSSL=@t
-  
+
   /* HTTP port (no HTTPS redirect when noSSL=@t) */
   httpPort=8080
 
   logging=[level=debug]
-  
+
   /* Routes for example applets */
   routes=[
     [path=/hello method=[get post] app=../examples/applets/hello-world.esm.js pool=fast]
     [path=/sse-clock app=../examples/applets/sse-clock.esm.js pool=stream]
     [path=/ws-echo app=../examples/applets/websocket-echo.esm.js pool=stream]
+    [root=../examples/static path=/static/:* app=@static pool=fast]
   ]
   
+  fsRouting=@t
+  root=/tmp/jsmaws
+  mimeTypes=[
+    .html=text/html
+    .js=application/javascript
+    .txt=text/plain
+  ]
+
   /* Pool configurations */
   pools=[
     /* Fast pool for quick HTTP requests */
@@ -29,7 +38,7 @@
       reqTimeout=5
       maxReqs=1000
     ]
-    
+
     /* Stream pool for long-lived connections */
     stream=[
       minProcs=1
@@ -41,12 +50,12 @@
       maxReqs=1
     ]
   ]
-  
+
   /* Chunking configuration */
   maxDirectWrite=65536
   autoChunkThresh=10485760
   chunkSize=65536
-  
+
   /* Bidirectional flow control */
   bidiFlowControl=[
     initialCredits=10
@@ -54,7 +63,7 @@
     maxBytesPerSecond=10485760
     idleTimeout=60
   ]
-  
+
   /* User/group for privilege dropping (use numeric IDs) */
   /* For testing, you might use your own UID/GID */
   /* uid=1000 */

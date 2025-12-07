@@ -101,6 +101,23 @@
 	}
 
 	/**
+	 * Disable web workers
+	 */
+	function disableWorkers () {
+		const disabledWorker = Object.freeze(class Worker {
+			constructor () {
+				throw new Error('Web workers are disabled');
+			}
+		});
+		Object.defineProperty(globalThis, 'Worker', {
+			value: disabledWorker,
+			writable: false,
+			configurable: false,
+			enumerable: true,
+		});
+	}
+
+	/**
 	 * Create filtered console with approved methods
 	 * Each method captures output and sends via postMessage
 	 */
@@ -168,7 +185,8 @@
 		let appletLoaded = false;
 
 		const handleBootstrap = async function (event) {
-			const { type, appletPath } = event.data;
+			const { type, appletPath, debug = false, keepDeno = false, keepWorkers = false } = event.data;
+			if (debug) console.debug('bootstrap message handler');
 
 			// Only handle bootstrap message once
 			if (type !== 'bootstrap' || appletLoaded) {
@@ -177,11 +195,22 @@
 
 			appletLoaded = true;
 
+			if (!keepDeno) {
+				if (debug) console.debug('bootstrap customizing Deno');
+				setupDeno();
+			}
+			if (!keepWorkers) {
+				if (debug) console.debug('bootstrap disabling workers');
+				disableWorkers();
+			}
+
 			// Remove this listener (one-time only)
 			self.removeEventListener('message', handleBootstrap);
+			if (debug) console.debug('boostrap listener removed');
 
 			try {
 				// Dynamically import the applet
+				if (debug) console.debug('boostrap importing applet', appletPath);
 				await import(appletPath);
 				// Applet will register its own message listeners
 			} catch (error) {
@@ -198,8 +227,7 @@
 		self.addEventListener('message', handleBootstrap);
 	}
 
-	// Initialize bootstrap immediately
+	// Initialize bootstrap
 	setupConsole();
-	setupDeno();
 	registerBootstrapListener();
 })();
