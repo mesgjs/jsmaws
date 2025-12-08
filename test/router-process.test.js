@@ -69,14 +69,16 @@ class MockPoolManager {
 		if (this.availableItems.length === 0) {
 			return null;
 		}
-		return this.availableItems.shift();
+		const item = this.availableItems.shift();
+		this.incrementItemUsage(item);
+		return item;
 	}
 
-	markItemBusy (itemId) {
+	incrementItemUsage (itemId) {
 		this.busyItems.add(itemId);
 	}
 
-	async markItemIdle (itemId) {
+	async decrementItemUsage (itemId) {
 		this.busyItems.delete(itemId);
 	}
 

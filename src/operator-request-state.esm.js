@@ -96,7 +96,7 @@ export async function handleFirstFrame (context, message, binaryData, operator) 
 
 		// Mark pool item idle now that request is complete
 		if (context.poolManager && context.poolItemId) {
-			await context.poolManager.markItemIdle(context.poolItemId);
+			await context.poolManager.decrementItemUsage(context.poolItemId);
 		}
 
 	} else if (mode === 'response' || mode === 'stream') {
@@ -180,7 +180,7 @@ export async function handleStreamFrame (context, message, binaryData, operator)
 
 		// Mark pool item idle now that stream is closed
 		if (context.poolManager && context.poolItemId) {
-			await context.poolManager.markItemIdle(context.poolItemId);
+			await context.poolManager.decrementItemUsage(context.poolItemId);
 		}
 	}
 }
@@ -205,7 +205,7 @@ export async function handleBidiFrame (context, message, binaryData, operator) {
 
 		// Mark pool item idle now that connection is closed
 		if (context.poolManager && context.poolItemId) {
-			await context.poolManager.markItemIdle(context.poolItemId);
+			await context.poolManager.decrementItemUsage(context.poolItemId);
 		}
 	}
 }
@@ -343,7 +343,7 @@ async function completeBidiUpgrade (context, operator) {
 
 		// Mark pool item idle now that connection is closed
 		if (context.poolManager && context.poolItemId) {
-			await context.poolManager.markItemIdle(context.poolItemId);
+			await context.poolManager.decrementItemUsage(context.poolItemId);
 		}
 
 		operator.cleanupRequestContext(requestId);
@@ -357,7 +357,7 @@ async function completeBidiUpgrade (context, operator) {
 
 		// Mark pool item idle on error
 		if (context.poolManager && context.poolItemId) {
-			await context.poolManager.markItemIdle(context.poolItemId);
+			await context.poolManager.decrementItemUsage(context.poolItemId);
 		}
 
 		operator.cleanupRequestContext(requestId);

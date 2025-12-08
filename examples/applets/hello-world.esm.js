@@ -22,7 +22,7 @@ self.onmessage = (event) => {
 		// For POST requests, also check body for parameters
 		if (method === 'POST' && body && body.length > 0) {
 			try {
-				const contentType = headers['content-type'] || headers['Content-Type'] || '';
+				const contentType = headers['content-type'] || headers['content-type'] || '';
 				const bodyText = new TextDecoder().decode(body);
 
 				if (contentType.includes('application/json')) {
@@ -62,8 +62,8 @@ self.onmessage = (event) => {
 			mode: 'response',
 			status: 200,
 			headers: {
-				'Content-Type': 'application/json',
-				'Content-Length': data.length.toString()
+				'content-type': 'application/json',
+				'content-length': data.length.toString()
 			},
 			data,
 			final: true,

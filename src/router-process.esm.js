@@ -84,14 +84,8 @@ class RouterProcess extends ServiceProcess {
 			}
 
 			try {
-				// Mark worker as busy
-				this.poolManager.markItemBusy(poolItem.id);
-
 				// Find route using worker
 				const routeMatch = await poolItem.item.findRoute(path, method);
-
-				// Mark worker as idle
-				await this.poolManager.markItemIdle(poolItem.id);
 
 				// Send route response
 				if (routeMatch) {
@@ -108,10 +102,9 @@ class RouterProcess extends ServiceProcess {
 					const response = createRouteResponse(id, '', '', {}, '', 404);
 					await this.ipcConn.writeMessage(response);
 				}
-			} catch (workerError) {
-				// Mark worker as idle on error
-				await this.poolManager.markItemIdle(poolItem.id);
-				throw workerError;
+			} finally {
+				// Make sure route worker is always marked free
+				await this.poolManager.decrementItemUsage(poolItem.id);
 			}
 		} catch (error) {
 			console.error(`[${this.processId}] Route request error:`, error);
@@ -190,7 +183,6 @@ class RouterProcess extends ServiceProcess {
 		const routerPoolConfig = this.config.getPoolConfig('@router') || {
 			minProcs: 1,
 			maxProcs: 5,
-			scaling: 'dynamic',
 			maxReqs: 0,
 			idleTimeout: 300,
 			reqTimeout: 30,

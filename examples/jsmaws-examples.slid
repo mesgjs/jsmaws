@@ -34,7 +34,6 @@
       maxProcs=5
       minWorkers=2
       maxWorkers=8
-      scaling=dynamic
       reqTimeout=5
       maxReqs=1000
     ]
@@ -44,7 +43,6 @@
       minProcs=1
       maxProcs=10
       maxWorkers=1
-      scaling=ondemand
       reqTimeout=0
       conTimeout=3600
       maxReqs=1

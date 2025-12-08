@@ -12,7 +12,7 @@ Deno.test('createFrame - first frame with mode, status, headers', () => {
 	const frame = createFrame('req-123', {
 		mode: 'response',
 		status: 200,
-		headers: { 'Content-Type': 'text/html' },
+		headers: { 'content-type': 'text/html' },
 		data: new Uint8Array([1, 2, 3]),
 		final: false,
 		keepAlive: false
@@ -100,7 +100,7 @@ Deno.test('createFrame - stream mode first frame', () => {
 	const frame = createFrame('stream-789', {
 		mode: 'stream',
 		status: 200,
-		headers: { 'Content-Type': 'text/event-stream' },
+		headers: { 'content-type': 'text/event-stream' },
 		data: null,
 		final: false,
 		keepAlive: true

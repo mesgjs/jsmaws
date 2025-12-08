@@ -217,7 +217,7 @@ Deno.test('ResponderProcess - handle first frame', async () => {
 	const firstFrame = {
 		mode: 'response',
 		status: 200,
-		headers: { 'Content-Type': 'text/plain' },
+		headers: { 'content-type': 'text/plain' },
 		data: new TextEncoder().encode('Hello'),
 		final: false,
 		keepAlive: false

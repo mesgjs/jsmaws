@@ -92,6 +92,8 @@ class ResponderProcess extends ServiceProcess {
 		const poolConfig = this.config.getPoolConfig(this.poolName);
 		if (poolConfig) {
 			this.maxConcurrentRequests = poolConfig.at('maxWorkers', 10);
+		} else {
+			console.warn(`[${this.processId}] Pool config not found for '${this.poolName}', keeping default ${this.maxConcurrentRequests}`);
 		}
 
 		console.debug(`[${this.processId}] Configuration updated`);
@@ -458,7 +460,7 @@ class ResponderProcess extends ServiceProcess {
 	async handleFirstFrame (id, data, requestInfo) {
 		const { mode, status, headers, keepAlive, data: frameData, final } = data;
 
-		console.log(`[${this.processId}] First frame: mode=${mode}, status=${status}, final=${final}, keepAlive=${keepAlive}, dataSize=${frameData?.length || 0}`);
+		console.debug(`[${this.processId}] First frame: mode=${mode}, status=${status}, final=${final}, keepAlive=${keepAlive}, dataSize=${frameData?.length || 0}`);
 
 		// Determine effective response type
 		// mode=response keepAlive=true makes it streaming
@@ -832,7 +834,7 @@ class ResponderProcess extends ServiceProcess {
 		const frameMsg = createFrame(id, {
 			mode: 'response',
 			status,
-			headers: { 'Content-Type': 'application/json' },
+			headers: { 'content-type': 'application/json' },
 			data: errorBody,
 			final: true,
 			keepAlive: false

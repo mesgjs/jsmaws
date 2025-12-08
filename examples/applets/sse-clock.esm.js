@@ -19,7 +19,7 @@ self.onmessage = async (event) => {
 			mode: 'stream',
 			status: 200,
 			headers: {
-				'Content-Type': 'text/event-stream',
+				'content-type': 'text/event-stream',
 				'Cache-Control': 'no-cache',
 				'Connection': 'keep-alive',
 				'Access-Control-Allow-Origin': '*'

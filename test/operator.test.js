@@ -225,7 +225,7 @@ Deno.test("OperatorProcess - HTTPS request without router returns 404", async ()
 	const response = await operator.handleHttpsRequest(req);
 
 	assertEquals(response.status, 404);
-	assertEquals(response.headers.get('Content-Type'), 'application/json');
+	assertEquals(response.headers.get('content-type'), 'application/json');
 
 	const body = await response.json();
 	assertEquals(body.error, '404 Not Found');

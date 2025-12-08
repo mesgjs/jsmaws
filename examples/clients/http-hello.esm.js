@@ -31,14 +31,14 @@ async function testHTTP() {
 			url: `${baseUrl}/hello`,
 			method: 'POST',
 			body: JSON.stringify({ name: 'Jason', greeting: 'Howdy' }),
-			headers: { 'Content-Type': 'application/json' }
+			headers: { 'content-type': 'application/json' }
 		},
 		{
 			name: 'POST request with form-encoded body',
 			url: `${baseUrl}/hello`,
 			method: 'POST',
 			body: 'name=Norm&greeting=Hey',
-			headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+			headers: { 'content-type': 'application/x-www-form-urlencoded' }
 		}
 	];
 

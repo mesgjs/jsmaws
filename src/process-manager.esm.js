@@ -180,6 +180,7 @@ export class ProcessManager {
 			close: async () => {
 				try {
 					await stdoutReader.cancel();
+					stdinWriter.releaseLock();
 					await process.stdin.close();
 				} catch (e) {
 					// Ignore close errors
@@ -322,18 +323,21 @@ export class ProcessManager {
 
 			// Wait for process to exit (with timeout)
 			const exitPromise = managedProc.process.status;
-			const timeoutPromise = new Promise((resolve) =>
-				setTimeout(() => resolve({ code: -1, signal: 'TIMEOUT' }), timeout * 1000)
-			);
-
-			const status = await Promise.race([exitPromise, timeoutPromise]);
-
-			if (status.signal === 'TIMEOUT') {
-				this.logger.warn(`Process ${processId} did not exit within ${timeout}s, forcing termination`);
+			const timeoutPromise = Promise.withResolvers();
+			const timer = setTimeout(() => {
+				this.logger.warn(`Process ${processId} did not exit within ${timeout}s; forcing termination`);
 				managedProc.process.kill('SIGKILL');
-			} else {
+				timeoutPromise.resolve();
+			}, timeout * 1000);
+
+			exitPromise.then((status) => {
+				clearTimeout(timer);
 				this.logger.debug(`Process ${processId} exited with code ${status.code}`);
-			}
+				timeoutPromise.resolve();
+			});
+
+			await timeoutPromise.promise;
+			managedProc.ipcConn.close();
 		} catch (error) {
 			this.logger.error(`Error shutting down process ${processId}: ${error.message}`);
 		} finally {
@@ -375,6 +379,7 @@ export class ProcessManager {
 		// Monitor process exit
 		(async () => {
 			const status = await managedProc.process.status;
+			managedProc.ipcConn?.close();
 
 			if (status.code) this.logger.warn(`Process ${managedProc.id} exited with code ${status.code}`);
 

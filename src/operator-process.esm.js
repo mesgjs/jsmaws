@@ -44,8 +44,6 @@ function getDefaultPoolsConfig () {
 		standard=[
 			minProcs=1
 			maxProcs=20
-			scaling=dynamic
-			minWorkers=1
 			maxWorkers=4
 			maxReqs=100
 			reqTimeout=60
@@ -59,14 +57,14 @@ function getDefaultPoolsConfig () {
  */
 export class ServerConfig {
 	constructor (options = {}) {
-		this.httpPort = options.httpPort || DEFAULT_HTTP_PORT;
-		this.httpsPort = options.httpsPort || DEFAULT_HTTPS_PORT;
+		this.httpPort = options.httpPort ?? DEFAULT_HTTP_PORT;
+		this.httpsPort = options.httpsPort ?? DEFAULT_HTTPS_PORT;
 		this.certFile = options.certFile;
 		this.keyFile = options.keyFile;
-		this.hostname = options.hostname || 'localhost';
+		this.hostname = options.hostname ?? 'localhost';
 		this.acmeChallengeDir = options.acmeChallengeDir;
-		this.noSSL = options.noSSL || false;
-		this.sslCheckIntervalHours = options.sslCheckIntervalHours || 1;
+		this.noSSL = options.noSSL ?? false;
+		this.sslCheckIntervalHours = options.sslCheckIntervalHours ?? 1;
 	}
 
 	/**
@@ -105,6 +103,380 @@ export class OperatorProcess {
 	}
 
 	/**
+	 * Cleanup completed request context
+	 */
+	cleanupRequestContext (requestId) {
+		cleanupRequestContext(requestId, this.requestContexts, this.logger);
+	}
+
+	/**
+	 * Convert NANOS-format headers to Headers
+	 */
+	convertHeaders (hdrIn) {
+		const hdrOut = new Headers();
+		if (hdrIn instanceof NANOS) {
+			for (const [name, content] of hdrIn.entries()) {
+				if (typeof content?.values === 'function') {
+					// Multi-valued, e.g. Set-Cookie
+					for (const content1 of content.values()) hdrOut.append(name, content1);
+				} else hdrOut.set(name, content);
+			}
+		}
+		return hdrOut;
+	}
+
+	/**
+	 * Forward request to service process via IPC using state machine
+	 */
+	async forwardToServiceProcess (req, route, match, remote) {
+		const poolName = route.spec.at('pool', 'standard');
+		const appletPath = match.app || route.app;
+		const root = match.root;
+
+		// Get pool manager
+		const poolManager = this.poolManagers.get(poolName);
+		if (!poolManager) {
+			this.logger.error(`Pool not found: ${poolName}`);
+			return new Response(
+				JSON.stringify({ error: '503 Service Unavailable', message: 'Pool not configured' }),
+				{ status: 503, headers: { 'content-type': 'application/json' } }
+			);
+		}
+
+		// Get available (reserved) process from pool
+		const poolItem = await poolManager.serialize(async () => await this.getProcessWithAffinity(poolManager, appletPath).catch(() => null));
+
+		if (!poolItem) {
+			this.logger.warn(`No available process in pool ${poolName}`);
+			return new Response(
+				JSON.stringify({ error: '503 Service Unavailable', message: 'No available workers' }),
+				{ status: 503, headers: { 'content-type': 'application/json' } }
+			);
+		}
+
+		const process = poolItem.item;
+		const routeSpec = route.spec || null;
+
+		try {
+			if (appletPath) {
+				this.updateAffinity(poolItem, appletPath);
+			}
+
+			// Read request body
+			const bodyBytes = req.body ? await req.arrayBuffer() : new ArrayBuffer(0);
+			const bodySize = bodyBytes.byteLength;
+
+			// Convert headers to NANOS format
+			const nanosHeaders = new NANOS().fromEntries(req.headers.entries());
+
+			// Create IPC request message
+			const requestMsg = createRequest({
+				method: req.method,
+				url: req.url,
+				app: appletPath,
+				root,
+				pool: poolName,
+				headers: nanosHeaders,
+				bodySize,
+				remote,
+				routeParams: match.params || {},
+				routeTail: match.tail || '',
+				routeSpec: route.spec || null,
+			});
+
+			const requestId = requestMsg.at('id');
+
+			const url = new URL(req.url);
+			this.logger.debug(`Sending ${requestId} to ${process.id} (usage ${poolItem.usageCount}) for ${req.method} ${url.pathname}`);
+
+			// Get timeout configuration
+			const timeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
+			const reqTimeout = timeouts.reqTimeout * 1000;
+
+			// Create context with initial state
+			const context = new RequestContext(
+				requestId,
+				process,
+				poolName,
+				routeSpec,
+				req,
+				appletPath,
+			);
+
+			// Store pool manager and item ID for cleanup
+			context.poolManager = poolManager;
+			context.poolItemId = poolItem.id;
+
+			// Store context
+			this.requestContexts.set(requestId, context);
+
+			// Register request-specific handler (cleared upon request completion)
+			process.ipcConn.setRequestHandler(
+				requestId,
+				createRequestHandler(context, this),
+				reqTimeout
+			);
+
+			// Send request
+			await process.ipcConn.writeMessage(requestMsg, new Uint8Array(bodyBytes));
+
+			// Return Response promise that will be resolved by state machine
+			const response = await context.responsePromise.promise;
+
+			// Note: decrementItemUsage() is called by the state machine when connections actually close:
+			// - Single-frame responses: in handleFirstFrame() after response is sent
+			// - Streaming responses: in handleStreamFrame() when final frame arrives
+			// - Bidi connections: in socket.onclose handler when WebSocket closes
+			// This ensures processes are only marked idle after connections fully complete,
+			// preventing premature recycling of processes with active streaming/bidi connections.
+
+			return response;
+
+		} catch (error) {
+			this.logger.error(`IPC communication error with ${process.id}: ${error.message}`);
+			// Mark idle on error
+			await poolItem.decrementUsage();
+			return new Response(
+				JSON.stringify({ error: '502 Bad Gateway', message: 'Service process error' }),
+				{
+					status: 502,
+					headers: { 'content-type': 'application/json' },
+				}
+			);
+		}
+	}
+
+	/**
+	 * Get process with affinity preference
+	 */
+	async getProcessWithAffinity (poolManager, appletPath) {
+		const affinitySet = appletPath && this.affinityMap.get(appletPath);
+		const item = await poolManager.getAvailableItem(affinitySet);
+		if (item) this.logger.debug(`available: ${item.id} (usage ${item.usageCount})`);
+		else this.logger.debug('nothing available');
+		return item;
+	}
+
+	/**
+	 * Handle ACME challenge requests for Let's Encrypt
+	 */
+	async handleAcmeChallenge (pathname) {
+		try {
+			const token = pathname.substring(ACME_CHALLENGE_PREFIX.length);
+			const challengePath = `${this.config.acmeChallengeDir}/${token}`;
+
+			const content = await Deno.readTextFile(challengePath);
+			return new Response(content, {
+				status: 200,
+				headers: {
+					'content-type': 'text/plain',
+				},
+			});
+		} catch (error) {
+			this.logger.error(`ACME challenge failed: ${error.message}`);
+			return new Response('Not Found', { status: 404 });
+		}
+	}
+
+	/**
+	 * Handle client message in bidirectional connection
+	 */
+	async handleClientBidiMessage (requestId, data, connState) {
+		// Convert WebSocket message to Uint8Array
+		let frameData;
+		if (typeof data === 'string') {
+			frameData = new TextEncoder().encode(data);
+		} else if (data instanceof ArrayBuffer) {
+			frameData = new Uint8Array(data);
+		} else if (data instanceof Uint8Array) {
+			frameData = data;
+		} else {
+			this.logger.warn(`Unexpected WebSocket data type: ${typeof data}`);
+			return;
+		}
+
+		const chunkSize = frameData.length;
+
+		// Check credits (flow control)
+		if (connState.inboundCredits < chunkSize) {
+			this.logger.warn(`Client ${requestId} exceeded inbound credits`);
+			connState.socket.close(1008, 'Flow control violation');
+			this.bidiConnections.delete(requestId);
+			return;
+		}
+
+		// Consume credits
+		connState.inboundCredits -= chunkSize;
+
+		// Forward to responder process via IPC
+		const frameMsg = createFrame(requestId, {
+			data: frameData,
+			final: false
+		});
+		await connState.process.ipcConn.writeMessage(frameMsg, frameData);
+
+		// Implicit credit grant
+		connState.inboundCredits = Math.min(
+			connState.inboundCredits + chunkSize,
+			connState.maxCredits
+		);
+
+		// Update activity timestamp
+		connState.lastActivity = Date.now();
+	}
+
+	/**
+	 * Handle configuration update from config monitor
+	 */
+	async handleConfigUpdate (newConfig) {
+		this.logger.info('Configuration updated; reloading...');
+		this.configData = newConfig;
+
+		// Apply default pool config if pools section is missing
+		let poolsConfig = this.configData.at('pools');
+		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
+			this.logger.warn('No pools configured in reload, using defaults');
+			poolsConfig = getDefaultPoolsConfig();
+			this.configData.set('pools', poolsConfig);
+		}
+
+		// Update server config
+		this.config = ServerConfig.fromNANOS(newConfig);
+
+		// Update router configuration
+		if (this.configuration && this.router) {
+			this.configuration.updateConfig(newConfig);
+			this.router.updateConfig();
+			this.logger.debug(`Router updated with ${this.router.routes.length} route(s)`);
+		}
+
+		// Update process pools
+		await this.updateProcessPools();
+
+		// Send config update to all remaining service processes
+		if (this.processManager) {
+			for (const [processId, proc] of this.processManager.processes) {
+				try {
+					await this.processManager.sendConfigUpdate(proc);
+					this.logger.debug(`Config update sent to ${processId}`);
+				} catch (error) {
+					this.logger.error(`Failed to send config update to ${processId}: ${error.message}`);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Handle HTTP requests (redirects, ACME challenges, or direct handling in noSSL mode)
+	 */
+	async handleHttpRequest (req) {
+		const url = new URL(req.url);
+
+		// Check if this is an ACME challenge request
+		if (url.pathname.startsWith(ACME_CHALLENGE_PREFIX) && this.config.acmeChallengeDir) {
+			return await this.handleAcmeChallenge(url.pathname);
+		}
+
+		// In noSSL mode, handle requests directly instead of redirecting
+		if (this.config.noSSL) {
+			return this.handleHttpsRequest(req);
+		}
+
+		// Redirect all other HTTP requests to HTTPS
+		const httpsUrl = `https://${url.hostname}${url.pathname}${url.search}`;
+		return new Response(null, {
+			status: 301,
+			headers: {
+				'Location': httpsUrl,
+			},
+		});
+	}
+
+	/**
+	 * Handle HTTPS requests
+	 */
+	async handleHttpsRequest (req) {
+		const startTime = Date.now();
+		const url = new URL(req.url);
+		const remote = req.headers.get('x-forwarded-for') || '127.0.0.1';
+
+		try {
+			if (this.router) {
+				const routeMatch = await this.router.findRoute(url.pathname, req.method);
+
+				if (routeMatch) {
+					const { route, match } = routeMatch;
+
+					// Handle response codes (redirects, 404, etc.)
+					if (route.response) {
+						const status = typeof route.response === 'string'
+							? parseInt(route.response.split(' ')[0])
+							: route.response;
+
+						if (route.href) {
+							const duration = (Date.now() - startTime) / 1000;
+							this.logger.logRequest(req.method, url.pathname, status, 0, duration, remote);
+
+							return new Response(null, {
+								status,
+								headers: { 'Location': route.href },
+							});
+						}
+
+						const body = JSON.stringify({
+							error: `${status} ${route.response}`,
+							path: url.pathname,
+						});
+						const duration = (Date.now() - startTime) / 1000;
+						this.logger.logRequest(req.method, url.pathname, status, body.length, duration, remote);
+
+						return new Response(body, {
+							status,
+							headers: { 'content-type': 'application/json' },
+						});
+					}
+
+					// Route matched - forward to service process
+					const response = await this.forwardToServiceProcess(req, route, match, remote);
+
+					const duration = (Date.now() - startTime) / 1000;
+					const bytes = parseInt(response.headers.get('content-length') || '0');
+					this.logger.logRequest(req.method, url.pathname, response.status, bytes, duration, remote);
+
+					return response;
+				}
+			}
+
+			// No route matched - return 404
+			const body = JSON.stringify({
+				error: '404 Not Found',
+				path: url.pathname,
+			});
+			const duration = (Date.now() - startTime) / 1000;
+			this.logger.logRequest(req.method, url.pathname, 404, body.length, duration, remote);
+
+			return new Response(body, {
+				status: 404,
+				headers: { 'content-type': 'application/json' },
+			});
+		} catch (error) {
+			this.logger.error(`Request handling error: ${error.message}`);
+
+			const body = JSON.stringify({
+				error: '500 Internal Server Error',
+				message: error.message,
+			});
+			const duration = (Date.now() - startTime) / 1000;
+			this.logger.logRequest(req.method, url.pathname, 500, body.length, duration, remote);
+
+			return new Response(body, {
+				status: 500,
+				headers: { 'content-type': 'application/json' },
+			});
+		}
+	}
+
+	/**
 	 * Initialize logger
 	 */
 	initializeLogger () {
@@ -122,6 +494,199 @@ export class OperatorProcess {
 	 */
 	initializeProcessManager () {
 		this.processManager = new ProcessManager(this.configData, this.logger);
+	}
+
+	/**
+	 * Initialize service process pools
+	 */
+	async initializeProcessPools () {
+		let poolsConfig = this.configData.at('pools');
+		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
+			this.logger.warn('No pools configured, using defaults');
+			poolsConfig = getDefaultPoolsConfig();
+			this.configData.set('pools', poolsConfig);
+		}
+
+		// Create PoolManager for each pool
+		for (const [poolName, poolConfig] of poolsConfig.entries()) {
+			if (poolName === '@router') {
+				const fsRouting = this.configData.at('fsRouting', false);
+				if (fsRouting) {
+					this.logger.info(`Initializing router pool '${poolName}' (filesystem routing)`);
+				}
+			} else {
+				this.logger.info(`Initializing pool '${poolName}' with PoolManager`);
+
+				const configObj = poolConfig instanceof NANOS ? poolConfig.toObject() : poolConfig;
+
+				const itemFactory = async (itemId) => {
+					return await this.processManager.createProcess(
+						itemId,
+						ProcessType.RESPONDER,
+						poolName,
+						poolConfig
+					);
+				};
+
+				const poolManager = new PoolManager(poolName, configObj, itemFactory, this.logger);
+				await poolManager.initialize();
+
+				this.poolManagers.set(poolName, poolManager);
+			}
+		}
+	}
+
+	/**
+	 * Initialize router with current configuration
+	 */
+	initializeRouter () {
+		this.configuration = new Configuration(this.configData);
+		this.router = new Router(this.configuration);
+		this.logger.debug(`Router initialized with ${this.router.routes.length} route(s)`);
+	}
+
+	/**
+	 * Reload HTTPS server with updated certificates
+	 */
+	async reloadHttpsServer () {
+		if (this.isReloading) {
+			this.logger.warn('Server reload already in progress');
+			return;
+		}
+
+		this.isReloading = true;
+		this.logger.info('Reloading HTTPS server with updated certificates...');
+
+		try {
+			if (this.httpsServer) {
+				await this.httpsServer.shutdown();
+				this.logger.info('Previous HTTPS server stopped');
+			}
+
+			await this.startHttpsServer();
+			this.logger.info('HTTPS server reloaded successfully');
+		} catch (error) {
+			this.logger.error(`Failed to reload HTTPS server: ${error.message}`);
+			throw error;
+		} finally {
+			this.isReloading = false;
+		}
+	}
+
+	/**
+	 * Gracefully shutdown the operator process
+	 */
+	async shutdown (stopTime = null) {
+		if (this.isShuttingDown) {
+			return;
+		}
+		this.isShuttingDown = true;
+
+		stopTime ??= this.configData.at('shutdownDelay', 30);
+		this.logger.info(`Shutting down JSMAWS operator process (${stopTime}s)...`);
+
+		if (this.healthCheckInterval) {
+			clearInterval(this.healthCheckInterval);
+			this.healthCheckInterval = null;
+		}
+
+		if (this.configMonitor) {
+			this.configMonitor.stopMonitoring();
+		}
+
+		if (this.sslManager) {
+			this.sslManager.stopMonitoring();
+		}
+
+		const tasks = []; // Async shutdown-tasks
+
+		if (this.httpServer) {
+			tasks.push(this.httpServer.shutdown().then(() => this.logger.info('HTTP server stopped')));
+		}
+
+		if (this.httpsServer) {
+			tasks.push(this.httpsServer.shutdown().then(() => this.logger.info('HTTPS server stopped')));
+		}
+
+		if (this.poolManagers) {
+			for (const [poolName, poolManager] of this.poolManagers) {
+				this.logger.info(`Shutting down pool: ${poolName}`);
+				tasks.push(poolManager.shutdown(stopTime));
+			}
+		}
+
+		if (this.processManager) {
+			tasks.push(this.processManager.shutdown(stopTime));
+		}
+
+		if (tasks.length) {
+			const wrapupPromise = Promise.withResolvers();
+			Promise.all(tasks).then(() => wrapupPromise.resolve(true));
+			const timer = setTimeout(wrapupPromise.resolve, (stopTime + 5) * 1000);
+			await wrapupPromise.promise;
+			clearTimeout(timer);
+		}
+
+		this.logger.info('JSMAWS operator process shutdown complete');
+		await this.logger.close();
+	}
+
+	/**
+	 * Start the operator process
+	 */
+	async start () {
+		this.logger.info('Starting JSMAWS operator process...');
+
+		this.validatePrivilegeConfiguration();
+		this.initializeRouter();
+		this.initializeProcessManager();
+		await this.initializeProcessPools();
+		await this.startHttpServer();
+
+		if (!this.config.noSSL) {
+			if (this.config.certFile && this.config.keyFile) {
+				await this.startHttpsServer();
+			} else {
+				throw new Error('SSL certificates required (certFile and keyFile must be configured, or use noSSL=@t)');
+			}
+		}
+
+		if (!this.config.noSSL && this.config.certFile && this.config.keyFile) {
+			this.sslManager = createSSLManager(
+				this.config,
+				() => this.reloadHttpsServer()
+			);
+			await this.sslManager.startMonitoring();
+		}
+
+		if (this.configPath) {
+			this.configMonitor = createConfigMonitor(
+				this.configPath,
+				(newConfig) => this.handleConfigUpdate(newConfig)
+			);
+			await this.configMonitor.startMonitoring();
+		}
+
+		this.startHealthCheckMonitoring();
+
+		this.logger.info('JSMAWS operator process started successfully');
+	}
+
+	/**
+	 * Start health check monitoring
+	 */
+	startHealthCheckMonitoring () {
+		const intervalSeconds = this.configData.at('healthCheckInterval', 60);
+
+		this.healthCheckInterval = setInterval(async () => {
+			try {
+				await this.processManager.healthCheck();
+			} catch (error) {
+				this.logger.error(`Health check error: ${error.message}`);
+			}
+		}, intervalSeconds * 1000);
+
+		this.logger.info(`Health check monitoring started (interval: ${intervalSeconds}s)`);
 	}
 
 	/**
@@ -178,99 +743,18 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Handle HTTP requests (redirects, ACME challenges, or direct handling in noSSL mode)
+	 * Update affinity tracking
 	 */
-	async handleHttpRequest (req) {
-		const url = new URL(req.url);
+	updateAffinity (item, appletPath) {
+		if (!appletPath) return;
 
-		// Check if this is an ACME challenge request
-		if (url.pathname.startsWith(ACME_CHALLENGE_PREFIX) && this.config.acmeChallengeDir) {
-			return await this.handleAcmeChallenge(url.pathname);
+		if (!this.affinityMap.has(appletPath)) {
+			this.affinityMap.set(appletPath, new Set());
 		}
-
-		// In noSSL mode, handle requests directly instead of redirecting
-		if (this.config.noSSL) {
-			return this.handleHttpsRequest(req);
-		}
-
-		// Redirect all other HTTP requests to HTTPS
-		const httpsUrl = `https://${url.hostname}${url.pathname}${url.search}`;
-		return new Response(null, {
-			status: 301,
-			headers: {
-				'Location': httpsUrl,
-			},
-		});
-	}
-
-	/**
-	 * Handle ACME challenge requests for Let's Encrypt
-	 */
-	async handleAcmeChallenge (pathname) {
-		try {
-			const token = pathname.substring(ACME_CHALLENGE_PREFIX.length);
-			const challengePath = `${this.config.acmeChallengeDir}/${token}`;
-
-			const content = await Deno.readTextFile(challengePath);
-			return new Response(content, {
-				status: 200,
-				headers: {
-					'Content-Type': 'text/plain',
-				},
-			});
-		} catch (error) {
-			this.logger.error(`ACME challenge failed: ${error.message}`);
-			return new Response('Not Found', { status: 404 });
-		}
-	}
-
-	/**
-	 * Initialize router with current configuration
-	 */
-	initializeRouter () {
-		this.configuration = new Configuration(this.configData);
-		this.router = new Router(this.configuration);
-		this.logger.debug(`Router initialized with ${this.router.routes.length} route(s)`);
-	}
-
-	/**
-	 * Handle configuration update from config monitor
-	 */
-	async handleConfigUpdate (newConfig) {
-		this.logger.info('Configuration updated; reloading...');
-		this.configData = newConfig;
-
-		// Apply default pool config if pools section is missing
-		let poolsConfig = this.configData.at('pools');
-		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
-			this.logger.warn('No pools configured in reload, using defaults');
-			poolsConfig = getDefaultPoolsConfig();
-			this.configData.set('pools', poolsConfig);
-		}
-
-		// Update server config
-		this.config = ServerConfig.fromNANOS(newConfig);
-
-		// Update router configuration
-		if (this.configuration && this.router) {
-			this.configuration.updateConfig(newConfig);
-			this.router.updateConfig();
-			this.logger.debug(`Router updated with ${this.router.routes.length} route(s)`);
-		}
-
-		// Update process pools
-		await this.updateProcessPools();
-
-		// Send config update to all remaining service processes
-		if (this.processManager) {
-			for (const [processId, proc] of this.processManager.processes) {
-				try {
-					await this.processManager.sendConfigUpdate(proc);
-					this.logger.debug(`Config update sent to ${processId}`);
-				} catch (error) {
-					this.logger.error(`Failed to send config update to ${processId}: ${error.message}`);
-				}
-			}
+		const appletMap = this.affinityMap.get(appletPath);
+		if (!appletMap.has(item.id)) {
+			appletMap.add(item.id);
+			item.onShutdown(() => appletMap.delete(item.id));
 		}
 	}
 
@@ -374,18 +858,6 @@ export class OperatorProcess {
 						await poolManager.shutdown(stopTime);
 						this.poolManagers.delete(poolName);
 						++completedShutdowns;
-
-						// Clean up affinity map entries
-						for (const [appletPath, itemIds] of this.affinityMap.entries()) {
-							for (const itemId of itemIds) {
-								if (itemId.startsWith(`${poolName}-`)) {
-									itemIds.delete(itemId);
-								}
-							}
-							if (itemIds.size === 0) {
-								this.affinityMap.delete(appletPath);
-							}
-						}
 					} catch (error) {
 						this.logger.error(`Error shutting down pool '${poolName}': ${error.message}`);
 					}
@@ -414,373 +886,6 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Handle HTTPS requests
-	 */
-	async handleHttpsRequest (req) {
-		const startTime = Date.now();
-		const url = new URL(req.url);
-		const remote = req.headers.get('x-forwarded-for') || '127.0.0.1';
-
-		try {
-			if (this.router) {
-				const routeMatch = await this.router.findRoute(url.pathname, req.method);
-
-				if (routeMatch) {
-					const { route, match } = routeMatch;
-
-					// Handle response codes (redirects, 404, etc.)
-					if (route.response) {
-						const status = typeof route.response === 'string'
-							? parseInt(route.response.split(' ')[0])
-							: route.response;
-
-						if (route.href) {
-							const duration = (Date.now() - startTime) / 1000;
-							this.logger.logRequest(req.method, url.pathname, status, 0, duration, remote);
-
-							return new Response(null, {
-								status,
-								headers: { 'Location': route.href },
-							});
-						}
-
-						const body = JSON.stringify({
-							error: `${status} ${route.response}`,
-							path: url.pathname,
-						});
-						const duration = (Date.now() - startTime) / 1000;
-						this.logger.logRequest(req.method, url.pathname, status, body.length, duration, remote);
-
-						return new Response(body, {
-							status,
-							headers: { 'Content-Type': 'application/json' },
-						});
-					}
-
-					// Route matched - forward to service process
-					const response = await this.forwardToServiceProcess(req, route, match, remote);
-
-					const duration = (Date.now() - startTime) / 1000;
-					const bytes = parseInt(response.headers.get('content-length') || '0');
-					this.logger.logRequest(req.method, url.pathname, response.status, bytes, duration, remote);
-
-					return response;
-				}
-			}
-
-			// No route matched - return 404
-			const body = JSON.stringify({
-				error: '404 Not Found',
-				path: url.pathname,
-			});
-			const duration = (Date.now() - startTime) / 1000;
-			this.logger.logRequest(req.method, url.pathname, 404, body.length, duration, remote);
-
-			return new Response(body, {
-				status: 404,
-				headers: { 'Content-Type': 'application/json' },
-			});
-		} catch (error) {
-			this.logger.error(`Request handling error: ${error.message}`);
-
-			const body = JSON.stringify({
-				error: '500 Internal Server Error',
-				message: error.message,
-			});
-			const duration = (Date.now() - startTime) / 1000;
-			this.logger.logRequest(req.method, url.pathname, 500, body.length, duration, remote);
-
-			return new Response(body, {
-				status: 500,
-				headers: { 'Content-Type': 'application/json' },
-			});
-		}
-	}
-
-	/**
-	 * Forward request to service process via IPC using state machine
-	 */
-	async forwardToServiceProcess (req, route, match, remote) {
-		const poolName = route.spec.at('pool', 'standard');
-		const appletPath = match.app || route.app;
-		const root = match.root;
-
-		// Get pool manager
-		const poolManager = this.poolManagers.get(poolName);
-		if (!poolManager) {
-			this.logger.error(`Pool not found: ${poolName}`);
-			return new Response(
-				JSON.stringify({ error: '503 Service Unavailable', message: 'Pool not configured' }),
-				{ status: 503, headers: { 'Content-Type': 'application/json' } }
-			);
-		}
-
-		// Get available process from pool
-		const poolItem = await this.getProcessWithAffinity(poolManager, appletPath);
-
-		if (!poolItem) {
-			this.logger.warn(`No available process in pool ${poolName}`);
-			return new Response(
-				JSON.stringify({ error: '503 Service Unavailable', message: 'No available workers' }),
-				{ status: 503, headers: { 'Content-Type': 'application/json' } }
-			);
-		}
-
-		const process = poolItem.item;
-		poolManager.markItemBusy(poolItem.id);
-
-		const routeSpec = route.spec || null;
-
-		try {
-			if (appletPath) {
-				this.updateAffinity(poolItem.id, appletPath);
-			}
-
-			// Read request body
-			const bodyBytes = req.body ? await req.arrayBuffer() : new ArrayBuffer(0);
-			const bodySize = bodyBytes.byteLength;
-
-			// Convert headers to NANOS format
-			const headersNanos = new NANOS().fromEntries(req.headers.entries());
-
-			// Create IPC request message
-			const requestMsg = createRequest({
-				method: req.method,
-				url: req.url,
-				app: appletPath,
-				root,
-				pool: poolName,
-				headers: headersNanos,
-				bodySize,
-				remote,
-				routeParams: match.params || {},
-				routeTail: match.tail || '',
-				routeSpec: route.spec || null,
-			});
-
-			const requestId = requestMsg.at('id');
-
-			const url = new URL(req.url);
-			this.logger.debug(`Sending WEB_REQUEST to ${process.id} for ${req.method} ${url.pathname}`);
-
-			// Get timeout configuration
-			const timeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
-			const reqTimeout = timeouts.reqTimeout * 1000;
-
-			// Create context with initial state
-			const context = new RequestContext(
-				requestId,
-				process,
-				poolName,
-				routeSpec,
-				req,
-				appletPath,
-			);
-
-			// Store pool manager and item ID for cleanup
-			context.poolManager = poolManager;
-			context.poolItemId = poolItem.id;
-
-			// Store context
-			this.requestContexts.set(requestId, context);
-
-			// Register SINGLE handler (never cleared until completion)
-			process.ipcConn.setRequestHandler(
-				requestId,
-				createRequestHandler(context, this),
-				reqTimeout
-			);
-
-			// Send request
-			await process.ipcConn.writeMessage(requestMsg, new Uint8Array(bodyBytes));
-
-			// Return Response promise that will be resolved by state machine
-			const response = await context.responsePromise.promise;
-
-			// Note: markItemIdle() is called by the state machine when connections actually close:
-			// - Single-frame responses: in handleFirstFrame() after response is sent
-			// - Streaming responses: in handleStreamFrame() when final frame arrives
-			// - Bidi connections: in socket.onclose handler when WebSocket closes
-			// This ensures processes are only marked idle after connections fully complete,
-			// preventing premature recycling of processes with active streaming/bidi connections.
-
-			return response;
-
-		} catch (error) {
-			this.logger.error(`IPC communication error with ${process.id}: ${error.message}`);
-			// Mark idle on error
-			await poolManager.markItemIdle(poolItem.id);
-			return new Response(
-				JSON.stringify({ error: '502 Bad Gateway', message: 'Service process error' }),
-				{
-					status: 502,
-					headers: { 'Content-Type': 'application/json' },
-				}
-			);
-		}
-	}
-
-	/**
-	 * Get process with affinity preference
-	 */
-	async getProcessWithAffinity (poolManager, appletPath) {
-		// Strategy 1: Find process with affinity
-		if (appletPath) {
-			const affinitySet = this.affinityMap.get(appletPath);
-			if (affinitySet) {
-				for (const itemId of affinitySet) {
-					const item = poolManager.items.get(itemId);
-					if (item && item.isAvailable()) {
-						return item;
-					}
-				}
-			}
-		}
-
-		// Strategy 2: Get any available process
-		return await poolManager.getAvailableItem();
-	}
-
-	/**
-	 * Update affinity tracking
-	 */
-	updateAffinity (itemId, appletPath) {
-		if (!appletPath) return;
-
-		if (!this.affinityMap.has(appletPath)) {
-			this.affinityMap.set(appletPath, new Set());
-		}
-		this.affinityMap.get(appletPath).add(itemId);
-	}
-
-	/**
-	 * Convert NANOS-format headers to Headers
-	 */
-	convertHeaders (hdrIn) {
-		const hdrOut = new Headers();
-		if (hdrIn instanceof NANOS) {
-			for (const [name, content] of hdrIn.entries()) {
-				if (typeof content?.values === 'function') {
-					// Multi-valued, e.g. Set-Cookie
-					for (const content1 of content.values()) hdrOut.append(name, content1);
-				} else hdrOut.set(name, content);
-			}
-		}
-		return hdrOut;
-	}
-
-	/**
-	 * Cleanup completed request context
-	 */
-	cleanupRequestContext (requestId) {
-		cleanupRequestContext(requestId, this.requestContexts, this.logger);
-	}
-
-	/**
-	 * Handle client message in bidirectional connection
-	 */
-	async handleClientBidiMessage (requestId, data, connState) {
-		// Convert WebSocket message to Uint8Array
-		let frameData;
-		if (typeof data === 'string') {
-			frameData = new TextEncoder().encode(data);
-		} else if (data instanceof ArrayBuffer) {
-			frameData = new Uint8Array(data);
-		} else if (data instanceof Uint8Array) {
-			frameData = data;
-		} else {
-			this.logger.warn(`Unexpected WebSocket data type: ${typeof data}`);
-			return;
-		}
-
-		const chunkSize = frameData.length;
-
-		// Check credits (flow control)
-		if (connState.inboundCredits < chunkSize) {
-			this.logger.warn(`Client ${requestId} exceeded inbound credits`);
-			connState.socket.close(1008, 'Flow control violation');
-			this.bidiConnections.delete(requestId);
-			return;
-		}
-
-		// Consume credits
-		connState.inboundCredits -= chunkSize;
-
-		// Forward to responder process via IPC
-		const frameMsg = createFrame(requestId, {
-			data: frameData,
-			final: false
-		});
-		await connState.process.ipcConn.writeMessage(frameMsg, frameData);
-
-		// Implicit credit grant
-		connState.inboundCredits = Math.min(
-			connState.inboundCredits + chunkSize,
-			connState.maxCredits
-		);
-
-		// Update activity timestamp
-		connState.lastActivity = Date.now();
-	}
-
-	/**
-		* Initialize service process pools
-		*/
-	async initializeProcessPools () {
-		let poolsConfig = this.configData.at('pools');
-		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
-			this.logger.warn('No pools configured, using defaults');
-			poolsConfig = getDefaultPoolsConfig();
-			this.configData.set('pools', poolsConfig);
-		}
-
-		// Create PoolManager for each pool
-		for (const [poolName, poolConfig] of poolsConfig.entries()) {
-			if (poolName === '@router') {
-				const fsRouting = this.configData.at('fsRouting', false);
-				if (fsRouting) {
-					this.logger.info(`Initializing router pool '${poolName}' (filesystem routing)`);
-				}
-			} else {
-				this.logger.info(`Initializing pool '${poolName}' with PoolManager`);
-
-				const configObj = poolConfig instanceof NANOS ? poolConfig.toObject() : poolConfig;
-
-				const itemFactory = async (itemId) => {
-					return await this.processManager.createProcess(
-						itemId,
-						ProcessType.RESPONDER,
-						poolName,
-						poolConfig
-					);
-				};
-
-				const poolManager = new PoolManager(poolName, configObj, itemFactory, this.logger);
-				await poolManager.initialize();
-
-				this.poolManagers.set(poolName, poolManager);
-			}
-		}
-	}
-
-	/**
-	 * Start health check monitoring
-	 */
-	startHealthCheckMonitoring () {
-		const intervalSeconds = this.configData.at('healthCheckInterval', 60);
-
-		this.healthCheckInterval = setInterval(async () => {
-			try {
-				await this.processManager.healthCheck();
-			} catch (error) {
-				this.logger.error(`Health check error: ${error.message}`);
-			}
-		}, intervalSeconds * 1000);
-
-		this.logger.info(`Health check monitoring started (interval: ${intervalSeconds}s)`);
-	}
-
-	/**
 	 * Validate uid/gid configuration
 	 */
 	validatePrivilegeConfiguration () {
@@ -800,136 +905,5 @@ export class OperatorProcess {
 				this.logger.warn(`Warning: uid/gid configuration present (uid=${uid}, gid=${gid}), but will not be set (operator is not running as root).`);
 			}
 		}
-	}
-
-	/**
-	 * Reload HTTPS server with updated certificates
-	 */
-	async reloadHttpsServer () {
-		if (this.isReloading) {
-			this.logger.warn('Server reload already in progress');
-			return;
-		}
-
-		this.isReloading = true;
-		this.logger.info('Reloading HTTPS server with updated certificates...');
-
-		try {
-			if (this.httpsServer) {
-				await this.httpsServer.shutdown();
-				this.logger.info('Previous HTTPS server stopped');
-			}
-
-			await this.startHttpsServer();
-			this.logger.info('HTTPS server reloaded successfully');
-		} catch (error) {
-			this.logger.error(`Failed to reload HTTPS server: ${error.message}`);
-			throw error;
-		} finally {
-			this.isReloading = false;
-		}
-	}
-
-	/**
-	 * Start the operator process
-	 */
-	async start () {
-		this.logger.info('Starting JSMAWS operator process...');
-
-		this.validatePrivilegeConfiguration();
-		this.initializeRouter();
-		this.initializeProcessManager();
-		await this.initializeProcessPools();
-		await this.startHttpServer();
-
-		if (!this.config.noSSL) {
-			if (this.config.certFile && this.config.keyFile) {
-				await this.startHttpsServer();
-			} else {
-				throw new Error('SSL certificates required (certFile and keyFile must be configured, or use noSSL=@t)');
-			}
-		}
-
-		if (!this.config.noSSL && this.config.certFile && this.config.keyFile) {
-			this.sslManager = createSSLManager(
-				this.config,
-				() => this.reloadHttpsServer()
-			);
-			await this.sslManager.startMonitoring();
-		}
-
-		this.configMonitor = createConfigMonitor(
-			this.configPath,
-			(newConfig) => this.handleConfigUpdate(newConfig)
-		);
-		await this.configMonitor.startMonitoring();
-
-		this.startHealthCheckMonitoring();
-
-		this.logger.info('JSMAWS operator process started successfully');
-	}
-
-	/**
-	 * Gracefully shutdown the operator process
-	 */
-	async shutdown () {
-		if (this.isShuttingDown) {
-			return;
-		}
-
-		const stopTime = this.configData.at('shutdownDelay', 30);
-
-		this.isShuttingDown = true;
-		this.logger.info('Shutting down JSMAWS operator process...');
-
-		if (this.healthCheckInterval) {
-			clearInterval(this.healthCheckInterval);
-			this.healthCheckInterval = null;
-		}
-
-		if (this.configMonitor) {
-			this.configMonitor.stopMonitoring();
-		}
-
-		if (this.sslManager) {
-			this.sslManager.stopMonitoring();
-		}
-
-		const tasks = [];
-
-		if (this.httpServer) {
-			tasks.push(this.httpServer.shutdown().then(() => this.logger.info('HTTP server stopped')));
-		}
-
-		if (this.httpsServer) {
-			tasks.push(this.httpsServer.shutdown().then(() => this.logger.info('HTTPS server stopped')));
-		}
-
-		const poolTasks = [];
-		if (this.poolManagers) {
-			for (const [poolName, poolManager] of this.poolManagers) {
-				this.logger.info(`Shutting down pool: ${poolName}`);
-				poolTasks.push(poolManager.shutdown(stopTime));
-			}
-		}
-
-		if (this.processManager) {
-			const pmShutdown = () => this.processManager.shutdown(stopTime);
-			if (poolTasks.length) {
-				tasks.push(Promise.all(poolTasks).then(() => pmShutdown()));
-			} else {
-				tasks.push(pmShutdown());
-			}
-		} else {
-			tasks.push(...poolTasks);
-		}
-
-		if (tasks.length) {
-			const timeout = new Promise((resolve) => setTimeout(resolve, (stopTime + 5) * 1000));
-			await Promise.race([Promise.all(tasks), timeout]);
-		}
-
-		this.logger.info('JSMAWS operator process shutdown complete');
-		await this.logger.close();
 	}
 }

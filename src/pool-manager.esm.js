@@ -1,37 +1,27 @@
 /**
  * JSMAWS Pool Manager
  * Generic pool manager supporting both worker pools and process pools
- * 
+ *
  * This manager handles:
  * - Worker pools (Web Workers within a process)
  * - Process pools (sub-processes spawned by operator)
- * - Three scaling strategies: static, dynamic, ondemand
+ * - Unified scaling algorithm controlled by configuration parameters
  * - Capacity tracking and metrics
  * - Lifecycle management (spawn, monitor, recycle, shutdown)
- * 
+ *
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
-
-import { NANOS } from './vendor.esm.js';
 
 /**
  * Pool item states
  */
 const ItemState = {
-	STARTING: 'starting',
-	IDLE: 'idle',
-	BUSY: 'busy',
-	RECYCLING: 'recycling',
-	DEAD: 'dead',
-};
-
-/**
- * Scaling strategies
- */
-const ScalingStrategy = {
-	STATIC: 'static',
-	DYNAMIC: 'dynamic',
-	ONDEMAND: 'ondemand',
+	STARTING: 'starting',  // Initializing
+	IDLE: 'idle',          // No active requests (recyclable)
+	READY: 'ready',        // Has requests but below capacity (available)
+	BUSY: 'busy',          // At capacity (unavailable)
+	RECYCLING: 'recycling', // Being shut down
+	DEAD: 'dead',          // Terminated
 };
 
 /**
@@ -39,29 +29,47 @@ const ScalingStrategy = {
  * Wraps either a Web Worker or a process handle
  */
 class PoolItem {
-	constructor (id, item, isWorker) {
+	constructor (poolManager, id, item, isWorker, initialUsage, maxConcurrent = 1) {
+		this.poolManager = poolManager;
 		this.id = id;
 		this.item = item; // Web Worker or process handle
 		this.isWorker = isWorker;
-		this.state = ItemState.STARTING;
-		this.requestCount = 0;
+		this.totalRequests = initialUsage; // Total requests (lifetime, not concurrent)
 		this.lastUsed = Date.now();
 		this.createdAt = Date.now();
-		this.busyCount = 0; // For workers: concurrent requests
+		this.usageCount = initialUsage; // Current concurrent requests
+		this.maxConcurrent = maxConcurrent; // Maximum concurrent requests
+		this.shutdownPromise = null;
+
+		// Set initial state based on initial usage
+		if (initialUsage === 0) this.state = ItemState.IDLE;
+		else if (initialUsage >= maxConcurrent) this.state = ItemState.BUSY;
+		else this.state = ItemState.READY;
 	}
 
 	/**
-	 * Check if item is available for work
+	 * Decrement concurrent usage count
 	 */
-	isAvailable () {
-		return this.state === ItemState.IDLE && this.busyCount === 0;
+	async decrementUsage () {
+		// Loop in the pool manager for pool-level concerns
+		return await this.poolManager.decrementItemUsage(this.id);
 	}
 
-	/**
-	 * Check if item is idle
-	 */
-	isIdle () {
-		return this.state === ItemState.IDLE && this.busyCount === 0;
+	_decrementUsage () {
+		// Item-level updates...
+		this.usageCount = Math.max(0, this.usageCount - 1);
+		this.lastUsed = Date.now();
+
+		// Update state based on remaining requests
+		switch (this.state) {
+		case ItemState.BUSY:
+			if (this.usageCount === 0) this.state = ItemState.IDLE;
+			else if (this.usageCount < this.maxConcurrent) this.state = ItemState.READY;
+			break;
+		case ItemState.READY:
+			if (this.usageCount === 0) this.state = ItemState.IDLE;
+			break;
+		}
 	}
 
 	/**
@@ -73,30 +81,52 @@ class PoolItem {
 	}
 
 	/**
-	 * Mark as busy
+	 * Increment request count
 	 */
-	markBusy () {
-		this.state = ItemState.BUSY;
-		this.busyCount++;
-		this.lastUsed = Date.now();
+	incrementRequests () {
+		++this.totalRequests;
 	}
 
 	/**
-	 * Mark as idle
+	 * Increment concurrent usage count
 	 */
-	markIdle () {
-		this.busyCount = Math.max(0, this.busyCount - 1);
-		if (this.busyCount === 0) {
-			this.state = ItemState.IDLE;
-			this.lastUsed = Date.now();
+	incrementUsage () {
+		++this.usageCount;
+		this.lastUsed = Date.now();
+
+		// Update state based on capacity
+		switch (this.state) {
+		case ItemState.IDLE:
+			this.state = (this.usageCount < this.maxConcurrent) ? ItemState.READY : ItemState.BUSY;
+			break;
+		case ItemState.READY:
+			if (this.usageCount >= this.maxConcurrent) this.state = ItemState.BUSY;
+			break;
 		}
 	}
 
 	/**
-	 * Increment request count
+	 * Check if item is available for work (has capacity)
 	 */
-	incrementRequests () {
-		this.requestCount++;
+	isAvailable () {
+		return this.state === ItemState.IDLE || this.state === ItemState.READY;
+	}
+
+	/**
+	 * Check if item is idle (no active requests, recyclable)
+	 */
+	isIdle () {
+		return this.state === ItemState.IDLE;
+	}
+
+	/*
+	 * Notify listeners when the item shuts down
+	 */
+	onShutdown (callback) {
+		if (!this.shutdownPromise) {
+			this.shutdownPromise = Promise.withResolvers();
+		}
+		this.shutdownPromise.promise.then(() => callback());
 	}
 
 	/**
@@ -104,7 +134,7 @@ class PoolItem {
 	 */
 	shouldRecycle (maxReqs) {
 		if (maxReqs === 0) return false; // Unlimited
-		return this.requestCount >= maxReqs;
+		return this.totalRequests >= maxReqs;
 	}
 }
 
@@ -119,10 +149,10 @@ export class PoolManager {
 		this.itemFactory = itemFactory; // Function to create new items
 		this.logger = logger; // Logger instance
 		this.items = new Map(); // itemId -> PoolItem
+		this.serialQueue = new Set();
 		this.itemIdCounter = 0;
 		this.isShuttingDown = false;
 		this.scaleTimer = null;
-		this.requestQueue = [];
 
 		// Metrics
 		this.metrics = {
@@ -134,76 +164,32 @@ export class PoolManager {
 	}
 
 	/**
-	 * Validate and replace current pool configuration
+	 * Check if pool can spawn more items
 	 */
-	updateConfig (newConfig) {
-		this.logger.info(`[PoolManager:${this.poolName}] Updating configuration`);
-		this.config = this.validateConfig(newConfig);
-
-		// Trigger immediate scaling check (non-blocking, *all* strategies)
-		this.startScalingTimer();
-		this.performScaling().catch((error) => {
-			this.logger.error(`[PoolManager:${this.poolName}] Scaling error after config update:`, error);
-		});
+	canSpawnItem (auto = false) {
+		if (this.isShuttingDown) return false;
+		if (auto && this.serialQueue.size) return false;
+		return this.items.size < this.config.maxProcs;
 	}
 
 	/**
-	 * Validate pool configuration object
+	 * Decrement item usage (active requests) and check for recycling
 	 */
-	validateConfig (config) {
-		const validated = {
-			minProcs: config.minProcs ?? 1,
-			maxProcs: config.maxProcs ?? 10,
-			scaling: config.scaling ?? ScalingStrategy.DYNAMIC,
-			minWorkers: config.minWorkers ?? 1,
-			maxWorkers: config.maxWorkers ?? 4,
-			maxReqs: config.maxReqs ?? 0,
-			idleTimeout: config.idleTimeout ?? 300,
-			reqTimeout: config.reqTimeout ?? 30,
-			conTimeout: config.conTimeout ?? 60,
-		};
-
-		// Validation rules
-		if (validated.minProcs < 0) {
-			throw new Error(`Invalid minProcs: ${validated.minProcs} (must be >= 0)`);
-		}
-		if (validated.maxProcs <= 0) {
-			throw new Error(`Invalid maxProcs: ${validated.maxProcs} (must be > 0)`);
-		}
-		if (validated.minProcs > validated.maxProcs) {
-			throw new Error(`minProcs (${validated.minProcs}) > maxProcs (${validated.maxProcs})`);
-		}
-		if (validated.scaling === ScalingStrategy.STATIC && validated.minProcs !== validated.maxProcs) {
-			throw new Error(`Static scaling requires minProcs == maxProcs`);
-		}
-		if (validated.minWorkers < 1) {
-			throw new Error(`Invalid minWorkers: ${validated.minWorkers} (must be >= 1)`);
-		}
-		if (validated.maxWorkers < validated.minWorkers) {
-			throw new Error(`maxWorkers (${validated.maxWorkers}) < minWorkers (${validated.minWorkers})`);
+	async decrementItemUsage (itemId) {
+		const item = this.items.get(itemId);
+		if (!item) {
+			this.logger.warn(`[PoolManager:${this.poolName}] Item not found: ${itemId}`);
+			return;
 		}
 
-		return validated;
-	}
+		item._decrementUsage();
+		item.incrementRequests();
 
-	/**
-	 * Initialize pool
-	 */
-	async initialize () {
-		this.logger.debug(`[PoolManager:${this.poolName}] Initializing pool (strategy: ${this.config.scaling})`);
-
-		// Spawn minimum items
-		const spawnCount = this.config.scaling === ScalingStrategy.ONDEMAND ? 0 : this.config.minProcs;
-		for (let i = 0; i < spawnCount; i++) {
-			await this.spawnItem();
+		// Check if item should be recycled
+		if (item.shouldRecycle(this.config.maxReqs)) {
+			this.logger.debug(`[PoolManager:${this.poolName}] Item ${itemId} reached maxReqs (${this.config.maxReqs}); recycling`);
+			await this.recycleItem(itemId);
 		}
-
-		// Start scaling timer for dynamic/ondemand strategies
-		if (this.config.scaling !== ScalingStrategy.STATIC) {
-			this.startScalingTimer();
-		}
-
-		this.logger.debug(`[PoolManager:${this.poolName}] Initialized with ${this.items.size} items`);
 	}
 
 	/**
@@ -214,110 +200,152 @@ export class PoolManager {
 	}
 
 	/**
-	 * Spawn new item (worker or process)
+	 * Get available item with optional affinity preference
+	 * @param {Set<string>|null} preferredIds - Optional set of preferred item IDs
+	 * @returns {PoolItem|null}
 	 */
-	async spawnItem () {
-		if (this.isShuttingDown) {
-			throw new Error('Pool is shutting down');
-		}
-
-		if (this.items.size >= this.config.maxProcs) {
-			throw new Error(`Pool at maximum capacity (${this.config.maxProcs})`);
-		}
-
-		const itemId = this.generateItemId();
-		this.logger.debug(`[PoolManager:${this.poolName}] Spawning item ${itemId}`);
-
-		try {
-			// Use factory to create item (worker or process)
-			const { item, isWorker } = await this.itemFactory(itemId);
-
-			const poolItem = new PoolItem(itemId, item, isWorker);
-			this.items.set(itemId, poolItem);
-			this.metrics.totalSpawned++;
-
-			// Mark as idle after initialization
-			poolItem.state = ItemState.IDLE;
-
-			this.logger.debug(`[PoolManager:${this.poolName}] Item ${itemId} spawned successfully`);
-			return poolItem;
-		} catch (error) {
-			this.logger.error(`[PoolManager:${this.poolName}] Failed to spawn item ${itemId}:`, error);
-			this.metrics.totalErrors++;
-			throw error;
-		}
-	}
-
-	/**
-	 * Get available item
-	 */
-	async getAvailableItem () {
-		this.metrics.totalRequests++;
-
-		// Strategy 1: Find idle item
-		for (const item of this.items.values()) {
-			if (item.isAvailable()) {
-				return item;
+	async getAvailableItem (preferredIds = null) {
+		this.logger.debug(`Searching for available item in ${this.poolName} of ${this.items.size}`);
+		// Strategy 1: Check affinity items first if provided
+		if (preferredIds) {
+			for (const itemId of preferredIds) {
+				const item = this.items.get(itemId);
+				if (item && item.isAvailable()) {
+					item.incrementUsage();
+					return item;
+				}
 			}
 		}
 
-		// Strategy 2: Spawn new item if allowed
+		// Strategy 2: Find any existing available item
+		for (const item of this.items.values()) {
+			this.logger.debug(`Considering ${item.id} usage ${item.usageCount} state ${item.state}`);
+			if (item.isAvailable()) {
+				this.logger.debug('(available)');
+				item.incrementUsage();
+				return item;
+			}
+			this.logger.debug('(not available)');
+		}
+
+		// Strategy 3: Spawn new (reserved) item on-demand if allowed
 		const canSpawn = this.canSpawnItem();
 		if (canSpawn) {
 			try {
-				return await this.spawnItem();
+				return await this.spawnItem(1);
 			} catch (error) {
 				this.logger.error(`[PoolManager:${this.poolName}] Failed to spawn item:`, error);
 			}
 		}
 
-		// Strategy 3: Queue request (caller handles)
 		return null;
 	}
 
 	/**
-	 * Check if pool can spawn more items
+	 * Get pool metrics
 	 */
-	canSpawnItem () {
-		if (this.isShuttingDown) return false;
-		if (this.items.size >= this.config.maxProcs) return false;
-
-		// For static scaling, only spawn up to minProcs
-		if (this.config.scaling === ScalingStrategy.STATIC) {
-			return this.items.size < this.config.minProcs;
-		}
-
-		return true;
+	getMetrics () {
+		const items = Array.from(this.items.values());
+		return {
+			poolName: this.poolName,
+			totalItems: this.items.size,
+			availableItems: items.filter((item) => item.isAvailable()).length,
+			busyItems: items.filter((item) => item.state === ItemState.BUSY).length,
+			idleItems: items.filter((item) => item.isIdle()).length,
+			totalSpawned: this.metrics.totalSpawned,
+			totalRecycled: this.metrics.totalRecycled,
+			totalRequests: this.metrics.totalRequests,
+			totalErrors: this.metrics.totalErrors,
+			queuedRequests: this.serialQueue.size,
+		};
 	}
 
 	/**
-	 * Mark item as busy
+	 * Increment item usage (active requests)
+	 * (Should only be needed for testing)
 	 */
-	markItemBusy (itemId) {
+	incrementItemUsage (itemId) {
 		const item = this.items.get(itemId);
 		if (!item) {
 			throw new Error(`Item not found: ${itemId}`);
 		}
-		item.markBusy();
+		item.incrementUsage();
 	}
 
 	/**
-	 * Mark item as idle and check for recycling
+	 * Initialize pool
 	 */
-	async markItemIdle (itemId) {
-		const item = this.items.get(itemId);
-		if (!item) {
-			this.logger.warn(`[PoolManager:${this.poolName}] Item not found: ${itemId}`);
+	async initialize () {
+		this.logger.debug(`[PoolManager:${this.poolName}] Initializing pool (minProcs: ${this.config.minProcs}, maxProcs: ${this.config.maxProcs})`);
+
+		// Spawn minimum items
+		for (let i = 0; i < this.config.minProcs; i++) {
+			await this.spawnItem();
+		}
+
+		// Always start scaling (it will self-stop at equilibrium)
+		this.startScaling();
+
+		this.logger.debug(`[PoolManager:${this.poolName}] Initialized with ${this.items.size} items`);
+	}
+
+	/**
+	 * Perform unified scaling algorithm
+	 * Adapts behavior based on configuration parameters
+	 */
+	async performScaling () {
+		if (this.isShuttingDown) return;
+
+		const currentCount = this.items.size;
+		const { minProcs, maxProcs, idleTimeout } = this.config;
+
+		// Stop timer only when:
+		// 1. No scaling is possible (min === max)
+		// 2. Current count is within spec (min <= current <= max)
+		if (minProcs === maxProcs && currentCount === minProcs) {
+			this.stopScaling();
 			return;
 		}
 
-		item.markIdle();
-		item.incrementRequests();
+		const idleItems = Array.from(this.items.values()).filter((item) => item.isIdle());
 
-		// Check if item should be recycled
-		if (item.shouldRecycle(this.config.maxReqs)) {
-			this.logger.debug(`[PoolManager:${this.poolName}] Item ${itemId} reached maxReqs (${this.config.maxReqs}); recycling`);
-			await this.recycleItem(itemId);
+		// Scale down: Remove idle items beyond minProcs
+		if (currentCount > minProcs) {
+			if (!idleItems.length) this.logger.debug(`[PoolManager:${this.poolName}]: No idle items for scale-down`);
+			for (const item of idleItems) {
+				if (this.items.size <= minProcs) break;
+
+				const idleTime = item.getIdleTime();
+				if (idleTime >= idleTimeout) {
+					this.logger.debug(`[PoolManager:${this.poolName}] Scaling down: removing idle item ${item.id} (idle: ${idleTime}s)`);
+					await this.recycleItem(item.id);
+				}
+			}
+		}
+
+		// Scale up: Spawn items if below minProcs
+		while (this.items.size < minProcs && this.canSpawnItem(true)) {
+			this.logger.debug(`[PoolManager:${this.poolName}] Scaling up: below minProcs, spawning new item`);
+			try {
+				await this.spawnItem();
+			} catch (error) {
+				this.logger.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
+				break; // Stop trying if spawn fails
+			}
+		}
+
+		// Can't be busy when you're not doing anything (ie at minProcs = 0)!
+		if (!this.items.size) return;
+
+		// Scale up: Spawn if all busy and below maxProcs
+		const availableCount = Array.from(this.items.values()).filter((item) => item.isAvailable()).length;
+		if (availableCount === 0 && this.canSpawnItem(true)) {
+			this.logger.debug(`[PoolManager:${this.poolName}] Scaling up: all items busy, spawning new item`);
+			try {
+				await this.spawnItem();
+			} catch (error) {
+				this.logger.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
+			}
 		}
 	}
 
@@ -332,6 +360,10 @@ export class PoolManager {
 		item.state = ItemState.RECYCLING;
 
 		try {
+			// Wake up any shutdown listeners
+			const onShutdown = !this.isShuttingDown && item.shutdownPromise;
+			if (onShutdown) onShutdown.resolve();
+
 			// Terminate item
 			if (item.isWorker) {
 				item.item.terminate();
@@ -364,111 +396,59 @@ export class PoolManager {
 		if (!item) return;
 
 		this.logger.info(`[PoolManager:${this.poolName}] Removing dead item ${itemId}`);
+
+		// Wake up any shutdown listeners
+		const onShutdown = !this.isShuttingDown && item.shutdownPromise;
+		if (onShutdown) onShutdown.resolve();
+
 		item.state = ItemState.DEAD;
 		this.items.delete(itemId);
 	}
 
 	/**
-	 * Start scaling timer
+	 * Grant turns in FIFO order to items in the serialization queue
 	 */
-	startScalingTimer () {
-		if (this.scaleTimer) return;
-
-		// Check every 10 seconds
-		this.scaleTimer = setInterval(() => {
-			this.performScaling().catch((error) => {
-				this.logger.error(`[PoolManager:${this.poolName}] Scaling error:`, error);
-			});
-		}, 10000);
-	}
-
-	/**
-	 * Stop scaling timer
-	 */
-	stopScalingTimer () {
-		if (this.scaleTimer) {
-			clearInterval(this.scaleTimer);
-			this.scaleTimer = null;
-		}
-	}
-
-	/**
-	 * Perform scaling based on strategy
-	 */
-	async performScaling () {
-		if (this.isShuttingDown) return;
-
-		const idleItems = Array.from(this.items.values()).filter((item) => item.isIdle());
-		const idleCount = idleItems.length;
-
-		// Scale down: Remove idle items beyond minProcs
-		if (idleCount > 0 && this.items.size > this.config.minProcs) {
-			for (const item of idleItems) {
-				if (this.items.size <= this.config.minProcs) break;
-
-				const idleTime = item.getIdleTime();
-				if (idleTime >= this.config.idleTimeout) {
-					this.logger.debug(`[PoolManager:${this.poolName}] Scaling down: removing idle item ${item.id} (idle: ${idleTime}s)`);
-					await this.recycleItem(item.id);
-				}
-			}
-		}
-
-		// Scale up: Spawn items if below minProcs OR (all busy and below maxProcs)
-		if (this.items.size < this.config.minProcs) {
-			// Below minimum - spawn to reach minProcs
-			this.logger.debug(`[PoolManager:${this.poolName}] Scaling up: below minProcs, spawning new item`);
-			try {
-				await this.spawnItem();
-			} catch (error) {
-				this.logger.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
-			}
-		} else {
-			// At or above minimum - only spawn if all items are busy
-			const availableCount = Array.from(this.items.values()).filter((item) => item.isAvailable()).length;
-			const busyCount = this.items.size - availableCount;
-			if (availableCount === 0 && busyCount > 0 && this.canSpawnItem()) {
-				this.logger.debug(`[PoolManager:${this.poolName}] Scaling up: all items busy, spawning new item`);
+	async runSerialQueue () {
+		let entry;
+		// deno-lint-ignore no-cond-assign
+		while (entry = this.serialQueue.values().next().value) {
+			const { turn, callback } = entry;
+			if (this.isShuttingDown) {
+				turn.reject(new Error('Stopping'));
+			} else {
 				try {
-					await this.spawnItem();
+					const result = await callback();
+					turn.resolve(result);
 				} catch (error) {
-					this.logger.error(`[PoolManager:${this.poolName}] Failed to scale up:`, error);
+					turn.reject(error);
 				}
 			}
-		}
-
-		if (this.items.size === this.config.minProcs && this.config.scaling === ScalingStrategy.STATIC) {
-			// Stop scaling static strategy at equilibrium
-			this.stopScalingTimer();
+			this.serialQueue.delete(entry);
 		}
 	}
 
 	/**
-	 * Get pool metrics
+	 * Serialize pool access.
+	 * Returns a promise with the return value of the async callback.
+	 * Rejects if shutting down.
 	 */
-	getMetrics () {
-		const items = Array.from(this.items.values());
-		return {
-			poolName: this.poolName,
-			totalItems: this.items.size,
-			availableItems: items.filter((item) => item.isAvailable()).length,
-			busyItems: items.filter((item) => item.state === ItemState.BUSY).length,
-			idleItems: items.filter((item) => item.isIdle()).length,
-			totalSpawned: this.metrics.totalSpawned,
-			totalRecycled: this.metrics.totalRecycled,
-			totalRequests: this.metrics.totalRequests,
-			totalErrors: this.metrics.totalErrors,
-			queuedRequests: this.requestQueue.length,
-		};
+	serialize (callback) {
+		if (this.isShuttingDown) return Promise.reject(new Error('Shutting down'));
+		const turn = Promise.withResolvers();
+		this.serialQueue.add({ turn, callback });
+		if (this.serialQueue.size === 1) queueMicrotask(() => this.runSerialQueue());
+		return turn.promise;
 	}
 
 	/**
 	 * Graceful shutdown
 	 */
-	async shutdown (timeoutSeconds = 30) {
-		this.logger.info(`[PoolManager:${this.poolName}] Shutting down (timeout: ${timeoutSeconds}s)`);
+	async shutdown (stopTime = 30) {
+		this.logger.info(`[PoolManager:${this.poolName}] Shutting down (${stopTime}s)`);
 		this.isShuttingDown = true;
-		this.stopScalingTimer();
+		this.stopScaling();
+		// The process manager will handle processes in the case of a system-wide shutdown
+		const systemShutdown = globalThis.OperatorProcess?.instance?.isShuttingDown;
 
 		const shutdownPromises = [];
 		for (const [itemId, item] of this.items.entries()) {
@@ -476,9 +456,9 @@ export class PoolManager {
 				try {
 					if (item.isWorker) {
 						item.item.terminate();
-					} else {
+					} else if (!systemShutdown) {
 						if (typeof item.item.shutdown === 'function') {
-							await item.item.shutdown(timeoutSeconds);
+							await item.item.shutdown(stopTime);
 						}
 					}
 					this.items.delete(itemId);
@@ -493,13 +473,117 @@ export class PoolManager {
 		if (shutdownPromises.length) {
 			const wrapUpPromise = Promise.withResolvers();
 			Promise.all(shutdownPromises).then(() => wrapUpPromise.resolve(true));
-			const timer = setTimeout(() => wrapUpPromise.resolve(false), timeoutSeconds * 1000);
+			const timer = setTimeout(() => wrapUpPromise.resolve(false), stopTime * 1000);
 			await wrapUpPromise.promise;
 			clearTimeout(timer);
 		}
 
-		this.logger.info(`[PoolManager:${this.poolName}] Shutdown complete (${this.items.size} items remaining)`);
+		if (!systemShutdown) this.logger.info(`[PoolManager:${this.poolName}] Shutdown complete (items remaining: ${this.items.size})`);
+	}
+
+	/**
+	 * Spawn new item (worker or process)
+	 */
+	async spawnItem (initialUsage = 0) {
+		if (this.isShuttingDown) {
+			throw new Error('Pool is shutting down');
+		}
+
+		if (this.items.size >= this.config.maxProcs) {
+			throw new Error(`Pool at maximum capacity (${this.config.maxProcs})`);
+		}
+
+		const itemId = this.generateItemId();
+		this.logger.debug(`[PoolManager:${this.poolName}] Spawning item ${itemId}`);
+
+		try {
+			// Use factory to create item (worker or process)
+			const { item, isWorker } = await this.itemFactory(itemId);
+
+			// For responder processes, maxConcurrent = maxWorkers from pool config
+			// For worker pools, maxConcurrent = 1 (each worker handles one request)
+			const maxConcurrent = isWorker ? 1 : this.config.maxWorkers;
+
+			const poolItem = new PoolItem(this, itemId, item, isWorker, initialUsage, maxConcurrent);
+			this.items.set(itemId, poolItem);
+			this.metrics.totalSpawned++;
+
+			this.logger.debug(`[PoolManager:${this.poolName}] Item ${itemId} spawned successfully (initial ${initialUsage} capacity ${maxConcurrent})`);
+			return poolItem;
+		} catch (error) {
+			this.logger.error(`[PoolManager:${this.poolName}] Failed to spawn item ${itemId}:`, error);
+			this.metrics.totalErrors++;
+			throw error;
+		}
+	}
+
+	/**
+	 * Start scaling
+	 */
+	startScaling () {
+		if (this.scaleTimer) return;
+
+		// Check every 10 seconds
+		this.scaleTimer = setInterval(() => {
+			this.performScaling().catch((error) => {
+				this.logger.error(`[PoolManager:${this.poolName}] Scaling error:`, error);
+			});
+		}, 10000);
+		// TODO: Configurable scaling frequency
+	}
+
+	/**
+	 * Stop scaling
+	 */
+	stopScaling () {
+		if (this.scaleTimer) {
+			clearInterval(this.scaleTimer);
+			this.scaleTimer = null;
+		}
+	}
+
+	/**
+	 * Validate and replace current pool configuration
+	 */
+	async updateConfig (newConfig) {
+		this.logger.info(`[PoolManager:${this.poolName}] Updating configuration`);
+		this.config = this.validateConfig(newConfig);
+
+		// Trigger immediate scaling check (blocking to ensure config takes effect)
+		this.startScaling();
+		await this.performScaling();
+	}
+
+	/**
+	 * Validate pool configuration object
+	 */
+	validateConfig (config) {
+		const validated = {
+			minProcs: config.minProcs ?? 1,
+			maxProcs: config.maxProcs ?? 10,
+			maxWorkers: config.maxWorkers ?? 4,
+			maxReqs: config.maxReqs ?? 0,
+			idleTimeout: config.idleTimeout ?? 300,
+			reqTimeout: config.reqTimeout ?? 30,
+			conTimeout: config.conTimeout ?? 60,
+		};
+
+		// Validation rules
+		if (validated.minProcs < 0) {
+			throw new Error(`Invalid minProcs: ${validated.minProcs} (must be >= 0)`);
+		}
+		if (validated.maxProcs <= 0) {
+			throw new Error(`Invalid maxProcs: ${validated.maxProcs} (must be > 0)`);
+		}
+		if (validated.minProcs > validated.maxProcs) {
+			throw new Error(`minProcs (${validated.minProcs}) > maxProcs (${validated.maxProcs})`);
+		}
+		if (validated.maxWorkers < 1) {
+			throw new Error(`maxWorkers (${validated.maxWorkers}) < 1`);
+		}
+
+		return validated;
 	}
 }
 
-export { ItemState, ScalingStrategy };
+export { ItemState };

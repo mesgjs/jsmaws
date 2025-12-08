@@ -21,7 +21,7 @@ function send404 (id) {
 		id,
 		mode: 'response',
 		status: 404,
-		headers: { 'Content-Type': 'text/plain' },
+		headers: { 'content-type': 'text/plain' },
 		data: new TextEncoder().encode('File not found'),
 		final: true,
 		keepAlive: false
@@ -181,7 +181,7 @@ async function handleRangeRequest (id, resolvedPath, fileSize, rangeHeader, cont
 	}
 
 	const rangeSize = end - start + 1;
-	
+
 	// Try to open file - if it fails (e.g., permission denied), return 404
 	let file;
 	try {
@@ -199,10 +199,10 @@ async function handleRangeRequest (id, resolvedPath, fileSize, rangeHeader, cont
 		mode: 'response',
 		status: 206,
 		headers: {
-			'Content-Type': contentType,
-			'Content-Length': rangeSize.toString(),
+			'content-type': contentType,
+			'content-length': rangeSize.toString(),
 			'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-			'Accept-Ranges': 'bytes'
+			'accept-ranges': 'bytes'
 		},
 		data: null,
 		keepAlive: false

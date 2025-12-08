@@ -528,7 +528,7 @@ This document assesses potential risks for fatal server component errors and def
        health.pools[poolName] = {
          processCount: stats.processCount,
          readyCount: stats.readyCount,
-         busyCount: stats.busyCount,
+         usageCount: stats.usageCount,
          availableWorkers: stats.availableWorkers,
        };
        

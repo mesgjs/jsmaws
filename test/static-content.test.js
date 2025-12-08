@@ -9,7 +9,7 @@ import { join } from 'https://deno.land/std@0.208.0/path/mod.ts';
 // Test helper to create a worker and collect messages
 async function createStaticWorker () {
 	const workerPath = new URL('../src/applets/static-content.esm.js', import.meta.url).href;
-	
+
 	const worker = new Worker(workerPath, {
 		type: 'module',
 		deno: {
@@ -29,7 +29,7 @@ async function createStaticWorker () {
 // Helper to collect all frame messages from worker
 async function collectFrames (worker, timeout = 1000) {
 	const frames = [];
-	
+
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => {
 			reject(new Error('Timeout waiting for frames'));
@@ -37,7 +37,7 @@ async function collectFrames (worker, timeout = 1000) {
 
 		worker.onmessage = (event) => {
 			frames.push(event.data);
-			
+
 			// Check if this is the final frame
 			if (event.data.final === true || event.data.type === 'error') {
 				clearTimeout(timer);
@@ -89,7 +89,7 @@ Deno.test.afterAll(async () => {
 
 Deno.test('Static Content - serves small text file', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -108,17 +108,17 @@ Deno.test('Static Content - serves small text file', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		assertEquals(frames.length, 1, 'Should send single frame for small file');
 		assertEquals(frames[0].type, 'frame');
 		assertEquals(frames[0].id, 'req-1');
 		assertEquals(frames[0].mode, 'response');
 		assertEquals(frames[0].status, 200);
-		assertEquals(frames[0].headers['Content-Type'], 'text/plain');
-		assertEquals(frames[0].headers['Accept-Ranges'], 'bytes');
+		assertEquals(frames[0].headers['content-type'], 'text/plain');
+		assertEquals(frames[0].headers['accept-ranges'], 'bytes');
 		assertEquals(frames[0].final, true);
 		assertEquals(frames[0].keepAlive, false);
-		
+
 		const content = new TextDecoder().decode(frames[0].data);
 		assertEquals(content, 'Hello, World!');
 	} finally {
@@ -128,7 +128,7 @@ Deno.test('Static Content - serves small text file', async () => {
 
 Deno.test('Static Content - serves HTML file with correct MIME type', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -147,9 +147,9 @@ Deno.test('Static Content - serves HTML file with correct MIME type', async () =
 		});
 
 		const frames = await collectFrames(worker);
-		
-		assertEquals(frames[0].headers['Content-Type'], 'text/html');
-		
+
+		assertEquals(frames[0].headers['content-type'], 'text/html');
+
 		const content = new TextDecoder().decode(frames[0].data);
 		assertEquals(content, '<html><body>Test</body></html>');
 	} finally {
@@ -159,7 +159,7 @@ Deno.test('Static Content - serves HTML file with correct MIME type', async () =
 
 Deno.test('Static Content - MIME type first-match strategy', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		// File ending in .json should match .json before .on
 		worker.postMessage({
@@ -180,7 +180,7 @@ Deno.test('Static Content - MIME type first-match strategy', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		assertEquals(frames[0].headers['Content-Type'], 'application/json');
+		assertEquals(frames[0].headers['content-type'], 'application/json');
 	} finally {
 		worker.terminate();
 	}
@@ -188,7 +188,7 @@ Deno.test('Static Content - MIME type first-match strategy', async () => {
 
 Deno.test('Static Content - explicit MIME type overrides extension', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -208,7 +208,7 @@ Deno.test('Static Content - explicit MIME type overrides extension', async () =>
 		});
 
 		const frames = await collectFrames(worker);
-		assertEquals(frames[0].headers['Content-Type'], 'application/custom');
+		assertEquals(frames[0].headers['content-type'], 'application/custom');
 	} finally {
 		worker.terminate();
 	}
@@ -216,7 +216,7 @@ Deno.test('Static Content - explicit MIME type overrides extension', async () =>
 
 Deno.test('Static Content - default MIME type for unknown extension', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -233,7 +233,7 @@ Deno.test('Static Content - default MIME type for unknown extension', async () =
 		});
 
 		const frames = await collectFrames(worker);
-		assertEquals(frames[0].headers['Content-Type'], 'application/octet-stream');
+		assertEquals(frames[0].headers['content-type'], 'application/octet-stream');
 	} finally {
 		worker.terminate();
 	}
@@ -241,7 +241,7 @@ Deno.test('Static Content - default MIME type for unknown extension', async () =
 
 Deno.test('Static Content - prevents path traversal attack', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -258,12 +258,12 @@ Deno.test('Static Content - prevents path traversal attack', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		assertEquals(frames.length, 1);
 		assertEquals(frames[0].type, 'frame');
 		assertEquals(frames[0].status, 404);
 		assertEquals(frames[0].final, true);
-		
+
 		const content = new TextDecoder().decode(frames[0].data);
 		assertEquals(content, 'File not found');
 	} finally {
@@ -273,7 +273,7 @@ Deno.test('Static Content - prevents path traversal attack', async () => {
 
 Deno.test('Static Content - returns 404 for non-existent file', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -290,10 +290,10 @@ Deno.test('Static Content - returns 404 for non-existent file', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		assertEquals(frames[0].status, 404);
 		assertEquals(frames[0].final, true);
-		
+
 		const content = new TextDecoder().decode(frames[0].data);
 		assertEquals(content, 'File not found');
 	} finally {
@@ -303,7 +303,7 @@ Deno.test('Static Content - returns 404 for non-existent file', async () => {
 
 Deno.test('Static Content - returns 404 when root not configured', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -328,7 +328,7 @@ Deno.test('Static Content - returns 404 when root not configured', async () => {
 
 Deno.test('Static Content - serves file from subdirectory', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -347,7 +347,7 @@ Deno.test('Static Content - serves file from subdirectory', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		assertEquals(frames[0].status, 200);
 		const content = new TextDecoder().decode(frames[0].data);
 		assertEquals(content, 'Nested file');
@@ -358,10 +358,10 @@ Deno.test('Static Content - serves file from subdirectory', async () => {
 
 Deno.test('Static Content - chunks large file', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		const chunkSize = 32768; // 32KB chunks
-		
+
 		worker.postMessage({
 			type: 'request',
 			id: 'req-10',
@@ -377,19 +377,19 @@ Deno.test('Static Content - chunks large file', async () => {
 		});
 
 		const frames = await collectFrames(worker, 2000);
-		
+
 		// First frame should have headers
 		assertEquals(frames[0].type, 'frame');
 		assertEquals(frames[0].mode, 'response');
 		assertEquals(frames[0].status, 200);
-		assertEquals(frames[0].headers['Content-Length'], '102400');
-		assertEquals(frames[0].headers['Accept-Ranges'], 'bytes');
+		assertEquals(frames[0].headers['content-length'], '102400');
+		assertEquals(frames[0].headers['accept-ranges'], 'bytes');
 		assertEquals(frames[0].data, null);
 		assertEquals(frames[0].keepAlive, false);
-		
+
 		// Should have multiple data frames
 		assert(frames.length > 2, 'Should have multiple frames for large file');
-		
+
 		// Collect all data
 		const allData = [];
 		for (let i = 1; i < frames.length; i++) {
@@ -397,10 +397,10 @@ Deno.test('Static Content - chunks large file', async () => {
 				allData.push(...frames[i].data);
 			}
 		}
-		
+
 		// Verify total size
 		assertEquals(allData.length, 100 * 1024);
-		
+
 		// Verify last frame is marked final
 		const lastFrame = frames[frames.length - 1];
 		assertEquals(lastFrame.final, true);
@@ -411,7 +411,7 @@ Deno.test('Static Content - chunks large file', async () => {
 
 Deno.test('Static Content - handles Range request', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -432,12 +432,12 @@ Deno.test('Static Content - handles Range request', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		// First frame has headers
 		assertEquals(frames[0].status, 206);  // Partial Content
 		assertEquals(frames[0].headers['Content-Range'], 'bytes 0-4/13');
-		assertEquals(frames[0].headers['Content-Length'], '5');
-		
+		assertEquals(frames[0].headers['content-length'], '5');
+
 		// Collect data from all frames
 		const allData = [];
 		for (const frame of frames) {
@@ -445,7 +445,7 @@ Deno.test('Static Content - handles Range request', async () => {
 				allData.push(...frame.data);
 			}
 		}
-		
+
 		const content = new TextDecoder().decode(new Uint8Array(allData));
 		assertEquals(content, 'Hello');
 	} finally {
@@ -455,7 +455,7 @@ Deno.test('Static Content - handles Range request', async () => {
 
 Deno.test('Static Content - handles Range request with open end', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -476,17 +476,17 @@ Deno.test('Static Content - handles Range request with open end', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		assertEquals(frames[0].status, 206);
 		assertEquals(frames[0].headers['Content-Range'], 'bytes 7-12/13');
-		
+
 		const allData = [];
 		for (const frame of frames) {
 			if (frame.data) {
 				allData.push(...frame.data);
 			}
 		}
-		
+
 		const content = new TextDecoder().decode(new Uint8Array(allData));
 		assertEquals(content, 'World!');
 	} finally {
@@ -496,7 +496,7 @@ Deno.test('Static Content - handles Range request with open end', async () => {
 
 Deno.test('Static Content - returns 416 for invalid Range', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -515,7 +515,7 @@ Deno.test('Static Content - returns 416 for invalid Range', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		assertEquals(frames[0].status, 416);  // Range Not Satisfiable
 		assertEquals(frames[0].headers['Content-Range'], 'bytes */13');
 		assertEquals(frames[0].final, true);
@@ -526,7 +526,7 @@ Deno.test('Static Content - returns 416 for invalid Range', async () => {
 
 Deno.test('Static Content - returns 416 for malformed Range header', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -553,10 +553,10 @@ Deno.test('Static Content - returns 416 for malformed Range header', async () =>
 
 Deno.test('Static Content - chunks large Range request', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		const chunkSize = 16384; // 16KB chunks
-		
+
 		worker.postMessage({
 			type: 'request',
 			id: 'req-15',
@@ -574,14 +574,14 @@ Deno.test('Static Content - chunks large Range request', async () => {
 		});
 
 		const frames = await collectFrames(worker, 2000);
-		
+
 		assertEquals(frames[0].status, 206);
 		assertEquals(frames[0].headers['Content-Range'], 'bytes 0-49999/102400');
-		assertEquals(frames[0].headers['Content-Length'], '50000');
-		
+		assertEquals(frames[0].headers['content-length'], '50000');
+
 		// Should have multiple frames
 		assert(frames.length > 2, 'Should chunk large range request');
-		
+
 		// Collect all data
 		const allData = [];
 		for (const frame of frames) {
@@ -589,9 +589,9 @@ Deno.test('Static Content - chunks large Range request', async () => {
 				allData.push(...frame.data);
 			}
 		}
-		
+
 		assertEquals(allData.length, 50000);
-		
+
 		// Verify last frame is final
 		assertEquals(frames[frames.length - 1].final, true);
 	} finally {
@@ -601,7 +601,7 @@ Deno.test('Static Content - chunks large Range request', async () => {
 
 Deno.test('Static Content - handles case-insensitive Range header', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -628,7 +628,7 @@ Deno.test('Static Content - handles case-insensitive Range header', async () => 
 
 Deno.test('Static Content - returns 404 for unreadable file', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -645,12 +645,12 @@ Deno.test('Static Content - returns 404 for unreadable file', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		// Should return 404, not an error message
 		assertEquals(frames[0].type, 'frame');
 		assertEquals(frames[0].status, 404);
 		assertEquals(frames[0].final, true);
-		
+
 		const content = new TextDecoder().decode(frames[0].data);
 		assertEquals(content, 'File not found');
 	} finally {
@@ -660,7 +660,7 @@ Deno.test('Static Content - returns 404 for unreadable file', async () => {
 
 Deno.test('Static Content - serves binary file correctly', async () => {
 	const worker = await createStaticWorker();
-	
+
 	try {
 		worker.postMessage({
 			type: 'request',
@@ -677,10 +677,10 @@ Deno.test('Static Content - serves binary file correctly', async () => {
 		});
 
 		const frames = await collectFrames(worker);
-		
+
 		assertEquals(frames[0].status, 200);
 		assertEquals(frames[0].data.length, 6);
-		
+
 		// Verify binary content
 		for (let i = 0; i < 6; i++) {
 			assertEquals(frames[0].data[i], i);

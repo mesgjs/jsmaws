@@ -130,7 +130,7 @@ Deno.test('IPCConnection - multiple frames to handler', async () => {
 	const frame1 = createFrame('req-123', {
 		mode: 'stream',
 		status: 200,
-		headers: { 'Content-Type': 'text/plain' },
+		headers: { 'content-type': 'text/plain' },
 		data: new TextEncoder().encode('chunk1'),
 		final: false,
 		keepAlive: true
