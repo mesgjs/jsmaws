@@ -157,8 +157,8 @@ Deno.test("Pool Reconfig - uses provided pools config when present", async () =>
 		httpPort=9090 httpsPort=9443
 		logging=[level=debug]
 		pools=[
-			fast=[minProcs=2 maxProcs=10 scaling=dynamic]
-			slow=[minProcs=1 maxProcs=5 scaling=ondemand]
+			fast=[minProcs=2 maxProcs=10]
+			slow=[minProcs=1 maxProcs=5]
 		]
 	)]`);
 
@@ -192,7 +192,7 @@ Deno.test("Pool Reconfig - adds new pools in parallel", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5 scaling=dynamic]]
+		pools=[poolA=[minProcs=1 maxProcs=5]]
 	)]`);
 	operator.initializeLogger();
 	operator.initializeRouter();
@@ -206,9 +206,9 @@ Deno.test("Pool Reconfig - adds new pools in parallel", async () => {
 	// Add poolB and poolC
 	const newConfig = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolB=[minProcs=2 maxProcs=10 scaling=dynamic]
-			poolC=[minProcs=1 maxProcs=1 scaling=static]
+			poolA=[minProcs=1 maxProcs=5]
+			poolB=[minProcs=2 maxProcs=10]
+			poolC=[minProcs=1 maxProcs=1]
 		]
 	)]`);
 
@@ -232,9 +232,9 @@ Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolB=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolC=[minProcs=1 maxProcs=5 scaling=dynamic]
+			poolA=[minProcs=1 maxProcs=5]
+			poolB=[minProcs=1 maxProcs=5]
+			poolC=[minProcs=1 maxProcs=5]
 		]
 	)]`);
 	operator.initializeLogger();
@@ -247,7 +247,7 @@ Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
 
 	// Remove poolB and poolC, keep poolA
 	const newConfig = parseSLID(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5 scaling=dynamic]]
+		pools=[poolA=[minProcs=1 maxProcs=5]]
 	)]`);
 
 	await operator.handleConfigUpdate(newConfig);
@@ -269,7 +269,7 @@ Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () 
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5 scaling=dynamic]]
+		pools=[poolA=[minProcs=1 maxProcs=5]]
 	)]`);
 	operator.initializeLogger();
 	operator.initializeRouter();
@@ -284,7 +284,7 @@ Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () 
 
 	// Reconfigure poolA with different limits
 	const newConfig = parseSLID(`[(
-		pools=[poolA=[minProcs=2 maxProcs=10 scaling=dynamic]]
+		pools=[poolA=[minProcs=2 maxProcs=10]]
 	)]`);
 
 	await operator.handleConfigUpdate(newConfig);
@@ -309,8 +309,8 @@ Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolB=[minProcs=1 maxProcs=5 scaling=dynamic]
+			poolA=[minProcs=1 maxProcs=5]
+			poolB=[minProcs=1 maxProcs=5]
 		]
 	)]`);
 	operator.initializeLogger();
@@ -325,8 +325,8 @@ Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
 	// Reconfig: keep poolA (modified), remove poolB, add poolC
 	const newConfig = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=2 maxProcs=10 scaling=dynamic]
-			poolC=[minProcs=3 maxProcs=3 scaling=static]
+			poolA=[minProcs=2 maxProcs=10]
+			poolC=[minProcs=3 maxProcs=3]
 		]
 	)]`);
 
@@ -356,8 +356,8 @@ Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () =
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolB=[minProcs=1 maxProcs=5 scaling=dynamic]
+			poolA=[minProcs=1 maxProcs=5 maxWorkers=1]
+			poolB=[minProcs=1 maxProcs=5 maxWorkers=1]
 		]
 	)]`);
 	operator.initializeLogger();
@@ -367,16 +367,42 @@ Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () =
 	// Initialize pools
 	await operator.initializeProcessPools();
 
-	// Manually add affinity entries for both pools
-	operator.affinityMap.set('/app1.js', new Set(['poolA-1', 'poolA-2']));
-	operator.affinityMap.set('/app2.js', new Set(['poolB-1', 'poolB-2']));
-	operator.affinityMap.set('/app3.js', new Set(['poolA-3', 'poolB-3']));
+	// Get pool managers
+	const poolA = operator.poolManagers.get('poolA');
+	const poolB = operator.poolManagers.get('poolB');
 
+	// Get items from each pool to simulate affinity tracking
+	const itemA1 = await poolA.getAvailableItem();
+	const itemA2 = await poolA.getAvailableItem();
+	const itemA3 = await poolA.getAvailableItem();
+	const itemB1 = await poolB.getAvailableItem();
+	const itemB2 = await poolB.getAvailableItem();
+	const itemB3 = await poolB.getAvailableItem();
+
+	assert(itemA1);
+	assert(itemA2);
+	assert(itemA3);
+	assert(itemB1);
+	assert(itemB2);
+	assert(itemB3);
+
+	// Use updateAffinity to properly register shutdown subscriptions
+	operator.updateAffinity(itemA1, '/app1.js');
+	operator.updateAffinity(itemA2, '/app1.js');
+	operator.updateAffinity(itemA3, '/app3.js');
+	operator.updateAffinity(itemB1, '/app2.js');
+	operator.updateAffinity(itemB2, '/app2.js');
+	operator.updateAffinity(itemB3, '/app3.js');
+
+	// Verify affinity map was populated
 	assertEquals(operator.affinityMap.size, 3);
+	assertEquals(operator.affinityMap.get('/app1.js').size, 2);
+	assertEquals(operator.affinityMap.get('/app2.js').size, 2);
+	assertEquals(operator.affinityMap.get('/app3.js').size, 2);
 
 	// Remove poolB
 	const newConfig = parseSLID(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5 scaling=dynamic]]
+		pools=[poolA=[minProcs=1 maxProcs=5 maxWorkers=1]]
 	)]`);
 
 	await operator.handleConfigUpdate(newConfig);
@@ -387,14 +413,14 @@ Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () =
 	assertExists(operator.affinityMap.get('/app1.js'));
 	assertEquals(operator.affinityMap.get('/app1.js').size, 2);
 
-	// /app2.js should be removed (only had poolB entries)
-	assertEquals(operator.affinityMap.get('/app2.js'), undefined);
+	// /app2.js should have no entries (only had poolB entries)
+	assertEquals(operator.affinityMap.get('/app2.js').size, 0);
 
 	// /app3.js should only have poolA entry (poolB entry removed)
 	assertExists(operator.affinityMap.get('/app3.js'));
 	assertEquals(operator.affinityMap.get('/app3.js').size, 1);
-	assert(operator.affinityMap.get('/app3.js').has('poolA-3'));
-	assert(!operator.affinityMap.get('/app3.js').has('poolB-3'));
+	assert(operator.affinityMap.get('/app3.js').has(itemA3.id));
+	assert(!operator.affinityMap.get('/app3.js').has(itemB3.id));
 
 	// Cleanup
 	for (const [poolName, poolManager] of operator.poolManagers) {
@@ -411,7 +437,7 @@ Deno.test("Pool Reconfig - respects shutdown timeout", async () => {
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
 		shutdownDelay=1
-		pools=[poolA=[minProcs=1 maxProcs=5 scaling=dynamic]]
+		pools=[poolA=[minProcs=1 maxProcs=5]]
 	)]`);
 	operator.initializeLogger();
 	operator.initializeRouter();
@@ -446,8 +472,8 @@ Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async ()
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
 		pools=[
-			@router=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolA=[minProcs=1 maxProcs=5 scaling=dynamic]
+			@router=[minProcs=1 maxProcs=5]
+			poolA=[minProcs=1 maxProcs=5]
 		]
 	)]`);
 	operator.initializeLogger();
@@ -462,8 +488,8 @@ Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async ()
 	// Reconfig with @router still present
 	const newConfig = parseSLID(`[(
 		pools=[
-			@router=[minProcs=2 maxProcs=10 scaling=dynamic]
-			poolB=[minProcs=1 maxProcs=5 scaling=dynamic]
+			@router=[minProcs=2 maxProcs=10]
+			poolB=[minProcs=1 maxProcs=5]
 		]
 	)]`);
 
@@ -489,7 +515,7 @@ Deno.test("Pool Reconfig - continues on pool creation failure", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5 scaling=dynamic]]
+		pools=[poolA=[minProcs=1 maxProcs=5]]
 	)]`);
 	operator.initializeLogger();
 	operator.initializeRouter();
@@ -511,9 +537,9 @@ Deno.test("Pool Reconfig - continues on pool creation failure", async () => {
 	// Try to add poolB (will fail) and poolC (should succeed)
 	const newConfig = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolB=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolC=[minProcs=1 maxProcs=5 scaling=dynamic]
+			poolA=[minProcs=1 maxProcs=5]
+			poolB=[minProcs=1 maxProcs=5]
+			poolC=[minProcs=1 maxProcs=5]
 		]
 	)]`);
 
@@ -536,8 +562,8 @@ Deno.test("Pool Reconfig - continues on pool reconfiguration failure", async () 
 	const operator = new OperatorProcess(config);
 	operator.configData = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=1 maxProcs=5 scaling=dynamic]
-			poolB=[minProcs=1 maxProcs=5 scaling=dynamic]
+			poolA=[minProcs=1 maxProcs=5]
+			poolB=[minProcs=1 maxProcs=5]
 		]
 	)]`);
 	operator.initializeLogger();
@@ -557,8 +583,8 @@ Deno.test("Pool Reconfig - continues on pool reconfiguration failure", async () 
 	// Try to reconfigure both pools (poolA will fail, poolB should succeed)
 	const newConfig = parseSLID(`[(
 		pools=[
-			poolA=[minProcs=2 maxProcs=10 scaling=dynamic]
-			poolB=[minProcs=2 maxProcs=10 scaling=dynamic]
+			poolA=[minProcs=2 maxProcs=10]
+			poolB=[minProcs=2 maxProcs=10]
 		]
 	)]`);
 

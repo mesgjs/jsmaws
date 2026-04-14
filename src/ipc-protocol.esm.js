@@ -13,6 +13,7 @@
  */
 
 import { NANOS, parseSLID } from './vendor.esm.js';
+import { Serializer } from './serializer.esm.js';
 
 // SOH character (ASCII 1) - Start of Heading
 const SOH = '\x01';
@@ -248,12 +249,37 @@ export function encodeMessage (message, binaryData = null) {
 		return slidBytes;
 	}
 
-	// Combine SLID message and binary data
 	const buffer = new Uint8Array(slidBytes.length + binaryData.length);
 	buffer.set(slidBytes, 0);
 	buffer.set(binaryData, slidBytes.length);
 
 	return buffer;
+}
+
+/**
+ * Write data in chunks to avoid pipe buffer issues
+ * Splits large writes into 1023-byte chunks for atomic pipe writes
+ * @param {Function} writeFn Write function (data) => Promise<void>
+ * @param {Uint8Array} data Data to write
+ * @returns {Promise<void>}
+ */
+export async function writeInChunks (writeFn, data) {
+	const CHUNK_SIZE = 1023; // Safe size for atomic pipe writes
+	
+	if (data.length <= CHUNK_SIZE) {
+		// Small enough to write directly
+		await writeFn(data);
+		return;
+	}
+	
+	// Split into chunks
+	let offset = 0;
+	while (offset < data.length) {
+		const end = Math.min(offset + CHUNK_SIZE, data.length);
+		const chunk = data.slice(offset, end);
+		await writeFn(chunk);
+		offset = end;
+	}
 }
 
 /**
@@ -364,6 +390,9 @@ export class IPCConnection {
 		this.messageHandlers = new Map(); // messageType -> handler function
 		this.monitoring = false;
 		this.onCapacityUpdate = null; // (capacity) => void
+
+		// Serializer for write operations
+		this.writeSerializer = new Serializer();
 	}
 
 	/**
@@ -395,6 +424,7 @@ export class IPCConnection {
 			const { done, value } = await this.conn.read();
 			if (done) {
 				if (this.buffer.length === 0) return null;
+				console.debug('Short read returned:', new TextDecoder().decode(this.buffer));
 				throw new Error(`Connection closed while reading binary data (need ${count}, have ${this.buffer.length})`);
 			}
 
@@ -576,7 +606,11 @@ export class IPCConnection {
 	 */
 	async writeMessage (message, binaryData = null) {
 		const encoded = encodeMessage(message, binaryData);
-		await this.conn.write(encoded);
+		// Serialize writes to make sure chunks from other writes can't get interleaved
+		// Preserves backpressure, and event-loop events for unrelated resources can still run
+		return this.writeSerializer.serialize(async () => {
+			await writeInChunks(this.conn.write.bind(this.conn), encoded);
+		});
 	}
 
 	/**
@@ -585,6 +619,7 @@ export class IPCConnection {
 	async close () {
 		if (!this.closed) {
 			this.closed = true;
+			this.writeSerializer.shutdown();
 			try {
 				await this.conn.close();
 			} catch (error) {

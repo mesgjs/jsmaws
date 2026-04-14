@@ -19,7 +19,7 @@ export async function createTestServer (configOverrides = {}) {
 		httpPort: 0, // Let OS assign port
 		httpsPort: 0,
 		hostname: 'localhost',
-		logging: { level: /* 'debug' */ 'info' },
+		logging: { level: /* 'debug' */ 'debug' },
 		...configOverrides
 	};
 
@@ -141,6 +141,8 @@ export async function waitFor (condition, timeoutMs = 5000, intervalMs = 100) {
 export async function connectWebSocket (url, timeoutMs = 5000) {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(url);
+		ws.binaryType = 'arraybuffer'; // Set binary type for consistent handling
+		
 		const timeoutId = setTimeout(() => {
 			ws.close();
 			reject(new Error(`WebSocket connection timeout after ${timeoutMs}ms`));
@@ -201,6 +203,8 @@ export async function readSSEEvents (response, maxEvents = 10, timeoutMs = 5000)
 		}
 	} finally {
 		reader.releaseLock();
+		// Cancel the response body stream to avoid resource leaks
+		await response.body.cancel();
 	}
 
 	return events;

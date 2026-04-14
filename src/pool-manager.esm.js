@@ -12,6 +12,8 @@
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
+import { Serializer } from './serializer.esm.js';
+
 /**
  * Pool item states
  */
@@ -149,7 +151,7 @@ export class PoolManager {
 		this.itemFactory = itemFactory; // Function to create new items
 		this.logger = logger; // Logger instance
 		this.items = new Map(); // itemId -> PoolItem
-		this.serialQueue = new Set();
+		this.serializer = new Serializer();
 		this.itemIdCounter = 0;
 		this.isShuttingDown = false;
 		this.scaleTimer = null;
@@ -168,7 +170,7 @@ export class PoolManager {
 	 */
 	canSpawnItem (auto = false) {
 		if (this.isShuttingDown) return false;
-		if (auto && this.serialQueue.size) return false;
+		if (auto && this.serializer.size) return false;
 		return this.items.size < this.config.maxProcs;
 	}
 
@@ -205,6 +207,7 @@ export class PoolManager {
 	 * @returns {PoolItem|null}
 	 */
 	async getAvailableItem (preferredIds = null) {
+		this.metrics.totalRequests++;
 		this.logger.debug(`Searching for available item in ${this.poolName} of ${this.items.size}`);
 		// Strategy 1: Check affinity items first if provided
 		if (preferredIds) {
@@ -256,7 +259,7 @@ export class PoolManager {
 			totalRecycled: this.metrics.totalRecycled,
 			totalRequests: this.metrics.totalRequests,
 			totalErrors: this.metrics.totalErrors,
-			queuedRequests: this.serialQueue.size,
+			queuedRequests: this.serializer.size,
 		};
 	}
 
@@ -406,38 +409,12 @@ export class PoolManager {
 	}
 
 	/**
-	 * Grant turns in FIFO order to items in the serialization queue
-	 */
-	async runSerialQueue () {
-		let entry;
-		// deno-lint-ignore no-cond-assign
-		while (entry = this.serialQueue.values().next().value) {
-			const { turn, callback } = entry;
-			if (this.isShuttingDown) {
-				turn.reject(new Error('Stopping'));
-			} else {
-				try {
-					const result = await callback();
-					turn.resolve(result);
-				} catch (error) {
-					turn.reject(error);
-				}
-			}
-			this.serialQueue.delete(entry);
-		}
-	}
-
-	/**
 	 * Serialize pool access.
 	 * Returns a promise with the return value of the async callback.
 	 * Rejects if shutting down.
 	 */
 	serialize (callback) {
-		if (this.isShuttingDown) return Promise.reject(new Error('Shutting down'));
-		const turn = Promise.withResolvers();
-		this.serialQueue.add({ turn, callback });
-		if (this.serialQueue.size === 1) queueMicrotask(() => this.runSerialQueue());
-		return turn.promise;
+		return this.serializer.serialize(callback);
 	}
 
 	/**
@@ -450,10 +427,12 @@ export class PoolManager {
 		// The process manager will handle processes in the case of a system-wide shutdown
 		const systemShutdown = globalThis.OperatorProcess?.instance?.isShuttingDown;
 
+		this.serializer.shutdown();
 		const shutdownPromises = [];
 		for (const [itemId, item] of this.items.entries()) {
 			const promise = (async () => {
 				try {
+					if (!systemShutdown && item.shutdownPromise) item.shutdownPromise.resolve();
 					if (item.isWorker) {
 						item.item.terminate();
 					} else if (!systemShutdown) {

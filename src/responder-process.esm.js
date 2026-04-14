@@ -287,9 +287,9 @@ class ResponderProcess extends ServiceProcess {
 	 * Handle message from applet worker
 	 */
 	async handleAppletMessage (id, data) {
-		const { type } = data;
+		const { type, final, data: binaryData } = data;
 
-		console.debug(`[${this.processId}] Received message from applet: type=${type}, id=${id}`);
+		console.debug(`[${this.processId}] Received message from applet: type ${type} id ${id} final ${final} data ${(binaryData?.length || '(none)')}`);
 
 		// Handle console output from bootstrap
 		if (type === 'console') {
@@ -549,6 +549,7 @@ class ResponderProcess extends ServiceProcess {
 		const chunkSize = frameData?.length || 0;
 
 		// Check if applet has sufficient credits
+		console.debug(`Bidi frame: size ${chunkSize} final ${final} (with ${conn.outboundCredits} credits)`);
 		if (conn.outboundCredits < chunkSize) {
 			// Insufficient credits - buffer the chunk
 			conn.outboundBuffer.push({ frameData, final, keepAlive });
@@ -573,6 +574,7 @@ class ResponderProcess extends ServiceProcess {
 			final,
 			...(keepAlive !== undefined && { keepAlive })
 		});
+		console.debug(`frameMsg: ${frameMsg}`);
 		await this.ipcConn.writeMessage(frameMsg, frameData);
 
 		// Update last activity

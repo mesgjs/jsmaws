@@ -144,7 +144,10 @@ export class OperatorProcess {
 		}
 
 		// Get available (reserved) process from pool
-		const poolItem = await poolManager.serialize(async () => await this.getProcessWithAffinity(poolManager, appletPath).catch(() => null));
+		const poolItem = await poolManager.serialize(async () => await this.getProcessWithAffinity(poolManager, appletPath)).catch((error) => {
+			this.logger.error(`Service process selection error: ${error.message}`);
+			return null;
+		});
 
 		if (!poolItem) {
 			this.logger.warn(`No available process in pool ${poolName}`);
@@ -754,7 +757,11 @@ export class OperatorProcess {
 		const appletMap = this.affinityMap.get(appletPath);
 		if (!appletMap.has(item.id)) {
 			appletMap.add(item.id);
-			item.onShutdown(() => appletMap.delete(item.id));
+			//console.debug(`Adding affinity ${item.id} for ${appletPath}`);
+			item.onShutdown(() => {
+				//console.debug(`Removing affinity ${item.id} for ${appletPath}`);
+				appletMap.delete(item.id);
+			});
 		}
 	}
 

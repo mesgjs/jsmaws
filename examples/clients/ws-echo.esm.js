@@ -25,6 +25,7 @@ async function testWebSocket() {
 				'Hello, WebSocket!',
 				'Testing echo...',
 				JSON.stringify({ type: 'test', value: 42 }),
+				'.'.repeat(1024),
 				'Final message'
 			];
 

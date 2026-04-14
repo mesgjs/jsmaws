@@ -6,14 +6,15 @@
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-console.log('Applet loaded');
+console.debug('Applet loaded');
 self.onmessage = (event) => {
 	const { type, id, headers, mode, data, initialCredits, maxChunkSize } = event.data;
-	console.log('Applet received message:', type);
+	const loggable = Object.fromEntries(Object.entries({ type, id, mode, initialCredits, maxChunkSize, dataSize: (data && data.length) ? data.length : undefined }).filter(([_k, v]) => v !== undefined));
+	console.debug(`Applet received message:`, loggable);
 
 	if (type === 'request' && headers?.upgrade?.toLowerCase() === 'websocket') {
 		// Accept WebSocket upgrade
-		console.log('Accepting WebSocket upgrade');
+		console.debug('Accepting WebSocket upgrade');
 		self.postMessage({
 			type: 'frame',
 			id,
@@ -36,7 +37,6 @@ self.onmessage = (event) => {
 	if (type === 'frame' && mode === 'bidi') {
 		// Check for protocol parameters (first frame from responder)
 		if (initialCredits !== undefined) {
-			console.log(`Bidi connection ready with ${initialCredits} credits, max chunk ${maxChunkSize}`);
 
 			// Send welcome message
 			const welcome = new TextEncoder().encode(JSON.stringify({
@@ -55,7 +55,7 @@ self.onmessage = (event) => {
 		}
 
 		// Received data from client - echo it back
-		if (data) {
+		if (data && data.length) {
 			// Echo the data
 			self.postMessage({
 				type: 'frame',

@@ -39,12 +39,13 @@ export const ProcessState = {
  * Managed service process
  */
 class ManagedProcess {
-	constructor (id, type, poolName, process, ipcConn, processManager) {
+	constructor (id, type, poolName, process, ipcConn, errConn, processManager) {
 		this.id = id;
 		this.type = type;
 		this.poolName = poolName;
 		this.process = process;
 		this.ipcConn = ipcConn;
+		this.errConn = errConn;
 		this.state = ProcessState.STARTING;
 		this.startTime = Date.now();
 		this.requestCount = 0;
@@ -220,7 +221,7 @@ export class ProcessManager {
 
 		// Create separate reader for stderr (console output only)
 		const stderrReader = process.stderr.getReader();
-		const stderrConn = new IPCConnection({
+		const errConn = new IPCConnection({
 			read: () => stderrReader.read(),
 			write: () => { throw new Error('Cannot write to stderr'); },
 			close: async () => {
@@ -233,7 +234,7 @@ export class ProcessManager {
 		});
 
 		// Set console output handler for stderr
-		stderrConn.setConsoleOutputHandler((text, logLevel) => {
+		errConn.setConsoleOutputHandler((text, logLevel) => {
 			const localText = text.replace(new RegExp('^\\[' + processId + '\\]\\s*'), ''), logger = this.logger;
 			logger.asComponent(processId, () => logger.log(logLevel, localText));
 		});
@@ -245,6 +246,7 @@ export class ProcessManager {
 			poolName,
 			process,
 			ipcConn,
+			errConn,
 			this
 		);
 
@@ -258,7 +260,7 @@ export class ProcessManager {
 		ipcConn.startMonitoring();
 
 		// Start monitoring process
-		this.monitorProcess(managedProc, stderrConn);
+		this.monitorProcess(managedProc, errConn);
 
 		// Initialize capacity from pool config
 		const maxWorkers = poolConfig.at('maxWorkers', 10);
@@ -275,95 +277,48 @@ export class ProcessManager {
 	}
 
 	/**
-	 * Handle applet console output
+	 * Get all tracked processes
 	 */
-	async onAppletOutput (processId, message, binaryData) {
-		const requestId = message.id;
-		const level = message.fields.at('level', 'log');
-		const content = (binaryData && binaryData.length) ? new TextDecoder().decode(binaryData) : '';
-		const logger = this.logger;
-
-		// Look up request context to get applet path
-		const context = globalThis.OperatorProcess?.instance?.requestContexts.get(requestId);
-		if (!context) {
-			logger.warn(`Console output for unknown request ${requestId}`);
-			return;
-		}
-
-		// Log with the applet's file component if available, otherwise use the request ID
-		const appFile = context.app?.split('/').pop();
-		const prefix = `[Applet:${appFile || requestId}]`;
-
-		// Log as responder at appropriate applet level
-		logger.asComponent(processId, () => logger.log(level, `${prefix} ${content}`));
+	getAllProcesses () {
+		return Array.from(this.processes.values());
 	}
 
 	/**
-		* Shutdown a service process (for PoolManager)
-		* @param {ManagedProcess} managedProc Process to shutdown
-		* @param {number} timeout Shutdown timeout in seconds
-		*/
-	async shutdownProcess (managedProc, timeout = 30) {
-		if (!managedProc || !managedProc.id) {
-			this.logger.warn('Invalid process provided to shutdownProcess');
-			return;
-		}
-
-		if (managedProc.state === ProcessState.STOPPING) return;
-
-		const processId = managedProc.id;
-		this.logger.info(`Shutting down process: ${processId}`);
-
-		managedProc.state = ProcessState.STOPPING;
-
-		try {
-			// Send shutdown signal
-			const shutdownMsg = createShutdown(timeout);
-			await managedProc.ipcConn.writeMessage(shutdownMsg);
-
-			// Wait for process to exit (with timeout)
-			const exitPromise = managedProc.process.status;
-			const timeoutPromise = Promise.withResolvers();
-			const timer = setTimeout(() => {
-				this.logger.warn(`Process ${processId} did not exit within ${timeout}s; forcing termination`);
-				managedProc.process.kill('SIGKILL');
-				timeoutPromise.resolve();
-			}, timeout * 1000);
-
-			exitPromise.then((status) => {
-				clearTimeout(timer);
-				this.logger.debug(`Process ${processId} exited with code ${status.code}`);
-				timeoutPromise.resolve();
-			});
-
-			await timeoutPromise.promise;
-			managedProc.ipcConn.close();
-		} catch (error) {
-			this.logger.error(`Error shutting down process ${processId}: ${error.message}`);
-		} finally {
-			// Clean up
-			this.removeProcess(processId);
-		}
+	 * Get process by ID
+	 */
+	getProcess (processId) {
+		return this.processes.get(processId);
 	}
 
 	/**
-	 * Send configuration update to process
+	 * Perform health check on all processes
 	 */
-	async sendConfigUpdate (managedProc) {
-		const configMsg = createConfigUpdate(this.config);
-		await managedProc.ipcConn.writeMessage(configMsg);
+	async healthCheck () {
+		const healthCheckMsg = createHealthCheck();
+
+		for (const [processId, proc] of this.processes) {
+			if (proc.state === ProcessState.DEAD) continue;
+
+			try {
+				await proc.ipcConn.writeMessage(healthCheckMsg);
+				proc.lastHealthCheck = Date.now();
+			} catch (error) {
+				this.logger.error(`Health check failed for ${processId}: ${error.message}`);
+				// Process will be marked dead by monitor
+			}
+		}
 	}
 
 	/**
 	 * Monitor process for errors and exit
 	 */
-	async monitorProcess (managedProc, stderrConn) {
+	async monitorProcess (managedProc, errConn) {
 		// Monitor stderr for console output
 		(async () => {
 			try {
 				// Keep reading from stderr (will only get console output)
 				while (true) {
-					const result = await stderrConn.readMessage();
+					const result = await errConn.readMessage();
 					if (!result) break; // Stream closed
 
 					// Stderr should never have IPC messages, but if it does, log error
@@ -394,6 +349,30 @@ export class ProcessManager {
 	}
 
 	/**
+	 * Handle applet console output
+	 */
+	async onAppletOutput (processId, message, binaryData) {
+		const requestId = message.id;
+		const level = message.fields.at('level', 'log');
+		const content = (binaryData && binaryData.length) ? new TextDecoder().decode(binaryData) : '';
+		const logger = this.logger;
+
+		// Look up request context to get applet path
+		const context = globalThis.OperatorProcess?.instance?.requestContexts.get(requestId);
+		if (!context) {
+			logger.warn(`Console output for unknown request ${requestId}`);
+			return;
+		}
+
+		// Log with the applet's file component if available, otherwise use the request ID
+		const appFile = context.app?.split('/').pop();
+		const prefix = `[Applet:${appFile || requestId}]`;
+
+		// Log as responder at appropriate applet level
+		logger.asComponent(processId, () => logger.log(level, `${prefix} ${content}`));
+	}
+
+	/**
 	 * Remove process from tracking
 	 */
 	removeProcess (processId) {
@@ -405,22 +384,11 @@ export class ProcessManager {
 	}
 
 	/**
-	 * Perform health check on all processes
+	 * Send configuration update to process
 	 */
-	async healthCheck () {
-		const healthCheckMsg = createHealthCheck();
-
-		for (const [processId, proc] of this.processes) {
-			if (proc.state === ProcessState.DEAD) continue;
-
-			try {
-				await proc.ipcConn.writeMessage(healthCheckMsg);
-				proc.lastHealthCheck = Date.now();
-			} catch (error) {
-				this.logger.error(`Health check failed for ${processId}: ${error.message}`);
-				// Process will be marked dead by monitor
-			}
-		}
+	async sendConfigUpdate (managedProc) {
+		const configMsg = createConfigUpdate(this.config);
+		await managedProc.ipcConn.writeMessage(configMsg);
 	}
 
 	/**
@@ -446,16 +414,50 @@ export class ProcessManager {
 	}
 
 	/**
-	 * Get process by ID
+	 * Shutdown a service process (for PoolManager)
+	 * @param {ManagedProcess} managedProc Process to shutdown
+	 * @param {number} timeout Shutdown timeout in seconds
 	 */
-	getProcess (processId) {
-		return this.processes.get(processId);
-	}
+	async shutdownProcess (managedProc, timeout = 30) {
+		if (!managedProc || !managedProc.id) {
+			this.logger.warn('Invalid process provided to shutdownProcess');
+			return;
+		}
 
-	/**
-	 * Get all tracked processes
-	 */
-	getAllProcesses () {
-		return Array.from(this.processes.values());
+		if (managedProc.state === ProcessState.STOPPING) return;
+
+		const processId = managedProc.id;
+		this.logger.info(`Shutting down process: ${processId}`);
+
+		managedProc.state = ProcessState.STOPPING;
+
+		try {
+			// Send shutdown signal
+			const shutdownMsg = createShutdown(timeout);
+			await managedProc.ipcConn.writeMessage(shutdownMsg);
+
+			// Wait for process to exit (with timeout)
+			const timeoutPromise = Promise.withResolvers();
+			const timer = setTimeout(() => {
+				this.logger.warn(`Process ${processId} did not exit within ${timeout}s; forcing termination`);
+				managedProc.process.kill('SIGKILL');
+				timeoutPromise.resolve();
+			}, timeout * 1000);
+
+			const exitPromise = managedProc.process.status.then((status) => {
+				clearTimeout(timer);
+				this.logger.debug(`Process ${processId} exited with code ${status.code}`);
+				timeoutPromise.resolve();
+			});
+
+			await exitPromise;
+			managedProc.ipcConn.close();
+			managedProc.errConn.close();
+		} catch (error) {
+			this.logger.error(`Error shutting down process ${processId}: ${error.message}`);
+		} finally {
+			// Clean up
+			this.removeProcess(processId);
+		}
 	}
 }
