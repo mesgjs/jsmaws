@@ -5,10 +5,10 @@
  * This process:
  * - Runs with dropped privileges (unprivileged uid/gid)
  * - Spawns applet workers on-demand to handle requests
- * - Receives request messages from operator via IPC
- * - Sends response messages back to operator via IPC
- * - Implements tiered response chunking with flow-control
- * - Reports capacity and backpressure state for load balancing
+ * - Receives request messages from operator via PipeTransport req-N channels
+ * - Sends response messages back to operator via the same req-N channels
+ * - Implements tiered response chunking
+ * - Reports capacity state for load balancing
  * - Supports streaming, SSE, and WebSocket connections
  *
  * Architecture:
@@ -16,20 +16,15 @@
  * - One-shot workers for regular requests (security/isolation)
  * - Long-lived workers for streaming/WebSocket connections
  * - Process-level module caching (automatic via Deno)
- * - Process-level backpressure detection and signaling
+ * - Responder ↔ Applet communication via PostMessageTransport (PolyTransport)
+ * - Operator ↔ Responder communication via PipeTransport (PolyTransport)
  *
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { NANOS } from './vendor.esm.js';
-import {
-	MessageType,
-	createFrame,
-	createError,
-	createAppletOutput,
-	validateMessage,
-} from './ipc-protocol.esm.js';
+import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
 import { ServiceProcess } from './service-process.esm.js';
+import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
 
 /**
  * Responder process class
@@ -42,38 +37,49 @@ class ResponderProcess extends ServiceProcess {
 		this.poolName = poolName;
 
 		// Track active requests and workers
-		this.activeRequests = new Map(); // requestId -> { worker, timeout, isStreaming }
+		this.activeRequests = new Map(); // requestId -> { worker, transport, timeout, isStreaming }
 		this.requestCount = 0;
 		this.maxConcurrentRequests = 10; // Will be set from pool config
-
-		// Track bidirectional connections
-		this.bidiConnections = new Map(); // id → connection state
 
 		// Response chunking configuration
 		this.chunkingConfig = {
 			maxDirectWrite: 65536, // 64KB
 			autoChunkThresh: 10485760, // 10MB
 			chunkSize: 65536, // 64KB
-			bpWriteTimeThresh: 50, // ms - write time indicating backpressure
 		};
-
-		// Backpressure detection (based on write timing)
-		this.isBackpressured = false;
-		this.recentWriteTimes = []; // Track recent write durations
-		this.maxRecentWrites = 5;
 	}
 
 	/**
-	 * Backpressure-context-aware available workers
+	 * Available workers (concurrent request slots remaining)
 	 */
-	bpAvailWorkers () {
-		return this.isBackpressured ? 0 : (this.maxConcurrentRequests - this.activeRequests.size);
+	get availWorkers () {
+		return this.maxConcurrentRequests - this.activeRequests.size;
 	}
 
 	/**
-	 * Handle configuration update from operator
+	 * Cleanup request resources.
+	 * Centralized cleanup for all request-related state.
 	 */
-	async handleConfigUpdate (fields) {
+	cleanupRequest (id) {
+		const requestInfo = this.activeRequests.get(id);
+		if (requestInfo) {
+			clearTimeout(requestInfo.timeout);           // Request timeout
+			clearTimeout(requestInfo.idleTimeout);       // Idle timeout
+			clearTimeout(requestInfo.connectionTimeout); // Connection timeout
+			// Stop the PostMessageTransport (terminates worker)
+			requestInfo.transport?.stop({ discard: true }).catch(() => {});
+			requestInfo.worker?.terminate();
+		}
+
+		// Clean up all request-related state
+		this.activeRequests.delete(id);
+	}
+
+	/**
+	 * Handle configuration update from operator.
+	 * @param {string} configJson - JSON-encoded configuration
+	 */
+	async handleConfigUpdate (configJson) {
 		console.info(`[${this.processId}] Received configuration update`);
 
 		// Configuration instance is already updated by ServiceProcess base class
@@ -85,7 +91,6 @@ class ResponderProcess extends ServiceProcess {
 			maxDirectWrite: chunking.maxDirectWrite,
 			autoChunkThresh: chunking.autoChunkThresh,
 			chunkSize: chunking.chunkSize,
-			bpWriteTimeThresh: chunking.bpWriteTimeThresh,
 		};
 
 		// Update max concurrent requests from pool config
@@ -100,10 +105,398 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Spawn applet worker for request handling
-	 * Uses bootstrap module to lock down environment before applet loads
+	 * Handle health check from operator.
+	 * @param {object} msg - PolyTransport message (from control channel)
 	 */
-	spawnAppletWorker (appletPath) {
+	async handleHealthCheck (msg) {
+		console.debug(`[${this.processId}] Health check received`);
+
+		// Send health response via control channel
+		const availableWorkers = this.availWorkers;
+		await this.controlChannel.write('health-response', JSON.stringify({
+			status: 'ok',
+			availableWorkers,
+			totalWorkers: this.maxConcurrentRequests,
+			activeRequests: this.activeRequests.size,
+			uptime: Math.floor(performance.now() / 1000),
+		}));
+
+		// Also send capacity update
+		await this.sendCapacityUpdate(availableWorkers, this.maxConcurrentRequests);
+	}
+
+	/**
+	 * Handle an accepted req-N channel.
+	 * Sets up message types and starts the request read loop.
+	 * @param {object} reqChannel - PolyTransport channel
+	 */
+	async handleReqChannel (reqChannel) {
+		await reqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
+
+		// Loop 1: 'req' messages (dechunked by default — full message reassembly)
+		// 'req' payload is JSON text; decode via VirtualBuffer.decode()
+		(async () => {
+			while (true) {
+				const msg = await reqChannel.read({ only: 'req' });
+				if (!msg) break;
+				await msg.process(async () => {
+					await this.#handleWebRequest(reqChannel, msg.data.decode());
+				});
+			}
+		})();
+
+		// Loop 2: 'bidi-frame' relay (dechunk: false — forward chunks verbatim)
+		// bidi-frame carries NestedTransport byte-stream traffic; chunks must not be
+		// reassembled before forwarding to the applet's bidi channel.
+		(async () => {
+			while (true) {
+				const msg = await reqChannel.read({ only: 'bidi-frame', dechunk: false });
+				if (!msg) break;
+				await msg.process(async () => {
+					await this.#handleOperatorBidiFrame(reqChannel, msg.data);
+				});
+			}
+		})();
+	}
+
+	/**
+	 * Handle shutdown request from operator.
+	 * @param {object} msg - PolyTransport message (may be null for signal-triggered shutdown)
+	 */
+	async handleShutdown (msg) {
+		const timeout = msg ? (JSON.parse(msg.text ?? '{}').timeout ?? 30) : 30;
+		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
+
+		this.isShuttingDown = true;
+
+		// Wait for active requests to complete (with timeout)
+		const shutdownStart = Date.now();
+		while (this.activeRequests.size > 0 && (Date.now() - shutdownStart) < timeout * 1000) {
+			console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active requests...`);
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+		}
+
+		// Terminate any remaining workers and error-out their connections.
+		const tasks = [];
+		for (const [id, requestInfo] of this.activeRequests.entries()) {
+			console.debug(`[${this.processId}] Terminating worker for request ${id}`);
+			clearTimeout(requestInfo.timeout);
+			requestInfo.transport?.stop({ discard: true }).catch(() => {});
+			requestInfo.worker?.terminate();
+			if (requestInfo.reqChannel) {
+				tasks.push(
+					this.#sendErrorResponse(requestInfo.reqChannel, id, 503, 'Service Unavailable').catch(() => {})
+				);
+			}
+		}
+		if (tasks.length) await Promise.all(tasks);
+		this.activeRequests.clear();
+
+		// Log shutdown complete BEFORE stopping transport (which closes stdout)
+		console.info(`[${this.processId}] Shutdown complete`);
+
+		// Stop transport (graceful drain)
+		if (this.transport) {
+			await this.transport.stop();
+		}
+
+		Deno.exit(0);
+	}
+
+	/**
+	 * Log startup information after configuration is loaded.
+	 */
+	async onStarted () {
+		console.log(`[${this.processId}] Pool: ${this.poolName}, max concurrent: ${this.maxConcurrentRequests}`);
+	}
+
+	/**
+	 * Handle inbound bidi-frame from operator (client → applet).
+	 * Forwards to the applet's bidi channel.
+	 * @param {object} reqChannel - The req-N channel the frame arrived on
+	 * @param {Uint8Array|undefined} frameData - Frame data
+	 */
+	async #handleOperatorBidiFrame (reqChannel, frameData) {
+		// Find the active request associated with this req-N channel
+		// We look up by reqChannel reference
+		let requestInfo = null;
+		for (const info of this.activeRequests.values()) {
+			if (info.reqChannel === reqChannel) {
+				requestInfo = info;
+				break;
+			}
+		}
+
+		if (!requestInfo) {
+			console.debug(`[${this.processId}] Bidi frame for unknown/closed request on ${reqChannel.name}`);
+			return;
+		}
+
+		const { appletBidiChannel } = requestInfo;
+		if (!appletBidiChannel) {
+			console.warn(`[${this.processId}] Bidi frame for non-bidi request on ${reqChannel.name}`);
+			return;
+		}
+
+		// Forward to applet's bidi channel (dechunk: false relay)
+		await appletBidiChannel.write('bidi-frame', frameData, { eom: false });
+	}
+
+	/**
+	 * Handle response metadata ('res' message) from applet.
+	 * Sends the response metadata to the operator via the req-N channel.
+	 * @param {string|number} id - Request ID
+	 * @param {string} resJson - JSON-encoded response metadata
+	 * @param {object} requestInfo - Active request info
+	 */
+	async #handleAppletResponseMetadata (id, resJson, requestInfo) {
+		const { status, headers, mode, keepAlive } = JSON.parse(resJson);
+
+		console.debug(`[${this.processId}] Response metadata: status=${status}, mode=${mode}, keepAlive=${keepAlive}`);
+
+		// Determine effective response type
+		const effectiveType = (mode === 'response' && keepAlive) ? 'stream' : (mode || 'response');
+
+		// Check if pool allows this response type
+		const allowedTypes = this.config.getAllowedResponseTypes(this.poolName);
+		if (!allowedTypes.has(effectiveType)) {
+			console.error(
+				`[${this.processId}] Pool "${this.poolName}" does not allow ` +
+				`response type "${effectiveType}" (mode=${mode}, keepAlive=${keepAlive})`
+			);
+			this.cleanupRequest(id);
+			await this.#sendErrorResponse(requestInfo.reqChannel, id, 500, 'Internal Server Error');
+			return;
+		}
+
+		// Enforce policy: status 101 (bidi upgrade) must not have data
+		if (status === 101) {
+			// Bidi upgrade — initialize bidi connection
+			requestInfo.mode = 'bidi';
+			requestInfo.keepAlive = true;
+		} else {
+			requestInfo.mode = mode || 'response';
+			requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
+		}
+
+		// Start connection timeout for long-lived connections
+		if (requestInfo.keepAlive && requestInfo.timeouts.conTimeout > 0) {
+			requestInfo.connectionTimeout = this.#startConnectionTimeout(
+				id,
+				requestInfo.timeouts.conTimeout
+			);
+		}
+
+		// Send response metadata to operator via req-N channel
+		const availableWorkers = this.availWorkers;
+		const resPayload = JSON.stringify({
+			id,
+			mode: requestInfo.mode,
+			status,
+			headers,
+			keepAlive: requestInfo.keepAlive,
+			availableWorkers,
+			totalWorkers: this.maxConcurrentRequests,
+		});
+
+		console.debug(`[${this.processId}] Sending response metadata to operator...`);
+		await requestInfo.reqChannel.write('res', resPayload);
+		console.debug(`[${this.processId}] Response metadata sent successfully`);
+	}
+
+	/**
+	 * Handle error response ('res-error' message) from applet.
+	 * @param {string|number} id - Request ID
+	 * @param {string} errorJson - JSON-encoded error
+	 * @param {object} requestInfo - Active request info
+	 */
+	async #handleAppletResError (id, errorJson, requestInfo) {
+		let errorData;
+		try {
+			errorData = JSON.parse(errorJson);
+		} catch (_) {
+			errorData = { error: errorJson };
+		}
+		console.error(`[${this.processId}] Applet error for request ${id}:`, errorData.error);
+		if (errorData.stack) console.error(errorData.stack);
+
+		this.cleanupRequest(id);
+		await this.#sendErrorResponse(requestInfo.reqChannel, id, 500, 'Internal Server Error');
+	}
+
+	/**
+	 * Handle web request from operator (via req-N channel).
+	 * @param {object} reqChannel - The req-N channel the request arrived on
+	 * @param {string} requestJson - JSON-encoded request
+	 */
+	async #handleWebRequest (reqChannel, requestJson) {
+		let requestData;
+		try {
+			requestData = JSON.parse(requestJson);
+		} catch (err) {
+			console.error(`[${this.processId}] Invalid request JSON:`, err);
+			await this.#sendErrorResponse(reqChannel, null, 400, 'Bad Request');
+			return;
+		}
+
+		const { id, method, url, app, root, headers, routeParams, routeTail, routeSpec, body } = requestData;
+
+		try {
+			// Check if we're at capacity
+			if (this.activeRequests.size >= this.maxConcurrentRequests) {
+				console.warn(`[${this.processId}] At capacity (${this.activeRequests.size}/${this.maxConcurrentRequests}), returning 503`);
+				await this.#sendErrorResponse(reqChannel, id, 503, 'Service Unavailable');
+				return;
+			}
+
+			const urlObj = new URL(url);
+			console.log(`[${this.processId}] Request: ${method?.toUpperCase()} ${urlObj.pathname} -> ${app}`);
+
+			// Resolve timeout configuration with hierarchy: route > pool > global
+			const timeouts = this.config.getTimeoutConfig(this.poolName, routeSpec);
+			const { reqTimeout, idleTimeout, conTimeout } = timeouts;
+
+			console.debug(`[${this.processId}] Timeouts: req=${reqTimeout}s, idle=${idleTimeout}s, con=${conTimeout}s`);
+
+			// Determine request mode from headers (bidi = WebSocket upgrade)
+			const upgradeHeader = headers?.['upgrade'];
+			const mode = (upgradeHeader?.toLowerCase() === 'websocket') ? 'bidi' : 'response';
+
+			// Spawn applet worker and establish PostMessageTransport
+			const { worker, transport, c2cChannel, appletChannel, appletBidiChannel } =
+				await this.#spawnAppletWorker(app, mode);
+
+			// Set up request timeout
+			const timeout = reqTimeout ? setTimeout(() => {
+				if (this.activeRequests.has(id)) {
+					console.warn(`[${this.processId}] Request ${id} timed out after ${reqTimeout}s`);
+					this.cleanupRequest(id);
+					this.#sendErrorResponse(reqChannel, id, 504, 'Gateway Timeout').catch(console.error);
+				}
+			}, reqTimeout * 1000) : null;
+
+			// Track active request
+			this.activeRequests.set(id, {
+				reqChannel,
+				worker,
+				transport,
+				appletChannel,
+				appletBidiChannel,
+				timeout,
+				isStreaming: false,
+				timeouts: { reqTimeout, idleTimeout, conTimeout },
+				routeSpec,
+				mode,
+			});
+
+			// Forward applet C2C console output to operator via the req-N channel
+			// (con-* message types, not the C2C channel — associates output with the request)
+			this.#startC2CForwarding(id, c2cChannel, reqChannel);
+
+			// Handle worker errors
+			worker.onerror = (error) => {
+				console.error(`[${this.processId}] Worker error for request ${id}:`, error);
+				this.cleanupRequest(id);
+				this.#sendErrorResponse(reqChannel, id, 500, 'Internal Server Error');
+			};
+
+			// Check for built-in applets and prepare configuration
+			let builtinConfig = null;
+			if (app === '@static') {
+				const mimeTypes = this.config.mimeTypes || {};
+				builtinConfig = {
+					root,
+					mimeTypes: mimeTypes.toSLID(), // Serialize NANOS to SLID for worker
+				};
+			}
+
+			// Build request payload
+			const requestPayload = {
+				method: method?.toUpperCase(),
+				url,
+				headers: headers || {},
+				routeParams: routeParams || {},
+				routeTail: routeTail || '',
+				body,
+				timeouts: {
+					request: reqTimeout,
+					idle: idleTimeout,
+					connection: conTimeout,
+				},
+				maxChunkSize: this.chunkingConfig.chunkSize,
+			};
+
+			// Add config for built-in applets only
+			if (builtinConfig) {
+				requestPayload.config = builtinConfig;
+			}
+
+			// Send request to applet via the 'applet' channel
+			await appletChannel.write('req', JSON.stringify(requestPayload));
+
+			// Start reading response from applet
+			this.#startAppletResponseReading(id, appletChannel, appletBidiChannel);
+
+		} catch (error) {
+			console.error(`[${this.processId}] Request handling error:`, error);
+			await this.#sendErrorResponse(reqChannel, id, 500, 'Internal Server Error');
+		}
+	}
+
+	/**
+	 * Relay a res-frame chunk from the applet to the operator via req-N channel.
+	 * PolyTransport enforces maxChunkBytes at the transport level, so no manual
+	 * size check is needed here.
+	 * @param {string|number} id - Request ID
+	 * @param {Uint8Array|undefined} data - Frame data
+	 * @param {boolean} eom - End-of-message flag
+	 * @param {object} requestInfo - Active request info
+	 */
+	async #relayResFrame (id, data, eom, requestInfo) {
+		await requestInfo.reqChannel.write('res-frame', data, { eom: eom ?? false });
+	}
+
+	/**
+	 * Send end-of-stream signal to operator (zero-data final res-frame).
+	 * @param {string|number} id - Request ID
+	 */
+	async #sendEndOfStream (id) {
+		const requestInfo = this.activeRequests.get(id);
+		if (!requestInfo) return;
+
+		// Send zero-data res-frame with eom:true = end-of-stream signal
+		await requestInfo.reqChannel.write('res-frame', null);
+
+		if (!requestInfo.keepAlive) {
+			this.cleanupRequest(id);
+		} else if (requestInfo.keepAlive && requestInfo.timeouts.idleTimeout > 0) {
+			requestInfo.idleTimeout = this.#startIdleTimeout(id, requestInfo.timeouts.idleTimeout);
+		}
+	}
+
+	/**
+	 * Send error response to operator via req-N channel.
+	 * @param {object} reqChannel - The req-N channel to write to
+	 * @param {string|number|null} id - Request ID (may be null for early errors)
+	 * @param {number} status - HTTP status code
+	 * @param {string} message - Error message
+	 */
+	async #sendErrorResponse (reqChannel, id, status, message) {
+		if (!reqChannel) return;
+		await reqChannel.write('res-error', JSON.stringify({ id, status, error: message }));
+	}
+
+	/**
+	 * Spawn applet worker and establish PostMessageTransport.
+	 * Returns { worker, transport, appletChannel, c2cChannel }.
+	 * The caller is responsible for setting up the bootstrap channel and
+	 * forwarding C2C output.
+	 *
+	 * @param {string} appletPath - Applet path or built-in alias (e.g. '@static')
+	 * @param {string} mode - Request mode ('response', 'stream', 'bidi')
+	 * @returns {Promise<{ worker, transport, bootstrapChannel, appletChannel, appletBidiChannel }>}
+	 */
+	async #spawnAppletWorker (appletPath, mode) {
 		// Determine permissions based on applet path
 		let readAny = false, keepDeno = false;
 		switch (appletPath) {
@@ -128,320 +521,106 @@ class ResponderProcess extends ServiceProcess {
 			env: false,
 		};
 
-		// Create Web Worker with bootstrap module (not applet directly)
+		// Create Web Worker with bootstrap module
 		const worker = new Worker(bootstrapURL.href, {
 			type: 'module',
 			deno: { permissions },
 		});
 
-		if (worker) {
-			console.debug(`[${this.processId}] Created worker with bootstrap for applet "${appletPath}"`);
+		console.debug(`[${this.processId}] Created worker with bootstrap for applet "${appletPath}"`);
 
-			// Send bootstrap message with applet path
-			worker.postMessage({
-				type: 'bootstrap',
-				appletPath: appletHref,
-				keepDeno,
-			});
-		} else {
-			console.error(`[${this.processId}] Failed to create worker for applet "${appletPath}"`);
-		}
-
-		return worker;
-	}
-
-	/**
-	 * Get message handlers for responder-specific messages
-	 */
-	getMessageHandlers () {
-		const baseHandlers = super.getMessageHandlers();
-
-		// Add responder-specific handlers
-		baseHandlers.set(MessageType.WEB_REQUEST, async (id, fields, binaryData) => {
-			await this.handleWebRequest(id, fields, binaryData);
+		// Establish PostMessageTransport with the worker
+		const c2cSymbol = Symbol('c2c');
+		const transport = new PostMessageTransport({
+			gateway: worker,
+			c2cSymbol,
+			maxChunkBytes: this.chunkingConfig.chunkSize,
 		});
 
-		baseHandlers.set(MessageType.WEB_FRAME, async (id, fields, binaryData) => {
-			// Handle incoming bidi frames from operator (client to applet)
-			const final = fields.at('final', false);
-			await this.handleOperatorBidiFrame(id, binaryData, final);
+		// Accept all channels (responder initiates)
+		transport.addEventListener('newChannel', (event) => {
+			event.accept();
 		});
 
-		return baseHandlers;
+		await transport.start();
+
+		// Get the C2C channel (applet console output)
+		const c2cChannel = transport.getChannel(c2cSymbol);
+
+		// Send setup instructions to bootstrap via the private 'bootstrap' channel
+		const bootstrapChannel = await transport.requestChannel('bootstrap');
+		await bootstrapChannel.addMessageTypes(['setup']);
+		await bootstrapChannel.write('setup', JSON.stringify({
+			appletPath: appletHref,
+			mode,
+			keepDeno,
+		}));
+
+		// Set up the applet communication channel
+		const appletChannel = await transport.requestChannel('applet');
+		await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+
+		// For bidi requests: set up the bidi relay channel
+		let appletBidiChannel = null;
+		if (mode === 'bidi') {
+			appletBidiChannel = await transport.requestChannel('bidi');
+			await appletBidiChannel.addMessageTypes(['bidi-frame']);
+		}
+
+		return { worker, transport, c2cChannel, appletChannel, appletBidiChannel };
 	}
 
 	/**
-	 * Handle web request from operator
+	 * Start forwarding applet C2C console output to operator via the req-N channel.
+	 * C2C bare names (trace/debug/info/warn/error) are forwarded with 'con-' prefix
+	 * to avoid collision with other message types on the req-N channel.
+	 * @param {string|number} id - Request ID
+	 * @param {object} c2cChannel - The C2C channel from the applet's PostMessageTransport
+	 * @param {object} reqChannel - The req-N channel to forward to
 	 */
-	async handleWebRequest (id, fields, binaryData) {
-		try {
-			// Validate required fields
-			validateMessage({ fields }, ['method', 'url', 'app', 'pool']);
-
-			// Check if we're at capacity
-			if (this.activeRequests.size >= this.maxConcurrentRequests) {
-				console.warn(`[${this.processId}] At capacity (${this.activeRequests.size}/${this.maxConcurrentRequests}), returning 503`);
-				await this.sendErrorResponse(id, 503, 'Service Unavailable');
-				return;
+	#startC2CForwarding (id, c2cChannel, reqChannel) {
+		(async () => {
+			while (true) {
+				const msg = await c2cChannel.read({ decode: true });
+				if (!msg) break;
+				await msg.process(() => {
+					if (!this.activeRequests.has(id)) return; // Request already cleaned up
+					// Forward with 'con-' prefix: 'trace' → 'con-trace', etc.
+					// Console messages may have no data — forward null in that case.
+					const text = msg.text ?? null;
+					reqChannel.write(`con-${msg.messageType}`, text).catch((err) => {
+						console.warn(`[${this.processId}] Failed to forward con-${msg.messageType}:`, err);
+					});
+				});
 			}
+		})();
+	}
 
-			const method = fields.at('method');
-			const url = fields.at('url');           // Complete URL
-			const app = fields.at('app');
-			const root = fields.at('root'); // Route-specific root (local or global)
-			const headers = fields.at('headers') || new NANOS();
-			const routeParams = fields.at('routeParams') || new NANOS();  // Renamed from params
-			const routeTail = fields.at('routeTail', '');                 // Renamed from tail
-			const routeSpec = fields.at('routeSpec');  // Route specification for timeout resolution
-
-			const urlObj = new URL(url);
-			console.log(`[${this.processId}] Request: ${method.toUpperCase()} ${urlObj.pathname} -> ${app}`);
-
-			// Spawn applet worker
-			const worker = this.spawnAppletWorker(app);
-
-			// Resolve timeout configuration with hierarchy: route > pool > global
-			const timeouts = this.config.getTimeoutConfig(this.poolName, routeSpec);
-			const { reqTimeout, idleTimeout, conTimeout } = timeouts;
-
-			console.debug(`[${this.processId}] Timeouts: req=${reqTimeout}s, idle=${idleTimeout}s, con=${conTimeout}s`);
-
-			// Set up request timeout
-			const timeout = reqTimeout ? setTimeout(() => {
-				if (this.activeRequests.has(id)) {
-					// Warn? Or debug?
-					console.warn(`[${this.processId}] Request ${id} timed out after ${reqTimeout}s`);
-					this.cleanupRequest(id);
-					this.sendErrorResponse(id, 504, 'Gateway Timeout').catch(console.error);
-				}
-			}, reqTimeout * 1000) : null;
-
-			// Track active request with timeout configuration and routeSpec
-			this.activeRequests.set(id, {
-				worker,
-				timeout,
-				isStreaming: false,
-				timeouts: { reqTimeout, idleTimeout, conTimeout },
-				routeSpec  // Store for bidi params resolution
-			});
-
-			// Handle messages from applet worker
-			worker.onmessage = (event) => {
-				console.debug(`[${this.processId}] Worker onmessage fired for request ${id}`);
-				this.handleAppletMessage(id, event.data);
-			};
-
-			// Handle worker errors
-			worker.onerror = (error) => {
-				console.error(`[${this.processId}] Worker error for request ${id}:`, error);
-				this.cleanupRequest(id);
-				this.sendErrorResponse(id, 500, 'Internal Server Error');
-			};
-
-			// Convert headers and routeParams to plain objects for applet postMessage
-			const headersObj = headers?.size ? headers.toObject({ array: true }) : {};
-			const routeParamsObj = routeParams?.size ? routeParams.toObject() : {};
-
-			// Check for built-in applets and prepare configuration
-			let builtinConfig = null;
-			if (app === '@static') {
-				const mimeTypes = this.config.mimeTypes || {};
-				builtinConfig = {
-					root,
-					mimeTypes: mimeTypes.toSLID(), // Serialize NANOS to SLID for worker
-				};
+	/**
+	 * Start relaying bidi-frame messages from the applet to the operator.
+	 * Runs concurrently with the response reading loops.
+	 * @param {string|number} id - Request ID
+	 * @param {object} appletBidiChannel - The 'bidi' channel from PostMessageTransport
+	 * @param {object} reqChannel - The req-N channel to forward to
+	 */
+	#startBidiRelayFromApplet (id, appletBidiChannel, reqChannel) {
+		(async () => {
+			while (true) {
+				const msg = await appletBidiChannel.read({ only: 'bidi-frame', dechunk: false });
+				if (!msg) break;
+				await msg.process(async () => {
+					if (!this.activeRequests.has(id)) return;
+					// Forward bidi-frame to operator via req-N channel
+					await reqChannel.write('bidi-frame', msg.data, { eom: false });
+				});
 			}
-
-			// Send request to applet worker
-			const requestMsg = {
-				type: 'request',
-				id,
-				method: method.toUpperCase(),
-				url,                                    // Complete URL
-				headers: headersObj,
-				routeParams: routeParamsObj,            // Renamed from params
-				routeTail,                              // Renamed from tail
-				body: binaryData,
-				timeouts: {                             // Pass all timeout values
-					request: reqTimeout,
-					idle: idleTimeout,
-					connection: conTimeout,
-				},
-				maxChunkSize: this.chunkingConfig.chunkSize, // Hard security limit
-			};
-
-			// Add config for built-in applets only
-			if (builtinConfig) {
-				requestMsg.config = builtinConfig;
-			}
-
-			worker.postMessage(requestMsg);
-
-		} catch (error) {
-			console.error(`[${this.processId}] Request handling error:`, error);
-			await this.sendErrorResponse(id, 500, 'Internal Server Error');
-		}
+		})();
 	}
 
 	/**
-	 * Handle message from applet worker
+	 * Start connection timeout for streaming/bidi connections.
 	 */
-	async handleAppletMessage (id, data) {
-		const { type, final, data: binaryData } = data;
-
-		console.debug(`[${this.processId}] Received message from applet: type ${type} id ${id} final ${final} data ${(binaryData?.length || '(none)')}`);
-
-		// Handle console output from bootstrap
-		if (type === 'console') {
-			await this.handleAppletConsoleOutput(id, data);
-			return;
-		}
-
-		if (type !== 'frame' && type !== 'error') {
-			console.warn(`[${this.processId}] Unknown message type: ${type}`);
-			return;
-		}
-
-		const requestInfo = this.activeRequests.get(id);
-		if (!requestInfo) {
-			console.warn(`[${this.processId}] Received message for unknown request ${id}`);
-			return;
-		}
-
-		try {
-			if (type === 'error') {
-				await this.handleAppletError(id, data, requestInfo);
-			} else {
-				await this.handleFrame(id, data, requestInfo);
-			}
-		} catch (error) {
-			console.error(`[${this.processId}] Error handling applet message:`, error);
-			await this.sendErrorResponse(id, 500, 'Internal Server Error');
-			this.cleanupRequest(id);
-		}
-	}
-
-	/**
-	 * Handle console output from applet (via bootstrap)
-	 * Operator has applet path from routing and process ID from IPC handler binding
-	 */
-	async handleAppletConsoleOutput (id, data) {
-		const { level, content } = data;
-
-		// Forward to operator via IPC using proper message creation
-		const outputMsg = createAppletOutput(id, { level });
-		const binaryData = new TextEncoder().encode(content);
-
-		await this.ipcConn.writeMessage(outputMsg, binaryData);
-	}
-
-	/**
-	 * Handle error response from applet
-	 */
-	async handleAppletError (id, data, requestInfo) {
-		const { error, stack } = data;
-		console.error(`[${this.processId}] Applet error for request ${id}:`, error);
-		if (stack) console.error(stack);
-
-		this.cleanupRequest(id);
-		await this.sendErrorResponse(id, 500, 'Internal Server Error');
-	}
-
-	/**
-	 * Handle frame from applet (unified frame protocol)
-	 * Note: final defaults to false if omitted - only final: true triggers frame completion
-	 */
-	async handleFrame (id, data, requestInfo) {
-		const { mode, status, headers, data: frameData, final, keepAlive } = data;
-
-		// Clear idle timeout when new frame arrives (processing starts)
-		if (requestInfo.idleTimeout) {
-			this.clearIdleTimeout(id);
-		}
-
-		// First frame - establish connection
-		if (mode !== undefined) {
-			await this.handleFirstFrame(id, data, requestInfo);
-			return;
-		}
-
-		// Enforce maxChunkSize limit (DoS protection)
-		if (frameData && frameData.length > this.chunkingConfig.chunkSize) {
-			console.warn(`[${this.processId}] Frame chunk exceeds maxChunkSize (${frameData.length} > ${this.chunkingConfig.chunkSize}), terminating applet`);
-			this.cleanupRequest(id);
-			await this.sendErrorResponse(id, 500, 'Internal Server Error');
-			return;
-		}
-
-		// Handle based on mode
-		if (requestInfo.mode === 'bidi') {
-			await this.handleBidiFrame(id, frameData, final, keepAlive, requestInfo);
-			return;
-		}
-
-		// Handle response/stream modes (accumulate and forward)
-		if (frameData) {
-			requestInfo.frameBuffer.push(frameData);
-			requestInfo.totalBuffered += frameData.length;
-		}
-
-		// If accumulated data exceeds autoChunkThresh, start forwarding immediately
-		if (requestInfo.totalBuffered >= this.chunkingConfig.autoChunkThresh) {
-			await this.flushFrameBuffer(id, requestInfo, false);
-		}
-
-		// If final frame message (final is truthy), flush remaining buffer
-		// It defaults to false, allowing applets to send multiple chunks without specifying final: false each time
-		if (final) {
-			await this.flushFrameBuffer(id, requestInfo, true, keepAlive);
-
-			// Update keepAlive status if specified
-			if (keepAlive !== undefined) {
-				requestInfo.keepAlive = keepAlive;
-			}
-
-			// Cleanup if not keepAlive
-			if (!requestInfo.keepAlive) {
-				this.cleanupRequest(id);
-			} else if (requestInfo.timeouts.idleTimeout > 0) {
-				// Restart idle timeout after sending final frame (between frames)
-				requestInfo.idleTimeout = this.startIdleTimeout(id, requestInfo.timeouts.idleTimeout);
-			}
-		}
-	}
-
-	/**
-	 * Start idle timeout for streaming/bidi connections
-	 * Only active between frames, not during request processing
-	 */
-	startIdleTimeout (id, idleTimeout) {
-		if (idleTimeout <= 0) return null;  // Disabled
-
-		return setTimeout(() => {
-			const requestInfo = this.activeRequests.get(id);
-			if (requestInfo && requestInfo.keepAlive) {
-				console.debug(`[${this.processId}] Connection ${id} idle timeout after ${idleTimeout}s`);
-				this.cleanupRequest(id);
-				this.sendErrorResponse(id, 408, 'Request Timeout').catch(console.error);
-			}
-		}, idleTimeout * 1000);
-	}
-
-	/**
-	 * Clear idle timeout (called when new frame arrives)
-	 */
-	clearIdleTimeout (id) {
-		const requestInfo = this.activeRequests.get(id);
-		if (requestInfo && requestInfo.idleTimeout) {
-			clearTimeout(requestInfo.idleTimeout);
-			requestInfo.idleTimeout = null;
-		}
-	}
-
-	/**
-	 * Start connection timeout for streaming/bidi connections
-	 */
-	startConnectionTimeout (id, conTimeout) {
+	#startConnectionTimeout (id, conTimeout) {
 		if (conTimeout <= 0) return null;  // Disabled
 
 		return setTimeout(() => {
@@ -449,477 +628,89 @@ class ResponderProcess extends ServiceProcess {
 			if (requestInfo && requestInfo.keepAlive) {
 				console.debug(`[${this.processId}] Connection ${id} lifetime timeout after ${conTimeout}s`);
 				this.cleanupRequest(id);
-				this.sendErrorResponse(id, 408, 'Request Timeout').catch(console.error);
+				this.#sendErrorResponse(requestInfo.reqChannel, id, 408, 'Request Timeout').catch(console.error);
 			}
 		}, conTimeout * 1000);
 	}
 
 	/**
-	 * Handle first frame (establishes connection)
+	 * Start idle timeout for streaming/bidi connections.
+	 * Only active between frames, not during request processing.
 	 */
-	async handleFirstFrame (id, data, requestInfo) {
-		const { mode, status, headers, keepAlive, data: frameData, final } = data;
+	#startIdleTimeout (id, idleTimeout) {
+		if (idleTimeout <= 0) return null;  // Disabled
 
-		console.debug(`[${this.processId}] First frame: mode=${mode}, status=${status}, final=${final}, keepAlive=${keepAlive}, dataSize=${frameData?.length || 0}`);
-
-		// Determine effective response type
-		// mode=response keepAlive=true makes it streaming
-		const effectiveType = (mode === 'response' && keepAlive) ? 'stream': mode;
-
-		// Check if pool allows this response type
-		const allowedTypes = this.config.getAllowedResponseTypes(this.poolName);
-		if (!allowedTypes.has(effectiveType)) {
-			console.error(
-				`[${this.processId}] Pool "${this.poolName}" does not allow ` +
-				`response type "${effectiveType}" (mode=${mode}, keepAlive=${keepAlive})`
-			);
-			this.cleanupRequest(id);
-			await this.sendErrorResponse(id, 500, 'Internal Server Error');
-			return;
-		}
-
-		// Enforce policy: status 101 (bidi upgrade) must not have data
-		if (status === 101 && frameData && frameData.length > 0) {
-			console.error(`[${this.processId}] Policy violation: status 101 frame must not contain data`);
-			this.cleanupRequest(id);
-			await this.sendErrorResponse(id, 500, 'Internal Server Error');
-			return;
-		}
-
-		// Store connection state
-		requestInfo.mode = mode;
-		requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
-		requestInfo.frameBuffer = [];
-		requestInfo.totalBuffered = 0;
-
-		// Start connection timeout for long-lived connections (runs for entire connection lifetime)
-		if (requestInfo.keepAlive && requestInfo.timeouts.conTimeout > 0) {
-			requestInfo.connectionTimeout = this.startConnectionTimeout(
-				id,
-				requestInfo.timeouts.conTimeout
-			);
-		}
-
-		// Calculate available capacity for operator (backpressure-aware)
-		const availableWorkers = this.bpAvailWorkers();
-
-		// Send first frame to operator (unified protocol with capacity info)
-		const firstFrameMsg = createFrame(id, {
-			mode,
-			status,
-			headers,
-			data: frameData,
-			final: final ?? false,
-			keepAlive,
-			availableWorkers,
-			totalWorkers: this.maxConcurrentRequests
-		});
-
-		console.debug(`[${this.processId}] Sending first frame to operator...`);
-		await this.ipcConn.writeMessage(firstFrameMsg, frameData);
-		console.debug(`[${this.processId}] First frame sent successfully`);
-
-		// Handle bidi mode initialization
-		if (mode === 'bidi' && status === 101) {
-			await this.initializeBidiConnection(id, requestInfo);
-			return; // Bidi initialization handles subsequent frames
-		}
-
-		// For response/stream modes, if first frame is final and not keepAlive, cleanup
-		if (final && !requestInfo.keepAlive) {
-			this.cleanupRequest(id);
-		} else if (requestInfo.keepAlive && final && requestInfo.timeouts.idleTimeout > 0) {
-			// Start idle timeout after sending final frame (between frames)
-			requestInfo.idleTimeout = this.startIdleTimeout(id, requestInfo.timeouts.idleTimeout);
-		}
-	}
-
-	/**
-	 * Handle bidirectional frame (mode: 'bidi')
-	 */
-	async handleBidiFrame (id, frameData, final, keepAlive, requestInfo) {
-		let conn = this.bidiConnections.get(id);
-
-		// First bidi frame - initialize connection
-		if (!conn) {
-			await this.initializeBidiConnection(id, requestInfo);
-			conn = this.bidiConnections.get(id);
-		}
-
-		const chunkSize = frameData?.length || 0;
-
-		// Check if applet has sufficient credits
-		console.debug(`Bidi frame: size ${chunkSize} final ${final} (with ${conn.outboundCredits} credits)`);
-		if (conn.outboundCredits < chunkSize) {
-			// Insufficient credits - buffer the chunk
-			conn.outboundBuffer.push({ frameData, final, keepAlive });
-			conn.totalBuffered.outbound += chunkSize;
-
-			// Check buffer limit (DoS protection)
-			if (conn.totalBuffered.outbound > conn.maxBufferSize) {
-				console.warn(`[${this.processId}] Bidi ${id} outbound buffer exceeded, terminating`);
-				this.closeBidiConnection(id, 'Buffer overflow');
-				return;
-			}
-
-			return; // Don't forward yet
-		}
-
-		// Consume credits (byte-based)
-		conn.outboundCredits -= chunkSize;
-
-		// Forward chunk to operator using unified frame protocol
-		const frameMsg = createFrame(id, {
-			data: frameData,
-			final,
-			...(keepAlive !== undefined && { keepAlive })
-		});
-		console.debug(`frameMsg: ${frameMsg}`);
-		await this.ipcConn.writeMessage(frameMsg, frameData);
-
-		// Update last activity
-		conn.lastActivity = Date.now();
-
-		// Handle connection close
-		if (final && keepAlive === false) {
-			this.closeBidiConnection(id, 'Normal closure');
-		}
-	}
-
-	/**
-	 * Initialize bidirectional connection
-	 */
-	async initializeBidiConnection (id, requestInfo) {
-		// Get bidi parameters from configuration (same as operator will use)
-		// routeSpec already contains pool name, so we can pass just routeSpec
-		const bidiParams = this.config.getBidiParams({
-			routeSpec: requestInfo.routeSpec
-		});
-
-		const connState = {
-			worker: requestInfo.worker,
-			outboundCredits: bidiParams.initialCredits,
-			inboundCredits: bidiParams.initialCredits,
-			outboundBuffer: [],
-			inboundBuffer: [],
-			maxBufferSize: bidiParams.maxBufferSize,
-			totalBuffered: { outbound: 0, inbound: 0 },
-			maxCredits: bidiParams.initialCredits,
-			maxBytesPerSecond: bidiParams.maxBytesPerSecond,
-			idleTimeout: bidiParams.idleTimeout,
-			lastActivity: Date.now()
-		};
-
-		this.bidiConnections.set(id, connState);
-
-		// Send protocol parameters to applet (first frame from responder)
-		requestInfo.worker.postMessage({
-			type: 'frame',
-			id,
-			mode: 'bidi',
-			initialCredits: bidiParams.initialCredits,
-			maxChunkSize: bidiParams.maxChunkSize,
-			maxBytesPerSecond: bidiParams.maxBytesPerSecond,
-			idleTimeout: bidiParams.idleTimeout,
-			maxBufferSize: bidiParams.maxBufferSize,
-			data: null,
-			final: false,
-			keepAlive: true
-		});
-
-		// NOTE: No longer send params frame to operator
-		// The operator will derive the same params from configuration
-	}
-
-	/**
-	 * Close bidirectional connection
-	 */
-	closeBidiConnection (id, reason) {
-		const conn = this.bidiConnections.get(id);
-		if (!conn) return;
-
-		console.debug(`[${this.processId}] Closing bidi connection ${id}: ${reason}`);
-
-		// Terminate worker
-		conn.worker.terminate();
-
-		// Cleanup
-		this.bidiConnections.delete(id);
-		this.activeRequests.delete(id);
-	}
-
-	/**
-	 * Handle inbound frame from operator (client → applet)
-	 */
-	async handleOperatorBidiFrame (id, frameData, final) {
-		const conn = this.bidiConnections.get(id);
-		if (!conn) {
-			// Connection doesn't exist - might have been closed already
-			// Clean up active request if it still exists
-			if (this.activeRequests.has(id)) {
-				console.debug(`[${this.processId}] Cleaning up orphaned request ${id}`);
+		return setTimeout(() => {
+			const requestInfo = this.activeRequests.get(id);
+			if (requestInfo && requestInfo.keepAlive) {
+				console.debug(`[${this.processId}] Connection ${id} idle timeout after ${idleTimeout}s`);
 				this.cleanupRequest(id);
+				this.#sendErrorResponse(requestInfo.reqChannel, id, 408, 'Request Timeout').catch(console.error);
 			}
-			return;
-		}
-
-		const chunkSize = frameData?.length || 0;
-
-		// Check if client has sufficient credits to send to applet
-		if (conn.inboundCredits < chunkSize) {
-			// Insufficient credits - buffer the chunk
-			conn.inboundBuffer.push({ frameData, final });
-			conn.totalBuffered.inbound += chunkSize;
-
-			// Check buffer limit
-			if (conn.totalBuffered.inbound > conn.maxBufferSize) {
-				console.warn(`[${this.processId}] Bidi ${id} inbound buffer exceeded, terminating`);
-				this.closeBidiConnection(id, 'Buffer overflow');
-				return;
-			}
-
-			return;
-		}
-
-		// Consume credits (byte-based)
-		conn.inboundCredits -= chunkSize;
-
-		// Forward to applet
-		conn.worker.postMessage({
-			type: 'frame',
-			id,
-			mode: 'bidi',
-			data: frameData,
-			final,
-			keepAlive: true
-		});
-
-		// Applet implicitly grants credits by processing chunk
-		// Grant credits back when applet finishes processing
-		conn.inboundCredits = Math.min(
-			conn.inboundCredits + chunkSize,
-			conn.maxCredits
-		);
-
-		// Update last activity
-		conn.lastActivity = Date.now();
-
-		// Handle connection close from client side
-		// When operator detects WebSocket close, it should send a final frame
-		if (final) {
-			console.debug(`[${this.processId}] Bidi connection ${id} closed by client (final frame received)`);
-			this.closeBidiConnection(id, 'Client closed connection');
-		}
+		}, idleTimeout * 1000);
 	}
 
 	/**
-	 * Flush frame buffer to operator with chunking optimization
+	 * Start reading response metadata and body from the applet channel,
+	 * and relay to the operator via req-N channel.
+	 * @param {string|number} id - Request ID
+	 * @param {object} appletChannel - The 'applet' channel from PostMessageTransport
+	 * @param {object|null} appletBidiChannel - The 'bidi' channel (bidi mode only)
 	 */
-	async flushFrameBuffer (id, requestInfo, final, keepAlive = undefined) {
-		keepAlive = (keepAlive !== undefined) ? { keepAlive } : {};
-		if (!requestInfo.frameBuffer || requestInfo.frameBuffer.length === 0) {
-			if (final) {
-				// Send final frame signal even if no data
-				const frameMsg = createFrame(id, { data: null, final: true, ...keepAlive });
-				await this.ipcConn.writeMessage(frameMsg);
-			}
-			return;
-		}
-
-		// Concatenate accumulated frame chunks
-		const totalSize = requestInfo.totalBuffered;
-		const combined = new Uint8Array(totalSize);
-		let offset = 0;
-
-		for (const chunk of requestInfo.frameBuffer) {
-			combined.set(chunk, offset);
-			offset += chunk.length;
-		}
-
-		// Clear buffer
-		requestInfo.frameBuffer = [];
-		requestInfo.totalBuffered = 0;
-
-		// Apply responder's chunking logic to forward to operator
-		if (totalSize < this.chunkingConfig.maxDirectWrite) {
-			// Small: Direct write
-			const frameMsg = createFrame(id, { data: combined, final, ...keepAlive });
-			const startTime = performance.now();
-			await this.ipcConn.writeMessage(frameMsg, combined);
-			const writeDuration = performance.now() - startTime;
-			this.detectBackpressure(writeDuration);
-		} else if (totalSize < this.chunkingConfig.autoChunkThresh) {
-			// Medium: Direct write with backpressure detection
-			const frameMsg = createFrame(id, { data: combined, final, ...keepAlive });
-			const startTime = performance.now();
-			await this.ipcConn.writeMessage(frameMsg, combined);
-			const writeDuration = performance.now() - startTime;
-			this.detectBackpressure(writeDuration);
-		} else {
-			// Large: Send in chunks to operator
-			await this.sendInChunks(id, combined, final, keepAlive);
-		}
-	}
-
-	/**
-	 * Send data in chunks to operator
-	 */
-	async sendInChunks (id, data, final, keepAlive = {}) {
-		const { chunkSize } = this.chunkingConfig;
-		let offset = 0;
-
-		while (offset < data.length) {
-			const end = Math.min(offset + chunkSize, data.length);
-			const chunk = data.slice(offset, end);
-			const isLast = (end === data.length) && final;
-
-			const frameMsg = createFrame(id, { data: chunk, final: isLast, ...keepAlive });
-			const startTime = performance.now();
-			await this.ipcConn.writeMessage(frameMsg, chunk);
-			const writeDuration = performance.now() - startTime;
-
-			this.detectBackpressure(writeDuration);
-
-			offset = end;
-
-			// Yield to event loop
-			await new Promise(resolve => setTimeout(resolve, 0));
-		}
-	}
-
-	/**
-	 * Cleanup request resources
-	 * Centralized cleanup for all request-related state
-	 */
-	cleanupRequest (id) {
+	#startAppletResponseReading (id, appletChannel, appletBidiChannel) {
 		const requestInfo = this.activeRequests.get(id);
-		if (requestInfo) {
-			clearTimeout(requestInfo.timeout);           // Request timeout
-			clearTimeout(requestInfo.idleTimeout);       // Idle timeout
-			clearTimeout(requestInfo.connectionTimeout); // Connection timeout
-			requestInfo.worker.terminate();
+		if (!requestInfo) return;
+		const { reqChannel } = requestInfo;
+
+		// Loop 1: response metadata (dechunked — each read() returns one complete message)
+		// 'res' carries HTTP response status + headers (sent once, before any res-frame chunks)
+		// 'res-error' carries error response (sent instead of res + res-frame)
+		(async () => {
+			while (true) {
+				const msg = await appletChannel.read({ only: ['res', 'res-error'] });
+				if (!msg) break;
+				await msg.process(async () => {
+					const info = this.activeRequests.get(id);
+					if (!info) return;
+					switch (msg.messageType) {
+					case 'res':
+						await this.#handleAppletResponseMetadata(id, msg.data.decode(), info);
+						break;
+					case 'res-error':
+						await this.#handleAppletResError(id, msg.data.decode(), info);
+						break;
+					}
+				});
+			}
+		})();
+
+		// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
+		// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
+		(async () => {
+			while (true) {
+				const msg = await appletChannel.read({ only: 'res-frame', dechunk: false });
+				if (!msg) break;
+				let done = false;
+				await msg.process(async () => {
+					const info = this.activeRequests.get(id);
+					if (!info) return;
+					if (msg.data === undefined && msg.eom) {
+						done = true; // zero-data + eom:true = end-of-stream signal
+					} else {
+						await this.#relayResFrame(id, msg.data, msg.eom, info);
+					}
+				});
+				if (done) {
+					await this.#sendEndOfStream(id);
+					break;
+				}
+			}
+		})();
+
+		// Loop 3: bidi relay (bidi mode only, dechunk: false)
+		if (appletBidiChannel) {
+			this.#startBidiRelayFromApplet(id, appletBidiChannel, reqChannel);
 		}
-
-		// Clean up all request-related state
-		this.activeRequests.delete(id);
-		this.bidiConnections.delete(id);
-	}
-
-
-	/**
-	 * Detect backpressure based on write timing
-	 * Similar to Node.js streams pattern - slow writes indicate backpressure
-	 */
-	detectBackpressure (writeDuration) {
-		// Track recent write times
-		this.recentWriteTimes.push(writeDuration);
-		if (this.recentWriteTimes.length > this.maxRecentWrites) {
-			this.recentWriteTimes.shift();
-		}
-
-		// Calculate average write time
-		const avgWriteTime = this.recentWriteTimes.reduce((a, b) => a + b, 0) / this.recentWriteTimes.length;
-
-		// If average write time exceeds threshold, we're experiencing backpressure
-		// (Unix pipe buffers are typically 64KB, should write quickly if not full)
-		this.isBackpressured = avgWriteTime > this.chunkingConfig.bpWriteTimeThresh;
-	}
-
-
-	/**
-	 * Send error response using unified frame protocol
-	 */
-	async sendErrorResponse (id, status, message) {
-		const errorBody = new TextEncoder().encode(JSON.stringify({ error: message }));
-
-		// Send error as a single frame
-		const frameMsg = createFrame(id, {
-			mode: 'response',
-			status,
-			headers: { 'content-type': 'application/json' },
-			data: errorBody,
-			final: true,
-			keepAlive: false
-		});
-
-		const startTime = performance.now();
-		await this.ipcConn.writeMessage(frameMsg, errorBody);
-		const writeDuration = performance.now() - startTime;
-
-		// Update backpressure state based on write timing
-		this.detectBackpressure(writeDuration);
-	}
-
-	/**
-	 * Handle health check from operator
-	 */
-	async handleHealthCheck (id, fields) {
-		console.debug(`[${this.processId}] Health check received`);
-
-		// Report backpressure state at process level
-		const availableWorkers = this.bpAvailWorkers();
-
-		// Create health check response
-		const response = new NANOS(MessageType.HEALTH_CHECK, { id });
-		response.setOpts({ transform: true });
-		response.push([{
-			timestamp: fields.at('timestamp'),
-			status: 'ok',
-			availableWorkers,
-			totalWorkers: this.maxConcurrentRequests,
-			activeRequests: this.activeRequests.size,
-			activeBidiConns: this.bidiConnections.size,
-			uptime: Math.floor(performance.now() / 1000),
-			backpressured: this.isBackpressured,
-		}]);
-
-		await this.ipcConn.writeMessage(response);
-	}
-
-	/**
-	 * Handle shutdown request from operator
-	 */
-	async handleShutdown (fields) {
-		const timeout = fields.at('timeout', 30);
-		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
-
-		this.isShuttingDown = true;
-
-		// Wait for active requests to complete (with timeout)
-		const shutdownStart = Date.now();
-		while (this.activeRequests.size > 0 && (Date.now() - shutdownStart) < timeout * 1000) {
-			console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active requests...`);
-			await new Promise((resolve) => setTimeout(resolve, 1000));
-		}
-
-		// Terminate any remaining workers and error-out their connections.
-		const tasks = [];
-		for (const [id, requestInfo] of this.activeRequests.entries()) {
-			console.debug(`[${this.processId}] Terminating worker for request ${id}`);
-			clearTimeout(requestInfo.timeout);
-			requestInfo.worker.terminate();
-			tasks.push(this.sendErrorResponse(id, 503, 'Service Unavailable').catch((e) => {}));
-		}
-		if (tasks.length) await Promise.all(tasks);
-		this.activeRequests.clear();
-		this.bidiConnections.clear();
-
-		// Log shutdown complete BEFORE closing IPC (which closes stdout)
-		console.info(`[${this.processId}] Shutdown complete`);
-
-		// Close IPC connection (this closes stdout, so no more console.log after this)
-		if (this.ipcConn) {
-			await this.ipcConn.close();
-		}
-
-		Deno.exit(0);
-	}
-
-	/**
-	 * Log startup information after configuration is loaded
-	 */
-	async onStarted () {
-		console.log(`[${this.processId}] Pool: ${this.poolName}, max concurrent: ${this.maxConcurrentRequests}`);
 	}
 }
 
@@ -929,8 +720,9 @@ class ResponderProcess extends ServiceProcess {
 async function main () {
 	const processId = Deno.env.get('JSMAWS_PID'); // process id string
 	const poolName = Deno.env.get('JSMAWS_POOL');
-	console.debug(`Responder main pid ${processId} pool ${poolName}`);
-	// TODO: poolName is always undefined?!
+	Deno.stderr.writeSync(new TextEncoder().encode(
+		`Responder main pid ${processId} pool ${poolName}\n`
+	));
 	await ServiceProcess.run(ResponderProcess, processId, poolName);
 }
 

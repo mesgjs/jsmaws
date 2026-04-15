@@ -1,28 +1,38 @@
 /**
  * JSMAWS Service Process Base Class
  * Common functionality for all service processes (router, responder)
- * 
+ *
  * This base class provides:
- * - IPC connection setup and management
+ * - PipeTransport setup and management (operator ↔ responder IPC)
+ * - Control channel message loop (config-update, health-check, shutdown, scale-down)
+ * - C2C channel for console output (replaces console-intercept SOH prefix hack)
  * - Configuration update handling
  * - Health check handling
  * - Shutdown handling with graceful cleanup
- * - Message processing loop
- * - Signal handler registration
- * 
+ *
  * Subclasses must implement:
- * - handleConfigUpdate(fields) - Process configuration updates
- * - handleHealthCheck(id, fields) - Generate health check response
- * - handleShutdown(fields) - Perform graceful shutdown
- * - getMessageHandlers() - Return map of message type to handler function
- * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * - handleConfigUpdate(configJson) - Process configuration updates (JSON string)
+ * - handleHealthCheck(msg) - Generate health check response
+ * - handleShutdown(msg) - Perform graceful shutdown
+ * - handleReqChannel(reqChannel) - Handle an accepted req-N channel
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { NANOS } from './vendor.esm.js';
-import { IPCConnection, MessageType } from './ipc-protocol.esm.js';
+import { PipeTransport } from '@poly-transport/transport/pipe.esm.js';
 import { Configuration } from './configuration.esm.js';
-import { interceptConsole } from './console-intercept.esm.js';
+
+/**
+ * Control channel message types (operator ↔ responder)
+ */
+export const CONTROL_MESSAGE_TYPES = [
+	'config-update',    // operator → responder: configuration update (JSON text)
+	'health-check',     // operator → responder: health check request
+	'health-response',  // responder → operator: health check response (JSON text)
+	'shutdown',         // operator → responder: graceful shutdown request
+	'scale-down',       // operator → responder: reduce in-flight requests
+	'capacity-update',  // responder → operator: capacity report (JSON text)
+];
 
 /**
  * Base class for service processes
@@ -32,174 +42,306 @@ export class ServiceProcess {
 		this.processType = processType;
 		this.processId = processId || Deno.env.get('JSMAWS_PID') || `${processType}-${Date.now()}`;
 		this.config = null; // Configuration instance (set during initialization)
-		this.ipcConn = null;
+		this.transport = null; // PipeTransport instance
+		this.controlChannel = null; // 'control' channel on the transport
 		this.isShuttingDown = false;
-		// Create simple console-based logger for components that need it
-		// Console output is forwarded to operator's logger via IPC
-		this.logger = {
-			debug: (msg) => console.debug(msg),
-			info: (msg) => console.info(msg),
-			warn: (msg) => console.warn(msg),
-			error: (msg) => console.error(msg),
-		};
+		this._c2cSymbol = null; // Set in createTransport()
 	}
 
 	/**
-	 * Create IPC connection using stdin/stdout
+	 * Create PipeTransport using stdin/stdout.
+	 * Registers the newChannel listener to accept 'control' and 'req-N' channels.
 	 */
-	createIPCConnection () {
-		const stdinReader = Deno.stdin.readable.getReader();
-		this.ipcConn = new IPCConnection({
-			read: () => stdinReader.read(),
-			write: (data) => Deno.stdout.write(data),
-			close: () => {
-				Deno.stdin.close();
-				Deno.stdout.close();
-			},
+	createTransport () {
+		const c2cSymbol = Symbol('c2c');
+		this._c2cSymbol = c2cSymbol;
+		this.transport = new PipeTransport({
+			readable: Deno.stdin.readable,
+			writable: Deno.stdout.writable,
+			c2cSymbol,
 		});
-		console.debug(`[${this.processId}] IPC connection established`);
+
+		// Accept control channel and all req-N channels; reject everything else
+		this.transport.addEventListener('newChannel', (event) => {
+			const { channelName } = event.detail;
+			if (channelName === 'control' || channelName.startsWith('req-')) {
+				event.accept();
+			} else {
+				event.reject();
+			}
+		});
 	}
 
 	/**
-	 * Wait for and process initial configuration
+	 * Handle configuration update from operator.
+	 * Subclasses must implement this method.
+	 * @param {string} configJson - JSON-encoded configuration
 	 */
-	async waitForInitialConfig () {
-		console.debug(`[${this.processId}] Waiting for initial configuration...`);
-		const result = await this.ipcConn.readMessage();
+	async handleConfigUpdate (configJson) {
+		throw new Error('Subclass must implement handleConfigUpdate()');
+	}
 
-		if (!result || result.message.type !== MessageType.CONFIG_UPDATE) {
-			throw new Error('Expected initial configuration message');
+	/**
+	 * Handle health check from operator.
+	 * Subclasses must implement this method.
+	 * @param {object} msg - PolyTransport message
+	 */
+	async handleHealthCheck (msg) {
+		throw new Error('Subclass must implement handleHealthCheck()');
+	}
+
+	/**
+	 * Handle an accepted req-N channel.
+	 * Subclasses must implement this method.
+	 * @param {object} reqChannel - PolyTransport channel
+	 */
+	async handleReqChannel (reqChannel) {
+		throw new Error('Subclass must implement handleReqChannel()');
+	}
+
+	/**
+	 * Handle scale-down request from operator.
+	 * Default: no-op (subclasses can override).
+	 * @param {object} msg - PolyTransport message
+	 */
+	async handleScaleDown (msg) {
+		console.debug(`[${this.processId}] Scale-down received (no-op in base class)`);
+	}
+
+	/**
+	 * Handle shutdown request from operator.
+	 * Subclasses must implement this method.
+	 * @param {object} msg - PolyTransport message (may be null for signal-triggered shutdown)
+	 */
+	async handleShutdown (msg) {
+		throw new Error('Subclass must implement handleShutdown()');
+	}
+
+	/**
+	 * Intercept console methods to write to the C2C channel.
+	 * Called after transport.start() so the C2C channel is available.
+	 * This replaces the old console-intercept SOH prefix hack.
+	 *
+	 * Falls back to stderr when the C2C channel is not open (e.g. transport
+	 * disconnected, or when running at a terminal for debugging).
+	 */
+	#interceptConsoleToC2C () {
+		const c2c = this.transport.getChannel(this._c2cSymbol);
+		if (!c2c) return; // Should not happen, but guard defensively
+
+		// Map console method names to C2C level names
+		// console.log → 'info' (C2C has no 'log' level)
+		const levelMap = {
+			debug: 'debug',
+			info: 'info',
+			log: 'info',
+			warn: 'warn',
+			error: 'error',
+		};
+
+		const enc = new TextEncoder();
+
+		function consoleFormat (value) {
+			return (typeof value === 'string') ? value : Deno.inspect(value, { depth: 4, colors: false });
 		}
 
-		// Create Configuration instance
-		this.config = new Configuration(result.message.fields);
-		this.config.processType = this.processType;
-		this.config.processId = this.processId;
-
-		// Let subclass handle the configuration
-		await this.handleConfigUpdate(result.message.fields);
-	}
-
-	/**
-	 * Get message handlers map
-	 * Subclasses should override to add custom handlers
-	 * Returns: Map<MessageType, handler(id, fields, binaryData)>
-	 */
-	getMessageHandlers () {
-		return new Map([
-			[MessageType.CONFIG_UPDATE, async (id, fields) => {
-				await this.handleConfigUpdate(fields);
-			}],
-			[MessageType.HEALTH_CHECK, async (id, fields) => {
-				await this.handleHealthCheck(id, fields);
-			}],
-			[MessageType.SHUTDOWN, async (id, fields) => {
-				await this.handleShutdown(fields);
-			}],
-		]);
-	}
-
-	/**
-	 * Setup event-driven message handlers
-	 */
-	setupMessageHandlers () {
-		const handlers = this.getMessageHandlers();
-
-		console.debug(`[${this.processId}] Setting up event-driven message handlers...`);
-
-		// Register each handler with the IPC connection
-		for (const [messageType, handler] of handlers) {
-			this.ipcConn.onMessage(messageType, async (message, binaryData) => {
-				try {
-					console.debug(`[${this.processId}] Handling ${messageType} message (id: ${message.id})`);
-					await handler(message.id, message.fields, binaryData);
-					console.debug(`[${this.processId}] Handler completed for ${messageType}`);
-				} catch (error) {
-					console.error(`[${this.processId}] Handler error for ${messageType}:`, error);
+		function createLogMethod (level) {
+			const c2cLevel = levelMap[level] ?? 'info';
+			return function (...args) {
+				// Use C2C when the channel is open; fall back to stderr otherwise
+				// (handles transport disconnect and terminal debugging scenarios)
+				if (c2c.state === c2c.STATE_OPEN) {
+					const text = args.map(consoleFormat).join(' ');
+					c2c[c2cLevel]?.(text);
+				} else {
+					// Fallback: write to stderr so output is not lost
+					const text = args.map(consoleFormat).join(' ');
+					Deno.stderr.writeSync(enc.encode(`[${level.toUpperCase()}] ${text}\n`));
 				}
-			});
+			};
+		}
+
+		for (const method of ['debug', 'info', 'log', 'warn', 'error']) {
+			console[method] = createLogMethod(method);
 		}
 	}
 
 	/**
-	 * Start the service process
-	 * Template method that orchestrates the startup sequence
-	 */
-	async start () {
-		// Intercept console methods BEFORE any logging
-		interceptConsole();
-
-		console.info(`[${this.processId}] Starting ${this.processType} process...`);
-
-		// Create IPC connection
-		this.createIPCConnection();
-
-		// Wait for initial configuration
-		await this.waitForInitialConfig();
-
-		// Setup event-driven message handlers
-		this.setupMessageHandlers();
-
-		// Let subclass perform additional initialization
-		await this.onStarted();
-
-		console.debug(`[${this.processId}] ${this.processType} process started successfully`);
-
-		// Start monitoring for incoming messages (blocks until connection closes)
-		await this.ipcConn.startMonitoring();
-
-		console.info(`[${this.processId}] IPC monitoring ended, process exiting`);
-	}
-
-	/**
-	 * Hook for subclass-specific initialization after config is loaded
-	 * Subclasses can override to perform additional setup
+	 * Hook for subclass-specific initialization after config is loaded.
+	 * Subclasses can override to perform additional setup.
 	 */
 	async onStarted () {
 		// Default: no additional initialization
 	}
 
 	/**
-	 * Handle configuration update from operator
-	 * Subclasses must implement this method
+	 * Process incoming control channel messages.
+	 * Handles config-update, health-check, shutdown, scale-down.
+	 * Runs as a background task (fire and forget from start()).
 	 */
-	async handleConfigUpdate (fields) {
-		throw new Error('Subclass must implement handleConfigUpdate()');
+	#processControlMessages () {
+		(async () => {
+			while (true) {
+				const msg = await this.controlChannel.read({
+					only: ['config-update', 'health-check', 'shutdown', 'scale-down'],
+					decode: true,
+				});
+				if (!msg) break; // Channel closed
+
+				await msg.process(async () => {
+					try {
+						switch (msg.messageType) {
+						case 'config-update':
+							await this.handleConfigUpdate(msg.text);
+							break;
+						case 'health-check':
+							await this.handleHealthCheck(msg);
+							break;
+						case 'shutdown':
+							await this.handleShutdown(msg);
+							break;
+						case 'scale-down':
+							await this.handleScaleDown(msg);
+							break;
+						}
+					} catch (error) {
+						console.error(`[${this.processId}] Control message handler error (${msg.messageType}):`, error);
+					}
+				});
+			}
+			console.info(`[${this.processId}] Control channel closed`);
+		})();
 	}
 
 	/**
-	 * Handle health check from operator
-	 * Subclasses must implement this method
+	 * Process incoming req-N channel events.
+	 * Listens for new req-N channels and calls handleReqChannel() for each.
+	 * Runs as a background task (fire and forget from start()).
 	 */
-	async handleHealthCheck (id, fields) {
-		throw new Error('Subclass must implement handleHealthCheck()');
+	#processReqChannels () {
+		this.transport.addEventListener('newChannel', (event) => {
+			const { channelName } = event.detail;
+			if (channelName.startsWith('req-')) {
+				// Channel is already accepted by the transport listener in createTransport()
+				// Get the channel object and start handling it
+				const channel = event.detail.channel;
+				if (channel) {
+					this.handleReqChannel(channel).catch((err) => {
+						console.error(`[${this.processId}] Error handling ${channelName}:`, err);
+					});
+				}
+			}
+		});
 	}
 
 	/**
-	 * Handle shutdown request from operator
-	 * Subclasses must implement this method
-	 */
-	async handleShutdown (fields) {
-		throw new Error('Subclass must implement handleShutdown()');
-	}
-
-	/**
-	 * Create and run a service process with signal handlers
-	 * Static factory method for consistent process creation
+	 * Create and run a service process with signal handlers.
+	 * Static factory method for consistent process creation.
 	 */
 	static async run (ProcessClass, ...args) {
 		const process = new ProcessClass(...args);
 
-		// Handle shutdown signals
-		const shutdownHandler = async () => {
-			await process.handleShutdown(new NANOS());
-		};
-
 		// Ignore direct SIGINT and wait for an operator shutdown message
 		Deno.addSignalListener('SIGINT', () => {});
-		Deno.addSignalListener('SIGTERM', shutdownHandler);
+		Deno.addSignalListener('SIGTERM', async () => {
+			await process.handleShutdown(null);
+		});
 
 		// Start the process
 		await process.start();
+	}
+
+	/**
+	 * Send capacity update to operator via control channel.
+	 * @param {number} availableWorkers
+	 * @param {number} totalWorkers
+	 */
+	async sendCapacityUpdate (availableWorkers, totalWorkers) {
+		if (!this.controlChannel) return;
+		try {
+			await this.controlChannel.write('capacity-update', JSON.stringify({
+				availableWorkers,
+				totalWorkers,
+			}));
+		} catch (err) {
+			console.warn(`[${this.processId}] Failed to send capacity-update:`, err);
+		}
+	}
+
+	/**
+	 * Start the service process.
+	 * Template method that orchestrates the startup sequence.
+	 */
+	async start () {
+		// Log to stderr before transport is ready (will not be forwarded to operator)
+		Deno.stderr.writeSync(new TextEncoder().encode(
+			`[${this.processId}] Starting ${this.processType} process...\n`
+		));
+
+		// Create PipeTransport
+		this.createTransport();
+
+		// Start transport
+		await this.transport.start();
+
+		// Intercept console methods to write to C2C channel
+		// (replaces the old console-intercept SOH prefix hack)
+		this.#interceptConsoleToC2C();
+
+		// Request the control channel (operator initiates, responder accepts)
+		// The operator will have already requested the control channel; we accept it here.
+		// Since the transport listener accepts 'control', we need to get the channel.
+		// On the responder side, we wait for the operator to open the control channel.
+		this.controlChannel = await this.transport.requestChannel('control');
+		await this.controlChannel.addMessageTypes(CONTROL_MESSAGE_TYPES);
+
+		// Wait for initial configuration
+		await this.waitForInitialConfig();
+
+		// Let subclass perform additional initialization
+		await this.onStarted();
+
+		console.debug(`[${this.processId}] ${this.processType} process started successfully`);
+
+		// Start control channel message loop (background)
+		this.#processControlMessages();
+
+		// Start req-N channel accept loop (background)
+		this.#processReqChannels();
+
+		// Keep process alive until transport stops
+		await new Promise((resolve) => {
+			this.transport.addEventListener('stopped', resolve);
+		});
+
+		console.info(`[${this.processId}] Transport stopped, process exiting`);
+	}
+
+	/**
+	 * Wait for and process initial configuration via the control channel.
+	 * The operator sends a 'config-update' as the first message after transport start.
+	 */
+	async waitForInitialConfig () {
+		console.debug(`[${this.processId}] Waiting for initial configuration...`);
+
+		// Read the first message from the control channel — must be 'config-update'
+		const msg = await this.controlChannel.read({ only: 'config-update', decode: true });
+		if (!msg) {
+			throw new Error('Control channel closed before initial configuration was received');
+		}
+
+		let configJson;
+		await msg.process(() => {
+			configJson = msg.text;
+		});
+
+		// Parse and create Configuration instance
+		const configData = JSON.parse(configJson);
+		this.config = new Configuration(configData);
+		this.config.processType = this.processType;
+		this.config.processId = this.processId;
+
+		// Let subclass handle the configuration
+		await this.handleConfigUpdate(configJson);
 	}
 }

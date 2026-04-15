@@ -1,6 +1,9 @@
 /**
  * Vendor imports for JSMAWS
- * Centralizes external dependencies for easier updates
+ * Centralizes external dependencies for easier updates.
+ * Versions are pinned in deno.json import map.
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-export { isIndex, isNegIndex, NANOS, parseQJSON, parseSLID } from 'https://cdn.jsdelivr.net/gh/mesgjs/nanos@1.2.0/src/nanos.esm.js';
+export { isIndex, isNegIndex, NANOS, parseQJSON, parseSLID } from '@nanos';

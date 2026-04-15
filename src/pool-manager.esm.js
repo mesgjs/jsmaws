@@ -9,10 +9,10 @@
  * - Capacity tracking and metrics
  * - Lifecycle management (spawn, monitor, recycle, shutdown)
  *
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { Serializer } from './serializer.esm.js';
+import { TaskQueue } from '@task-queue';
 
 /**
  * Pool item states
@@ -151,7 +151,7 @@ export class PoolManager {
 		this.itemFactory = itemFactory; // Function to create new items
 		this.logger = logger; // Logger instance
 		this.items = new Map(); // itemId -> PoolItem
-		this.serializer = new Serializer();
+		this.serializer = new TaskQueue();
 		this.itemIdCounter = 0;
 		this.isShuttingDown = false;
 		this.scaleTimer = null;
@@ -414,7 +414,7 @@ export class PoolManager {
 	 * Rejects if shutting down.
 	 */
 	serialize (callback) {
-		return this.serializer.serialize(callback);
+		return this.serializer.add(callback);
 	}
 
 	/**

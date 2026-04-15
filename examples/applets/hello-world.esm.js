@@ -1,14 +1,29 @@
 /**
  * Hello World Applet
- * Demonstrates simple HTTP response with the unified frame protocol
- * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Demonstrates simple HTTP response using the PolyTransport channel API
+ *
+ * Protocol: PolyTransport channel API via globalThis.JSMAWS.server
+ * - Reads 'req' message (JSON text) for request metadata
+ * - Writes 'res' message (JSON text) for response status + headers
+ * - Writes 'res-frame' messages for response body chunks
+ * - Signals end-of-stream with zero-data 'res-frame' (null data)
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-self.onmessage = (event) => {
-	const { type, id, method, url, routeParams, routeTail, body, headers } = event.data;
+export default async function (_setupData) {
+	const server = globalThis.JSMAWS.server;
 
-	if (type !== 'request') return;
+	// Read the incoming request (all data is JSON text — use decode: true)
+	const reqMsg = await server.read({ only: 'req', decode: true });
+	if (!reqMsg) return;
+
+	let requestData;
+	await reqMsg.process(() => {
+		requestData = JSON.parse(reqMsg.text);
+	});
+
+	const { method, url, headers, routeParams, routeTail, body } = requestData;
 
 	try {
 		// Parse URL to access query parameters
@@ -22,22 +37,19 @@ self.onmessage = (event) => {
 		// For POST requests, also check body for parameters
 		if (method === 'POST' && body && body.length > 0) {
 			try {
-				const contentType = headers['content-type'] || headers['content-type'] || '';
+				const contentType = headers['content-type'] || '';
 				const bodyText = new TextDecoder().decode(body);
 
 				if (contentType.includes('application/json')) {
-					// Parse JSON body
 					const bodyData = JSON.parse(bodyText);
 					if (bodyData.name) name = bodyData.name;
 					if (bodyData.greeting) greeting = bodyData.greeting;
 				} else if (contentType.includes('application/x-www-form-urlencoded')) {
-					// Parse form-encoded body
 					const bodyParams = new URLSearchParams(bodyText);
 					if (bodyParams.has('name')) name = bodyParams.get('name');
 					if (bodyParams.has('greeting')) greeting = bodyParams.get('greeting');
 				}
 			} catch (parseError) {
-				// If body parsing fails, just use query params
 				console.error('Failed to parse POST body:', parseError);
 			}
 		}
@@ -50,35 +62,26 @@ self.onmessage = (event) => {
 			url,
 			routeParams,
 			routeTail,
-			timestamp: new Date().toISOString()
+			timestamp: new Date().toISOString(),
 		});
 
-		const data = new TextEncoder().encode(responseBody);
-
-		// Send complete response in single frame
-		self.postMessage({
-			type: 'frame',
-			id,
-			mode: 'response',
+		// Send response metadata
+		await server.write('res', JSON.stringify({
 			status: 200,
 			headers: {
 				'content-type': 'application/json',
-				'content-length': data.length.toString()
+				'content-length': new TextEncoder().encode(responseBody).length.toString(),
 			},
-			data,
-			final: true,
-			keepAlive: false
-		});
+		}));
 
-		self.close();
+		// Send response body and end-of-stream signal
+		await server.write('res-frame', responseBody);
+		await server.write('res-frame', null);
 
 	} catch (error) {
-		self.postMessage({
-			type: 'error',
-			id,
+		await server.write('res-error', JSON.stringify({
 			error: error.message,
-			stack: error.stack
-		});
-		self.close();
+			stack: error.stack,
+		}));
 	}
-};
+}

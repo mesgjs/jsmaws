@@ -9,7 +9,7 @@
  * - Routes requests to appropriate service processes via IPC
  * - Never executes user code directly
  * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { NANOS, parseSLID } from './vendor.esm.js';
@@ -21,13 +21,8 @@ import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
 import {
-	createRequest,
-	createFrame,
-	MessageType,
-} from './ipc-protocol.esm.js';
-import {
 	RequestContext,
-	createRequestHandler,
+	processReqChannelMessages,
 	cleanupRequestContext,
 } from './operator-request-state.esm.js';
 
@@ -98,7 +93,6 @@ export class OperatorProcess {
 		this.isShuttingDown = false;
 		this.isReloading = false;
 		this.requestContexts = new Map(); // requestId -> RequestContext
-		this.bidiConnections = new Map(); // requestId -> bidirectional connection state
 		this.healthCheckInterval = null;
 	}
 
@@ -110,23 +104,35 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Convert NANOS-format headers to Headers
+	 * Convert a plain-object or NANOS headers map to a Headers instance.
+	 * Responder sends headers as a plain JSON object; NANOS is supported for
+	 * any legacy callers.
 	 */
 	convertHeaders (hdrIn) {
 		const hdrOut = new Headers();
+		if (!hdrIn) return hdrOut;
 		if (hdrIn instanceof NANOS) {
 			for (const [name, content] of hdrIn.entries()) {
 				if (typeof content?.values === 'function') {
 					// Multi-valued, e.g. Set-Cookie
 					for (const content1 of content.values()) hdrOut.append(name, content1);
-				} else hdrOut.set(name, content);
+				} else hdrOut.set(name, String(content));
+			}
+		} else {
+			// Plain object (from JSON deserialization)
+			for (const [name, value] of Object.entries(hdrIn)) {
+				if (Array.isArray(value)) {
+					for (const v of value) hdrOut.append(name, String(v));
+				} else {
+					hdrOut.set(name, String(value));
+				}
 			}
 		}
 		return hdrOut;
 	}
 
 	/**
-	 * Forward request to service process via IPC using state machine
+	 * Forward request to service process via PipeTransport using state machine
 	 */
 	async forwardToServiceProcess (req, route, match, remote) {
 		const poolName = route.spec.at('pool', 'standard');
@@ -160,6 +166,9 @@ export class OperatorProcess {
 		const process = poolItem.item;
 		const routeSpec = route.spec || null;
 
+		// Acquire a req-N channel from the process's channel pool
+		const reqChannel = await process.reqChannelPool.acquire();
+
 		try {
 			if (appletPath) {
 				this.updateAffinity(poolItem, appletPath);
@@ -167,34 +176,15 @@ export class OperatorProcess {
 
 			// Read request body
 			const bodyBytes = req.body ? await req.arrayBuffer() : new ArrayBuffer(0);
-			const bodySize = bodyBytes.byteLength;
 
-			// Convert headers to NANOS format
-			const nanosHeaders = new NANOS().fromEntries(req.headers.entries());
+			// Convert headers to plain object for JSON serialization
+			const headersObj = Object.fromEntries(req.headers.entries());
 
-			// Create IPC request message
-			const requestMsg = createRequest({
-				method: req.method,
-				url: req.url,
-				app: appletPath,
-				root,
-				pool: poolName,
-				headers: nanosHeaders,
-				bodySize,
-				remote,
-				routeParams: match.params || {},
-				routeTail: match.tail || '',
-				routeSpec: route.spec || null,
-			});
-
-			const requestId = requestMsg.at('id');
+			// Generate a unique request ID
+			const requestId = `${process.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 			const url = new URL(req.url);
 			this.logger.debug(`Sending ${requestId} to ${process.id} (usage ${poolItem.usageCount}) for ${req.method} ${url.pathname}`);
-
-			// Get timeout configuration
-			const timeouts = this.configuration.getTimeoutConfig(poolName, routeSpec);
-			const reqTimeout = timeouts.reqTimeout * 1000;
 
 			// Create context with initial state
 			const context = new RequestContext(
@@ -213,30 +203,41 @@ export class OperatorProcess {
 			// Store context
 			this.requestContexts.set(requestId, context);
 
-			// Register request-specific handler (cleared upon request completion)
-			process.ipcConn.setRequestHandler(
-				requestId,
-				createRequestHandler(context, this),
-				reqTimeout
-			);
+			// Start processing req-N channel messages (handles res, res-error, res-frame, bidi-frame, con-*)
+			processReqChannelMessages(context, reqChannel, this);
 
-			// Send request
-			await process.ipcConn.writeMessage(requestMsg, new Uint8Array(bodyBytes));
+			// Build request payload
+			const requestPayload = JSON.stringify({
+				id: requestId,
+				method: req.method,
+				url: req.url,
+				app: appletPath,
+				root,
+				pool: poolName,
+				headers: headersObj,
+				body: bodyBytes.byteLength > 0 ? Array.from(new Uint8Array(bodyBytes)) : null,
+				remote,
+				routeParams: match.params || {},
+				routeTail: match.tail || '',
+				routeSpec: route.spec || null,
+			});
+
+			// Send request via req-N channel
+			await reqChannel.write('req', requestPayload);
 
 			// Return Response promise that will be resolved by state machine
 			const response = await context.responsePromise.promise;
 
 			// Note: decrementItemUsage() is called by the state machine when connections actually close:
-			// - Single-frame responses: in handleFirstFrame() after response is sent
-			// - Streaming responses: in handleStreamFrame() when final frame arrives
-			// - Bidi connections: in socket.onclose handler when WebSocket closes
+			// - Streaming responses: in handleResFrame() when end-of-stream arrives
+			// - Bidi connections: in wsTransport 'stopped' event handler
 			// This ensures processes are only marked idle after connections fully complete,
 			// preventing premature recycling of processes with active streaming/bidi connections.
 
 			return response;
 
 		} catch (error) {
-			this.logger.error(`IPC communication error with ${process.id}: ${error.message}`);
+			this.logger.error(`Request error with ${process.id}: ${error.message}`);
 			// Mark idle on error
 			await poolItem.decrementUsage();
 			return new Response(
@@ -246,6 +247,9 @@ export class OperatorProcess {
 					headers: { 'content-type': 'application/json' },
 				}
 			);
+		} finally {
+			// Always release the req-N channel back to the pool
+			await process.reqChannelPool.release(reqChannel);
 		}
 	}
 
@@ -282,53 +286,6 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Handle client message in bidirectional connection
-	 */
-	async handleClientBidiMessage (requestId, data, connState) {
-		// Convert WebSocket message to Uint8Array
-		let frameData;
-		if (typeof data === 'string') {
-			frameData = new TextEncoder().encode(data);
-		} else if (data instanceof ArrayBuffer) {
-			frameData = new Uint8Array(data);
-		} else if (data instanceof Uint8Array) {
-			frameData = data;
-		} else {
-			this.logger.warn(`Unexpected WebSocket data type: ${typeof data}`);
-			return;
-		}
-
-		const chunkSize = frameData.length;
-
-		// Check credits (flow control)
-		if (connState.inboundCredits < chunkSize) {
-			this.logger.warn(`Client ${requestId} exceeded inbound credits`);
-			connState.socket.close(1008, 'Flow control violation');
-			this.bidiConnections.delete(requestId);
-			return;
-		}
-
-		// Consume credits
-		connState.inboundCredits -= chunkSize;
-
-		// Forward to responder process via IPC
-		const frameMsg = createFrame(requestId, {
-			data: frameData,
-			final: false
-		});
-		await connState.process.ipcConn.writeMessage(frameMsg, frameData);
-
-		// Implicit credit grant
-		connState.inboundCredits = Math.min(
-			connState.inboundCredits + chunkSize,
-			connState.maxCredits
-		);
-
-		// Update activity timestamp
-		connState.lastActivity = Date.now();
-	}
-
-	/**
 	 * Handle configuration update from config monitor
 	 */
 	async handleConfigUpdate (newConfig) {
@@ -356,16 +313,9 @@ export class OperatorProcess {
 		// Update process pools
 		await this.updateProcessPools();
 
-		// Send config update to all remaining service processes
+		// Broadcast config update to all service processes via their control channels
 		if (this.processManager) {
-			for (const [processId, proc] of this.processManager.processes) {
-				try {
-					await this.processManager.sendConfigUpdate(proc);
-					this.logger.debug(`Config update sent to ${processId}`);
-				} catch (error) {
-					this.logger.error(`Failed to send config update to ${processId}: ${error.message}`);
-				}
-			}
+			await this.processManager.broadcastConfigUpdate();
 		}
 	}
 

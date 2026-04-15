@@ -1,80 +1,96 @@
 /**
- * WebSocket Client Test
- * Tests the WebSocket echo applet by sending and receiving messages
- * 
- * Usage: deno run --allow-net examples/clients/websocket-client.js
- * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * WebSocket Echo Client
+ * Tests the WebSocket echo applet using PolyTransport WebSocketTransport + NestedTransport
+ *
+ * Usage: deno run --allow-net examples/clients/ws-echo.esm.js
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-async function testWebSocket() {
+import { WebSocketTransport } from '@poly-transport/transport/websocket.esm.js';
+import { NestedTransport } from '@poly-transport/transport/nested.esm.js';
+
+async function testWebSocket () {
 	const url = 'ws://localhost:8080/ws-echo';
 
 	console.log(`Connecting to ${url}...`);
 
 	try {
 		const ws = new WebSocket(url);
-		ws.binaryType = 'arraybuffer';
-		const decoder = new TextDecoder('utf-8');
 
-		ws.onopen = () => {
-			console.log('Connected!\n');
-
-			// Send test messages
-			const messages = [
-				'Hello, WebSocket!',
-				'Testing echo...',
-				JSON.stringify({ type: 'test', value: 42 }),
-				'.'.repeat(1024),
-				'Final message'
-			];
-
-			let messageIndex = 0;
-
-			const sendNext = () => {
-				if (messageIndex < messages.length) {
-					const msg = messages[messageIndex++];
-					console.log(`Sending: "${msg}"`);
-					ws.send(msg);
-
-					// Send next message after 1 second
-					setTimeout(sendNext, 1000);
-				} else {
-					// Close after all messages sent
-					setTimeout(() => {
-						console.log('\nClosing connection...');
-						ws.close();
-					}, 1000);
-				}
-			};
-
-			sendNext();
-		};
-
-		ws.onmessage = (event) => {
-			const data = decoder.decode(event.data);
-			console.log(`Received: "${data}"`);
-
-			// Try to parse as JSON
-			try {
-				const parsed = JSON.parse(data);
-				console.log('Parsed:', parsed);
-			} catch (e) {
-				// Not JSON, that's fine
-			}
-		};
-
-		ws.onerror = (error) => {
-			console.error('WebSocket error:', error);
-		};
-
-		// Keep process alive until WebSocket closes
-		await new Promise((resolve) => {
-			ws.onclose = (event) => {
-				console.log(`\nConnection closed (code: ${event.code}, reason: ${event.reason || 'none'})`);
-				resolve();
-			};
+		// Create WebSocketTransport for the connection
+		const wsTransport = new WebSocketTransport({
+			ws,
+			c2cSymbol: null, // No C2C needed for client-facing transport
 		});
+
+		// Accept all channels
+		wsTransport.addEventListener('newChannel', (event) => {
+			event.accept();
+		});
+
+		await wsTransport.start();
+		console.log('WebSocketTransport started');
+
+		// Open the pre-designated 'bidi' channel
+		const bidiChannel = await wsTransport.requestChannel('bidi');
+		await bidiChannel.addMessageTypes(['bidi-frame']);
+
+		// Establish NestedTransport over the bidi channel
+		const nestedTransport = new NestedTransport({
+			channel: bidiChannel,
+			messageType: 'bidi-frame',
+		});
+
+		nestedTransport.addEventListener('newChannel', (event) => {
+			event.accept();
+		});
+
+		await nestedTransport.start();
+		console.log('NestedTransport started');
+
+		// Open the application channel (must match the applet's channel name)
+		const appChannel = await nestedTransport.requestChannel('echo');
+		await appChannel.addMessageTypes(['data']);
+
+		// Read welcome message
+		const welcomeMsg = await appChannel.read({ only: 'data', decode: true });
+		if (welcomeMsg) {
+			await welcomeMsg.process(() => {
+				console.log('Welcome:', welcomeMsg.text);
+			});
+		}
+
+		// Send test messages
+		const messages = [
+			'Hello, WebSocket!',
+			'Testing echo...',
+			JSON.stringify({ type: 'test', value: 42 }),
+			'.'.repeat(1024),
+			'Final message',
+		];
+
+		for (const msg of messages) {
+			console.log(`Sending: "${msg.length > 80 ? msg.slice(0, 80) + '...' : msg}"`);
+			await appChannel.write('data', msg);
+
+			// Read echo response
+			const echoMsg = await appChannel.read({ only: 'data', decode: true });
+			if (echoMsg) {
+				await echoMsg.process(() => {
+					const text = echoMsg.text;
+					console.log(`Received: "${text.length > 80 ? text.slice(0, 80) + '...' : text}"`);
+				});
+			}
+
+			// Wait 1 second between messages
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+		}
+
+		console.log('\nClosing connection...');
+		await nestedTransport.stop();
+		await wsTransport.stop();
+		console.log('Connection closed');
 
 	} catch (error) {
 		console.error('Error:', error.message);

@@ -1,68 +1,85 @@
 /**
  * WebSocket Echo Applet
- * Demonstrates bidirectional communication with the unified frame protocol
- * Echoes back any messages received from the client
- * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Demonstrates bidirectional communication using the PolyTransport channel API
+ * Echoes back any messages received from the client via NestedTransport
+ *
+ * Protocol: PolyTransport channel API via globalThis.JSMAWS
+ * - Reads 'req' message (JSON text) from JSMAWS.server for request metadata
+ * - Writes 'res' message (JSON text) to JSMAWS.server for WebSocket upgrade (status 101)
+ * - Uses JSMAWS.bidi (NestedTransport relay channel) for bidirectional communication
+ * - Instantiates NestedTransport over JSMAWS.bidi to communicate with the client
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-console.debug('Applet loaded');
-self.onmessage = (event) => {
-	const { type, id, headers, mode, data, initialCredits, maxChunkSize } = event.data;
-	const loggable = Object.fromEntries(Object.entries({ type, id, mode, initialCredits, maxChunkSize, dataSize: (data && data.length) ? data.length : undefined }).filter(([_k, v]) => v !== undefined));
-	console.debug(`Applet received message:`, loggable);
+import { NestedTransport } from '@poly-transport/transport/nested.esm.js';
 
-	if (type === 'request' && headers?.upgrade?.toLowerCase() === 'websocket') {
-		// Accept WebSocket upgrade
-		console.debug('Accepting WebSocket upgrade');
-		self.postMessage({
-			type: 'frame',
-			id,
-			mode: 'bidi',
-			status: 101,
-			headers: {
-				upgrade: 'websocket',
-				connection: 'upgrade',
-				'sec-websocket-accept': headers['sec-websocket-key'] // Simplified - real impl would compute
-			},
-			data: null,
-			final: true,
-			keepAlive: true
-		});
+export default async function (_setupData) {
+	const server = globalThis.JSMAWS.server;
+	const bidiChannel = globalThis.JSMAWS.bidi;
 
-		// Responder will send protocol parameters next
+	// Read the incoming request (all data is JSON text — use decode: true)
+	const reqMsg = await server.read({ only: 'req', decode: true });
+	if (!reqMsg) return;
+
+	let requestData;
+	await reqMsg.process(() => {
+		requestData = JSON.parse(reqMsg.text);
+	});
+
+	const { headers } = requestData;
+
+	// Verify this is a WebSocket upgrade request
+	if (headers?.upgrade?.toLowerCase() !== 'websocket') {
+		await server.write('res-error', JSON.stringify({
+			error: 'Expected WebSocket upgrade request',
+		}));
 		return;
 	}
 
-	if (type === 'frame' && mode === 'bidi') {
-		// Check for protocol parameters (first frame from responder)
-		if (initialCredits !== undefined) {
+	// Accept WebSocket upgrade (status 101)
+	await server.write('res', JSON.stringify({
+		status: 101,
+		headers: {
+			upgrade: 'websocket',
+			connection: 'upgrade',
+		},
+	}));
 
-			// Send welcome message
-			const welcome = new TextEncoder().encode(JSON.stringify({
-				type: 'welcome',
-				message: 'WebSocket echo server ready',
-				maxChunkSize
-			}));
+	// Establish NestedTransport over the bidi relay channel
+	// The bidi channel carries NestedTransport byte-stream traffic (bidi-frame message type)
+	const nestedTransport = new NestedTransport({
+		channel: bidiChannel,
+		messageType: 'bidi-frame',
+	});
 
-			self.postMessage({
-				type: 'frame',
-				id,
-				data: welcome,
-				final: true
-			});
-			return;
-		}
+	// Accept all channels from the client
+	nestedTransport.addEventListener('newChannel', (event) => {
+		event.accept();
+	});
 
-		// Received data from client - echo it back
-		if (data && data.length) {
-			// Echo the data
-			self.postMessage({
-				type: 'frame',
-				id,
-				data: data,
-				final: true
-			});
-		}
+	await nestedTransport.start();
+
+	// Request the application channel (client must open the same channel)
+	const appChannel = await nestedTransport.requestChannel('echo');
+	await appChannel.addMessageTypes(['data']);
+
+	// Send welcome message
+	await appChannel.write('data', JSON.stringify({
+		type: 'welcome',
+		message: 'WebSocket echo server ready',
+	}));
+
+	// Echo loop: read messages and echo them back
+	while (true) {
+		const msg = await appChannel.read({ only: 'data', decode: true });
+		if (!msg) break; // Channel closed
+
+		await msg.process(async () => {
+			// Echo the message back
+			await appChannel.write('data', msg.text);
+		});
 	}
-};
+
+	await nestedTransport.stop();
+}
