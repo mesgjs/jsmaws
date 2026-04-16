@@ -10,7 +10,7 @@
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { parseSLID } from './vendor.esm.js';
+import { parseSLID } from '@nanos';
 
 /**
  * Configuration monitor for watching SLID files

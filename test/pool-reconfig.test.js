@@ -11,7 +11,7 @@
 
 import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.0/assert/mod.ts";
 import { OperatorProcess, ServerConfig } from "../src/operator.esm.js";
-import { NANOS, parseSLID } from '../src/vendor.esm.js';
+import { NANOS, parseSLID } from '@nanos';
 
 // ============================================================================
 // Helper Functions

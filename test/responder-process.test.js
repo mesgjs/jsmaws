@@ -13,7 +13,7 @@
  */
 
 import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';
-import { NANOS } from '../src/vendor.esm.js';
+import { NANOS } from '@nanos';
 import { ResponderProcess } from '../src/responder-process.esm.js';
 import { MessageType, createFrame } from '../src/ipc-protocol.esm.js';
 import { Configuration } from '../src/configuration.esm.js';

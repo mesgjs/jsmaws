@@ -12,7 +12,7 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { NANOS, parseSLID } from './vendor.esm.js';
+import { NANOS, parseSLID } from '@nanos';
 import { createSSLManager } from './ssl-manager.esm.js';
 import { Router } from './router-worker.esm.js';
 import { Configuration } from './configuration.esm.js';

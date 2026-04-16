@@ -1,48 +1,50 @@
 /**
  * Tests for ServiceProcess base class
+ *
+ * Uses real PipeTransport with in-memory backing (makePipeTransportPair)
+ * to test the PolyTransport-based control channel message loop.
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertRejects } from 'https://deno.land/std@0.208.0/assert/mod.ts';
-import { NANOS } from '../src/vendor.esm.js';
-import { ServiceProcess } from '../src/service-process.esm.js';
+import { makePipeTransportPair } from '@poly-transport-test/transport-pipe-helpers.js';
+import { ServiceProcess, CONTROL_MESSAGE_TYPES } from '../src/service-process.esm.js';
 import { Configuration } from '../src/configuration.esm.js';
-import { MessageType } from '../src/ipc-protocol.esm.js';
 
 /**
- * Mock service process for testing
+ * Concrete subclass of ServiceProcess for testing.
+ * Overrides abstract methods to record calls and allow test control.
  */
-class MockServiceProcess extends ServiceProcess {
+class TestServiceProcess extends ServiceProcess {
 	constructor (processId) {
-		super('mock', processId);
-		this.configUpdateCalled = false;
-		this.healthCheckCalled = false;
+		super('test', processId ?? 'test-proc-1');
+		this.configUpdates = [];
+		this.healthChecks = [];
 		this.shutdownCalled = false;
+		this.reqChannels = [];
 		this.onStartedCalled = false;
-		this.config = new Configuration();
 	}
 
-	handleConfigUpdate (fields) {
-		this.configUpdateCalled = true;
-		this.config.set('test', fields.at('test'));
+	async handleConfigUpdate (configJson) {
+		this.configUpdates.push(JSON.parse(configJson));
+		if (!this.config) {
+			this.config = new Configuration(JSON.parse(configJson));
+		}
 	}
 
-	async handleHealthCheck (id, fields) {
-		this.healthCheckCalled = true;
-		const response = new NANOS(MessageType.HEALTH_CHECK, { id });
-		response.setOpts({ transform: true });
-		response.push([{
-			timestamp: fields.at('timestamp'),
-			status: 'ok',
-		}]);
-		await this.ipcConn.writeMessage(response);
+	async handleHealthCheck (msg) {
+		this.healthChecks.push(msg);
+		await this.controlChannel.write('health-response', JSON.stringify({ status: 'ok' }));
 	}
 
-	async handleShutdown (fields) {
+	async handleShutdown (_msg) {
 		this.shutdownCalled = true;
 		this.isShuttingDown = true;
-		if (this.ipcConn) {
-			await this.ipcConn.close();
-		}
+	}
+
+	async handleReqChannel (reqChannel) {
+		this.reqChannels.push(reqChannel);
 	}
 
 	async onStarted () {
@@ -51,194 +53,85 @@ class MockServiceProcess extends ServiceProcess {
 }
 
 /**
- * Mock IPC connection for testing event-driven architecture
+ * Helper: create a connected transport pair and set up a TestServiceProcess
+ * with the service-side transport and control channel already open.
+ *
+ * Both sides call requestChannel('control') simultaneously — PolyTransport
+ * settles to the lowest channel ID.
+ *
+ * Returns { proc, operatorTransport, serviceTransport, operatorControlChannel, cleanup }
  */
-class MockIPCConnection {
-	constructor () {
-		this.messageHandlers = new Map();
-		this.writtenMessages = [];
-		this.closed = false;
-		this.monitoring = false;
-	}
+async function setupServiceProcess (processId) {
+	const [operatorTransport, serviceTransport] = await makePipeTransportPair();
 
-	// Register message handler (event-driven)
-	onMessage (type, handler) {
-		this.messageHandlers.set(type, handler);
-	}
+	// Accept all channels on both sides
+	operatorTransport.addEventListener('newChannel', (event) => { event.accept(); });
+	serviceTransport.addEventListener('newChannel', (event) => { event.accept(); });
 
-	// Simulate receiving a message (for testing)
-	async simulateMessage (type, id, fields, binaryData = null) {
-		const handler = this.messageHandlers.get(type);
-		if (handler) {
-			const message = { type, id, fields };
-			await handler(message, binaryData);
-		}
-	}
+	const proc = new TestServiceProcess(processId);
 
-	// Write message
-	writeMessage (message, binaryData = null) {
-		this.writtenMessages.push({ message, binaryData });
-	}
+	// Inject the pre-started transport (bypass createTransport() which uses stdin/stdout)
+	proc.transport = serviceTransport;
+	proc.config = new Configuration({});
 
-	// Start monitoring (no-op for mock)
-	async startMonitoring () {
-		this.monitoring = true;
-		// In real implementation, this would block and read messages
-		// For testing, we just set the flag
-	}
+	// Both sides request the control channel simultaneously
+	// PolyTransport settles to the lowest channel ID
+	const [operatorControlChannel, serviceControlChannel] = await Promise.all([
+		operatorTransport.requestChannel('control'),
+		serviceTransport.requestChannel('control'),
+	]);
 
-	// Stop monitoring
-	stopMonitoring () {
-		this.monitoring = false;
-	}
+	await Promise.all([
+		operatorControlChannel.addMessageTypes(CONTROL_MESSAGE_TYPES),
+		serviceControlChannel.addMessageTypes(CONTROL_MESSAGE_TYPES),
+	]);
 
-	// Close connection
-	async close () {
-		this.closed = true;
-		this.stopMonitoring();
-	}
+	proc.controlChannel = serviceControlChannel;
+
+	const cleanup = async () => {
+		// Stop both transports; ignore errors (e.g. already stopped)
+		await Promise.allSettled([
+			operatorTransport.stop({ discard: true }),
+			serviceTransport.stop({ discard: true }),
+		]);
+	};
+
+	return { proc, operatorTransport, serviceTransport, operatorControlChannel, cleanup };
 }
 
+// ─── Constructor Tests ────────────────────────────────────────────────────────
+
 Deno.test('ServiceProcess - constructor sets process type and ID', () => {
-	const process = new MockServiceProcess('test-123');
-	assertEquals(process.processType, 'mock');
-	assertEquals(process.processId, 'test-123');
-	assertEquals(process.isShuttingDown, false);
+	const proc = new TestServiceProcess('test-123');
+	assertEquals(proc.processType, 'test');
+	assertEquals(proc.processId, 'test-123');
+	assertEquals(proc.isShuttingDown, false);
+});
+
+Deno.test('ServiceProcess - constructor uses provided ID', () => {
+	const proc = new TestServiceProcess('my-proc');
+	assertEquals(proc.processId, 'my-proc');
 });
 
 Deno.test('ServiceProcess - constructor generates ID if not provided', () => {
-	const process = new MockServiceProcess();
-	assertEquals(process.processType, 'mock');
-	assertEquals(process.processId.startsWith('mock-'), true);
+	const proc = new TestServiceProcess();
+	assertEquals(proc.processType, 'test');
+	assertEquals(proc.processId.startsWith('test-'), true);
 });
 
-Deno.test('ServiceProcess - getMessageHandlers returns base handlers', () => {
-	const process = new MockServiceProcess('test-123');
-	const handlers = process.getMessageHandlers();
-
-	assertEquals(handlers.has(MessageType.CONFIG_UPDATE), true);
-	assertEquals(handlers.has(MessageType.HEALTH_CHECK), true);
-	assertEquals(handlers.has(MessageType.SHUTDOWN), true);
-});
-
-Deno.test('ServiceProcess - setupMessageHandlers registers CONFIG_UPDATE handler', async () => {
-	const process = new MockServiceProcess('test-123');
-	const mockConn = new MockIPCConnection();
-	process.ipcConn = mockConn;
-
-	// Setup handlers
-	process.setupMessageHandlers();
-
-	// Verify handler is registered
-	assertEquals(mockConn.messageHandlers.has(MessageType.CONFIG_UPDATE), true);
-
-	// Simulate receiving a config update message
-	const fields = new NANOS({ test: 'value' });
-	await mockConn.simulateMessage(MessageType.CONFIG_UPDATE, 'cfg-1', fields);
-
-	assertEquals(process.configUpdateCalled, true);
-	assertEquals(process.config.get('test'), 'value');
-});
-
-Deno.test('ServiceProcess - setupMessageHandlers registers HEALTH_CHECK handler', async () => {
-	const process = new MockServiceProcess('test-123');
-	const mockConn = new MockIPCConnection();
-	process.ipcConn = mockConn;
-
-	// Setup handlers
-	process.setupMessageHandlers();
-
-	// Verify handler is registered
-	assertEquals(mockConn.messageHandlers.has(MessageType.HEALTH_CHECK), true);
-
-	// Simulate receiving a health check message
-	const fields = new NANOS({ timestamp: Date.now() });
-	await mockConn.simulateMessage(MessageType.HEALTH_CHECK, 'hc-1', fields);
-
-	assertEquals(process.healthCheckCalled, true);
-	assertEquals(mockConn.writtenMessages.length, 1);
-	assertEquals(mockConn.writtenMessages[0].message.at(0), MessageType.HEALTH_CHECK);
-});
-
-Deno.test('ServiceProcess - setupMessageHandlers registers SHUTDOWN handler', async () => {
-	const process = new MockServiceProcess('test-123');
-	const mockConn = new MockIPCConnection();
-	process.ipcConn = mockConn;
-
-	// Setup handlers
-	process.setupMessageHandlers();
-
-	// Verify handler is registered
-	assertEquals(mockConn.messageHandlers.has(MessageType.SHUTDOWN), true);
-
-	// Simulate receiving a shutdown message
-	const fields = new NANOS({ timeout: 30 });
-	await mockConn.simulateMessage(MessageType.SHUTDOWN, 'halt-1', fields);
-
-	assertEquals(process.shutdownCalled, true);
-	assertEquals(process.isShuttingDown, true);
-	assertEquals(mockConn.closed, true);
-});
-
-Deno.test('ServiceProcess - setupMessageHandlers handles handler errors gracefully', async () => {
-	const process = new MockServiceProcess('test-123');
-	const mockConn = new MockIPCConnection();
-	process.ipcConn = mockConn;
-
-	// Override handler to throw error
-	process.handleConfigUpdate = () => {
-		throw new Error('Handler error');
-	};
-
-	// Setup handlers
-	process.setupMessageHandlers();
-
-	// Simulate message - should not crash
-	const fields = new NANOS({ test: 'value' });
-	await mockConn.simulateMessage(MessageType.CONFIG_UPDATE, 'cfg-1', fields);
-
-	// Process should still be functional
-	assertEquals(process.isShuttingDown, false);
-});
-
-Deno.test('ServiceProcess - startMonitoring is called during start', async () => {
-	const process = new MockServiceProcess('test-123');
-	const mockConn = new MockIPCConnection();
-
-	// Mock the IPC connection creation
-	process.createIPCConnection = () => {
-		process.ipcConn = mockConn;
-	};
-
-	// Mock waitForInitialConfig to avoid actual IPC
-	process.waitForInitialConfig = async () => {
-		process.config = new Configuration();
-	};
-
-	// Start the process (will call startMonitoring)
-	const startPromise = process.start();
-
-	// Wait a bit for setup
-	await new Promise(resolve => setTimeout(resolve, 50));
-
-	// Verify monitoring was started
-	assertEquals(mockConn.monitoring, true);
-
-	// Cleanup - close connection to exit monitoring
-	await mockConn.close();
-	await startPromise;
-});
+// ─── Abstract Method Tests ────────────────────────────────────────────────────
 
 Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async () => {
 	class IncompleteProcess extends ServiceProcess {
-		constructor () {
-			super('incomplete', 'test-123');
-		}
+		constructor () { super('incomplete', 'test-123'); }
+		async handleHealthCheck () {}
+		async handleShutdown () {}
+		async handleReqChannel () {}
 	}
 
-	const process = new IncompleteProcess();
+	const proc = new IncompleteProcess();
 	await assertRejects(
-		() => process.handleConfigUpdate(new NANOS()),
+		() => proc.handleConfigUpdate('{}'),
 		Error,
 		'Subclass must implement handleConfigUpdate()'
 	);
@@ -246,14 +139,15 @@ Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async (
 
 Deno.test('ServiceProcess - subclass must implement handleHealthCheck', async () => {
 	class IncompleteProcess extends ServiceProcess {
-		constructor () {
-			super('incomplete', 'test-123');
-		}
+		constructor () { super('incomplete', 'test-123'); }
+		async handleConfigUpdate () {}
+		async handleShutdown () {}
+		async handleReqChannel () {}
 	}
 
-	const process = new IncompleteProcess();
+	const proc = new IncompleteProcess();
 	await assertRejects(
-		() => process.handleHealthCheck('id', new NANOS()),
+		() => proc.handleHealthCheck(null),
 		Error,
 		'Subclass must implement handleHealthCheck()'
 	);
@@ -261,21 +155,197 @@ Deno.test('ServiceProcess - subclass must implement handleHealthCheck', async ()
 
 Deno.test('ServiceProcess - subclass must implement handleShutdown', async () => {
 	class IncompleteProcess extends ServiceProcess {
-		constructor () {
-			super('incomplete', 'test-123');
-		}
+		constructor () { super('incomplete', 'test-123'); }
+		async handleConfigUpdate () {}
+		async handleHealthCheck () {}
+		async handleReqChannel () {}
 	}
 
-	const process = new IncompleteProcess();
+	const proc = new IncompleteProcess();
 	await assertRejects(
-		() => process.handleShutdown(new NANOS()),
+		() => proc.handleShutdown(null),
 		Error,
 		'Subclass must implement handleShutdown()'
 	);
 });
 
+Deno.test('ServiceProcess - subclass must implement handleReqChannel', async () => {
+	class IncompleteProcess extends ServiceProcess {
+		constructor () { super('incomplete', 'test-123'); }
+		async handleConfigUpdate () {}
+		async handleHealthCheck () {}
+		async handleShutdown () {}
+	}
+
+	const proc = new IncompleteProcess();
+	await assertRejects(
+		() => proc.handleReqChannel(null),
+		Error,
+		'Subclass must implement handleReqChannel()'
+	);
+});
+
+// ─── onStarted Hook ───────────────────────────────────────────────────────────
+
 Deno.test('ServiceProcess - onStarted hook is called', async () => {
-	const process = new MockServiceProcess('test-123');
-	await process.onStarted();
-	assertEquals(process.onStartedCalled, true);
+	const proc = new TestServiceProcess('test-123');
+	await proc.onStarted();
+	assertEquals(proc.onStartedCalled, true);
+});
+
+// ─── Control Channel Message Handling ────────────────────────────────────────
+
+Deno.test('ServiceProcess - handles config-update message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('cfg-test');
+
+	try {
+		// Start a single-message read loop on the service side
+		const loopPromise = (async () => {
+			try {
+				const msg = await proc.controlChannel.read({
+					only: ['config-update', 'health-check', 'shutdown', 'scale-down'],
+					decode: true,
+				});
+				if (msg) {
+					await msg.process(async () => {
+						if (msg.messageType === 'config-update') {
+							await proc.handleConfigUpdate(msg.text);
+						}
+					});
+				}
+			} catch (err) {
+				// Ignore transport-stopping errors during cleanup
+				if (err instanceof Error) console.log(err);
+			}
+		})();
+
+		// Send config-update from operator
+		const configData = { maxChunkSize: 65536, pools: {} };
+		await operatorControlChannel.write('config-update', JSON.stringify(configData));
+
+		await loopPromise;
+
+		assertEquals(proc.configUpdates.length, 1);
+		assertEquals(proc.configUpdates[0].maxChunkSize, 65536);
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('ServiceProcess - handles health-check message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('hc-test');
+
+	try {
+		// Start a single-message read loop on the service side
+		const loopPromise = (async () => {
+			try {
+				const msg = await proc.controlChannel.read({
+					only: ['config-update', 'health-check', 'shutdown', 'scale-down'],
+					decode: true,
+				});
+				if (msg) {
+					await msg.process(async () => {
+						if (msg.messageType === 'health-check') {
+							await proc.handleHealthCheck(msg);
+						}
+					});
+				}
+			} catch (_err) {
+				// Ignore transport-stopping errors during cleanup
+			}
+		})();
+
+		// Send health-check from operator
+		await operatorControlChannel.write('health-check', JSON.stringify({ timestamp: Date.now() }));
+
+		// Wait for health-response on the operator side
+		const responseMsg = await operatorControlChannel.read({ only: 'health-response', decode: true });
+		let responseData;
+		await responseMsg.process(() => {
+			responseData = JSON.parse(responseMsg.text);
+		});
+
+		await loopPromise;
+
+		assertEquals(proc.healthChecks.length, 1);
+		assertEquals(responseData.status, 'ok');
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('ServiceProcess - handles shutdown message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('shutdown-test');
+
+	try {
+		// Start a single-message read loop on the service side
+		const loopPromise = (async () => {
+			try {
+				const msg = await proc.controlChannel.read({
+					only: ['config-update', 'health-check', 'shutdown', 'scale-down'],
+					decode: true,
+				});
+				if (msg) {
+					await msg.process(async () => {
+						if (msg.messageType === 'shutdown') {
+							await proc.handleShutdown(msg);
+						}
+					});
+				}
+			} catch (_err) {
+				// Ignore transport-stopping errors during cleanup
+			}
+		})();
+
+		// Send shutdown from operator
+		await operatorControlChannel.write('shutdown', JSON.stringify({ timeout: 30 }));
+
+		await loopPromise;
+
+		assertEquals(proc.shutdownCalled, true);
+		assertEquals(proc.isShuttingDown, true);
+	} finally {
+		await cleanup();
+	}
+});
+
+// ─── sendCapacityUpdate ───────────────────────────────────────────────────────
+
+Deno.test('ServiceProcess - sendCapacityUpdate sends capacity-update message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('cap-test');
+
+	try {
+		// Send capacity update from service process
+		await proc.sendCapacityUpdate(5, 10);
+
+		// Read it on the operator side
+		const msg = await operatorControlChannel.read({ only: 'capacity-update', decode: true });
+		let data;
+		await msg.process(() => {
+			data = JSON.parse(msg.text);
+		});
+
+		assertEquals(data.availableWorkers, 5);
+		assertEquals(data.totalWorkers, 10);
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('ServiceProcess - sendCapacityUpdate is no-op when no controlChannel', async () => {
+	const proc = new TestServiceProcess('no-channel');
+	// controlChannel is null — should not throw
+	await proc.sendCapacityUpdate(1, 2);
+	// No assertion needed — just verifying no error is thrown
+});
+
+// ─── CONTROL_MESSAGE_TYPES export ────────────────────────────────────────────
+
+Deno.test('ServiceProcess - CONTROL_MESSAGE_TYPES includes expected types', () => {
+	assertEquals(CONTROL_MESSAGE_TYPES.includes('config-update'), true);
+	assertEquals(CONTROL_MESSAGE_TYPES.includes('health-check'), true);
+	assertEquals(CONTROL_MESSAGE_TYPES.includes('health-response'), true);
+	assertEquals(CONTROL_MESSAGE_TYPES.includes('shutdown'), true);
+	assertEquals(CONTROL_MESSAGE_TYPES.includes('scale-down'), true);
+	assertEquals(CONTROL_MESSAGE_TYPES.includes('capacity-update'), true);
 });

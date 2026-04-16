@@ -3,7 +3,7 @@
  */
 
 import { assertEquals, assertThrows } from 'https://deno.land/std@0.208.0/assert/mod.ts';
-import { NANOS } from '../src/vendor.esm.js';
+import { NANOS } from '@nanos';
 import { OperatorProcess, ServerConfig } from '../src/operator.esm.js';
 
 // Mock Deno.uid for testing

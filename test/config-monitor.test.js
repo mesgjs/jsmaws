@@ -4,7 +4,7 @@
 
 import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";
 import { ConfigMonitor, createConfigMonitor } from "../src/config-monitor.esm.js";
-import { NANOS } from '../src/vendor.esm.js';
+import { NANOS } from '@nanos';
 
 Deno.test("ConfigMonitor - creates instance", () => {
 	const monitor = new ConfigMonitor('test.slid', null);

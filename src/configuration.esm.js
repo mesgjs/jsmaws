@@ -8,7 +8,7 @@
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { NANOS } from './vendor.esm.js';
+import { NANOS } from '@nanos';
 
 /**
  * Configuration class

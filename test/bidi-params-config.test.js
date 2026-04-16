@@ -5,7 +5,7 @@
 
 import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { Configuration } from '../src/configuration.esm.js';
-import { NANOS } from '../src/vendor.esm.js';
+import { NANOS } from '@nanos';
 
 Deno.test('getBidiParams - global defaults', () => {
 	const config = Configuration.fromSLID(`[(

@@ -7,7 +7,7 @@ import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.
 import { Router, Route } from "../src/router-worker.esm.js";
 import { RouterWorkerProxy } from "../src/router-worker-proxy.esm.js";
 import { Configuration } from "../src/configuration.esm.js";
-import { NANOS } from '../src/vendor.esm.js';
+import { NANOS } from '@nanos';
 
 // ============================================================================
 // Route Class - Path Parsing Tests

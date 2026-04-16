@@ -7,7 +7,7 @@
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { parseSLID } from './vendor.esm.js';
+import { parseSLID } from '@nanos';
 import { OperatorProcess, ServerConfig } from './operator-process.esm.js';
 
 const DEFAULT_CONFIG_FILE = 'jsmaws.slid';
