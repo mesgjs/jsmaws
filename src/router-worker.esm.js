@@ -3,12 +3,12 @@
  * Handles request routing based on SLID configuration
  *
  * Routes are matched in order, with the first matching route being used.
- * 
+ *
  * Route Types:
  * - Filesystem routes: Contain @name or @* applet components (require filesystem access)
  * - Virtual routes: Have explicit app property (including @static) or response property
  * - Response routes: Virtual routes with response code (and possibly href for redirects)
- * 
+ *
  * Supports:
  * - Literal path matching
  * - Parameter matching (:name, :?name, :*)
@@ -18,8 +18,8 @@
  * - Pool-based request routing
  * - Response codes and redirects
  * - Static file serving via @static applet
- * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { NANOS } from '@nanos';
@@ -30,7 +30,7 @@ import { Configuration } from './configuration.esm.js';
  */
 class Route {
 	constructor (spec, config = null) {
-		this.spec = spec;
+		this.spec = spec; // Plain object (from Configuration.routes)
 		this.config = config; // Configuration instance
 		this.pathParts = [];
 		this.regexPattern = null;
@@ -40,7 +40,7 @@ class Route {
 		this.href = null; // Redirect target
 		this.app = null; // Applet path (or @static for static files)
 		this.root = null; // Local root directory
-		this.headers = new NANOS(); // Response headers
+		this.headers = {}; // Response headers (plain object)
 		this.isFilesystem = false; // Filesystem route (requires FS access)
 		this.isVirtual = false; // Virtual route (explicit app or response)
 
@@ -75,7 +75,7 @@ class Route {
 		// Neither filesystem nor virtual - invalid route
 		this.isFilesystem = false;
 		this.isVirtual = false;
-		console.warn(`Route has no applet resolution mechanism: ${this.spec.at('path', '(no path)')}`);
+		console.warn(`Route has no applet resolution mechanism: ${this.spec.path ?? '(no path)'}`);
 	}
 
 	/**
@@ -254,10 +254,14 @@ class Route {
 			return [methodSpec.toLowerCase()];
 		}
 
-		if (methodSpec instanceof NANOS) {
-			// Iterate through NANOS values
+		// Handle plain arrays (from toObject({ array: true })) or NANOS (legacy)
+		const values = Array.isArray(methodSpec)
+			? methodSpec
+			: (methodSpec instanceof NANOS ? [...methodSpec.values()] : null);
+
+		if (values) {
 			const methods = [];
-			for (const m of methodSpec.values()) {
+			for (const m of values) {
 				if (m === 'read') {
 					methods.push('get', 'head');
 				} else if (m === 'write') {
@@ -304,62 +308,56 @@ class Route {
 	 * Parse route specification from NANOS object
 	 */
 	parseSpec () {
+		// spec is a plain object (from Configuration.routes via toObject({ array: true }))
+		const spec = this.spec;
+
 		// Parse path specification
-		const pathSpec = this.spec.at('path');
-		if (pathSpec) {
-			this.pathParts = this.parsePath(pathSpec);
+		if (spec.path) {
+			this.pathParts = this.parsePath(spec.path);
 		}
 
 		// Parse regex pattern
-		const regexSpec = this.spec.at('regex');
-		if (regexSpec) {
+		if (spec.regex) {
 			try {
-				this.regexPattern = new RegExp(regexSpec);
+				this.regexPattern = new RegExp(spec.regex);
 			} catch (error) {
-				console.error(`Invalid regex pattern: ${regexSpec}`, error);
+				console.error(`Invalid regex pattern: ${spec.regex}`, error);
 			}
 		}
 
 		// Parse pool name
-		const poolSpec = this.spec.at('pool');
-		if (poolSpec) {
-			this.pool = poolSpec;
+		if (spec.pool) {
+			this.pool = spec.pool;
 		}
 
 		// Parse HTTP methods
-		const methodSpec = this.spec.at('method');
-		if (methodSpec) {
-			this.method = this.parseMethod(methodSpec);
+		if (spec.method) {
+			this.method = this.parseMethod(spec.method);
 		}
 
 		// Parse response code
-		const responseSpec = this.spec.at('response');
-		if (responseSpec) {
-			this.response = responseSpec;
+		if (spec.response) {
+			this.response = spec.response;
 		}
 
 		// Parse redirect href
-		const hrefSpec = this.spec.at('href');
-		if (hrefSpec) {
-			this.href = hrefSpec;
+		if (spec.href) {
+			this.href = spec.href;
 		}
 
 		// Parse applet path (including @static for static file serving)
-		const appSpec = this.spec.at('app');
-		if (appSpec) {
-			this.app = appSpec;
+		if (spec.app) {
+			this.app = spec.app;
 		}
 
 		// Parse local root
-		const rootSpec = this.spec.at('root');
-		if (rootSpec) {
-			this.root = rootSpec;
+		if (spec.root) {
+			this.root = spec.root;
 		}
 
-		// Parse response headers - work with NANOS directly
-		const headersSpec = this.spec.at('headers');
-		if (headersSpec && headersSpec instanceof NANOS) {
-			this.headers = headersSpec;
+		// Parse response headers (plain object)
+		if (spec.headers && typeof spec.headers === 'object') {
+			this.headers = spec.headers;
 		}
 
 		// Classify route type based on parsed data
@@ -474,17 +472,17 @@ class Router {
 	 * Parse configuration and create routes
 	 */
 	parseConfig () {
-		// Parse routes - routes is a NANOS containing route specifications
+		// Parse routes - routes is a plain array (from Configuration.routes via toObject({ array: true }))
 		const routesSpec = this.config.routes;
-		if (routesSpec && routesSpec instanceof NANOS) {
-			// Iterate through NANOS values (each is a route specification)
-			this.routes = [];
-			for (const routeSpec of routesSpec.values()) {
+		this.routes = [];
+		if (Array.isArray(routesSpec)) {
+			for (const routeSpec of routesSpec) {
+				if (!routeSpec || typeof routeSpec !== 'object') continue;
 				const route = new Route(routeSpec, this.config);
 
 				// Skip filesystem routes when fsRouting is disabled
 				if (!this.config.routing.fsRouting && route.isFilesystem) {
-					console.error(`Skipping filesystem route (fsRouting disabled): ${route.spec.at('path', '(no path)')}`);
+					console.error(`Skipping filesystem route (fsRouting disabled): ${route.spec.path ?? '(no path)'}`);
 					continue;
 				}
 

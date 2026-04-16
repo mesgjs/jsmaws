@@ -32,19 +32,19 @@ const ACME_CHALLENGE_PREFIX = '/.well-known/acme-challenge/';
 
 /**
  * Get default pool configuration when none is provided
- * @returns {NANOS} Default pools configuration
+ * @returns {Object} Default pools configuration (plain object)
  */
 function getDefaultPoolsConfig () {
-	return parseSLID(`[(
-		standard=[
-			minProcs=1
-			maxProcs=20
-			maxWorkers=4
-			maxReqs=100
-			reqTimeout=60
-			conTimeout=300
-		]
-	)]`);
+	return {
+		standard: {
+			minProcs: 1,
+			maxProcs: 20,
+			maxWorkers: 4,
+			maxReqs: 100,
+			reqTimeout: 60,
+			conTimeout: 300,
+		},
+	};
 }
 
 /**
@@ -78,8 +78,8 @@ export class ServerConfig {
 export class OperatorProcess {
 	constructor (config, configPath) {
 		this.config = config;
-		this.configData = new NANOS(); // Full SLID configuration
-		this.configuration = null; // Configuration instance for router
+		this.configData = new NANOS(); // Full SLID configuration (NANOS, for legacy compat)
+		this.configuration = new Configuration({}); // Configuration instance (plain objects)
 		this.configPath = configPath;
 		this.httpServer = null;
 		this.httpsServer = null;
@@ -135,7 +135,7 @@ export class OperatorProcess {
 	 * Forward request to service process via PipeTransport using state machine
 	 */
 	async forwardToServiceProcess (req, route, match, remote) {
-		const poolName = route.spec.at('pool', 'standard');
+		const poolName = route.spec?.pool ?? 'standard';
 		const appletPath = match.app || route.app;
 		const root = match.root;
 
@@ -290,22 +290,23 @@ export class OperatorProcess {
 	 */
 	async handleConfigUpdate (newConfig) {
 		this.logger.info('Configuration updated; reloading...');
-		this.configData = newConfig;
+		this.configData = newConfig; // Keep NANOS for legacy compat
+
+		// Update Configuration instance (converts NANOS to plain objects)
+		this.configuration.updateConfig(newConfig);
 
 		// Apply default pool config if pools section is missing
-		let poolsConfig = this.configData.at('pools');
-		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
+		if (!this.configuration.config.pools || Object.keys(this.configuration.config.pools).length === 0) {
 			this.logger.warn('No pools configured in reload, using defaults');
-			poolsConfig = getDefaultPoolsConfig();
-			this.configData.set('pools', poolsConfig);
+			this.configuration.config.pools = getDefaultPoolsConfig();
+			this.configuration._pools = null; // Invalidate cache
 		}
 
 		// Update server config
 		this.config = ServerConfig.fromNANOS(newConfig);
 
 		// Update router configuration
-		if (this.configuration && this.router) {
-			this.configuration.updateConfig(newConfig);
+		if (this.router) {
 			this.router.updateConfig();
 			this.logger.debug(`Router updated with ${this.router.routes.length} route(s)`);
 		}
@@ -433,11 +434,11 @@ export class OperatorProcess {
 	 * Initialize logger
 	 */
 	initializeLogger () {
-		const loggingConfig = this.configData.at('logging') || new NANOS();
+		const loggingConfig = this.configuration.logging;
 		this.logger = createLogger({
-			target: loggingConfig.at('target', 'console'),
-			level: loggingConfig.at('level', 'info'),
-			format: loggingConfig.at('format', 'apache'),
+			target: loggingConfig.destination ?? 'console',
+			level: loggingConfig.level ?? 'info',
+			format: loggingConfig.format ?? 'apache',
 			component: 'operator',
 		});
 	}
@@ -446,31 +447,30 @@ export class OperatorProcess {
 	 * Initialize process manager
 	 */
 	initializeProcessManager () {
-		this.processManager = new ProcessManager(this.configData, this.logger);
+		this.processManager = new ProcessManager(this.configuration, this.logger);
 	}
 
 	/**
 	 * Initialize service process pools
 	 */
 	async initializeProcessPools () {
-		let poolsConfig = this.configData.at('pools');
-		if (!poolsConfig || !(poolsConfig instanceof NANOS)) {
+		let poolsConfig = this.configuration.pools;
+		if (!poolsConfig || Object.keys(poolsConfig).length === 0) {
 			this.logger.warn('No pools configured, using defaults');
 			poolsConfig = getDefaultPoolsConfig();
-			this.configData.set('pools', poolsConfig);
+			this.configuration.config.pools = poolsConfig;
+			this.configuration._pools = null; // Invalidate cache
 		}
 
 		// Create PoolManager for each pool
-		for (const [poolName, poolConfig] of poolsConfig.entries()) {
+		for (const [poolName, poolConfig] of Object.entries(poolsConfig)) {
 			if (poolName === '@router') {
-				const fsRouting = this.configData.at('fsRouting', false);
+				const fsRouting = this.configuration.routing.fsRouting;
 				if (fsRouting) {
 					this.logger.info(`Initializing router pool '${poolName}' (filesystem routing)`);
 				}
 			} else {
 				this.logger.info(`Initializing pool '${poolName}' with PoolManager`);
-
-				const configObj = poolConfig instanceof NANOS ? poolConfig.toObject() : poolConfig;
 
 				const itemFactory = async (itemId) => {
 					return await this.processManager.createProcess(
@@ -481,7 +481,7 @@ export class OperatorProcess {
 					);
 				};
 
-				const poolManager = new PoolManager(poolName, configObj, itemFactory, this.logger);
+				const poolManager = new PoolManager(poolName, poolConfig, itemFactory, this.logger);
 				await poolManager.initialize();
 
 				this.poolManagers.set(poolName, poolManager);
@@ -493,7 +493,8 @@ export class OperatorProcess {
 	 * Initialize router with current configuration
 	 */
 	initializeRouter () {
-		this.configuration = new Configuration(this.configData);
+		// this.configuration is already initialized in constructor and updated via handleConfigUpdate
+		// Just create the router with the current configuration
 		this.router = new Router(this.configuration);
 		this.logger.debug(`Router initialized with ${this.router.routes.length} route(s)`);
 	}
@@ -535,7 +536,7 @@ export class OperatorProcess {
 		}
 		this.isShuttingDown = true;
 
-		stopTime ??= this.configData.at('shutdownDelay', 30);
+		stopTime ??= this.configuration.config.shutdownDelay ?? 30;
 		this.logger.info(`Shutting down JSMAWS operator process (${stopTime}s)...`);
 
 		if (this.healthCheckInterval) {
@@ -629,7 +630,7 @@ export class OperatorProcess {
 	 * Start health check monitoring
 	 */
 	startHealthCheckMonitoring () {
-		const intervalSeconds = this.configData.at('healthCheckInterval', 60);
+		const intervalSeconds = this.configuration.config.healthCheckInterval ?? 60;
 
 		this.healthCheckInterval = setInterval(async () => {
 			try {
@@ -720,14 +721,14 @@ export class OperatorProcess {
 	 */
 	async updateProcessPools () {
 		this.logger.info('Updating process pools');
-		const newPoolsConfig = this.configData.at('pools');
-		if (!newPoolsConfig || !(newPoolsConfig instanceof NANOS)) {
+		const newPoolsConfig = this.configuration.pools;
+		if (!newPoolsConfig || Object.keys(newPoolsConfig).length === 0) {
 			this.logger.error('updateProcessPools called but no pools config available');
 			return;
 		}
 
-		const stopTime = this.configData.at('shutdownDelay', 30);
-		const newPoolNames = new Set(newPoolsConfig.keys());
+		const stopTime = this.configuration.config.shutdownDelay ?? 30;
+		const newPoolNames = new Set(Object.keys(newPoolsConfig));
 		const oldPoolNames = new Set(this.poolManagers.keys());
 
 		// Identify pools to remove, reconfigure, and add
@@ -756,11 +757,10 @@ export class OperatorProcess {
 		// Phase 1: Reconfigure existing pools
 		for (const poolName of poolsToReconfig) {
 			const poolManager = this.poolManagers.get(poolName);
-			const newPoolConfig = newPoolsConfig.at(poolName);
+			const newPoolConfig = newPoolsConfig[poolName];
 
 			try {
-				const configObj = newPoolConfig instanceof NANOS ? newPoolConfig.toObject() : newPoolConfig;
-				poolManager.updateConfig(configObj);
+				poolManager.updateConfig(newPoolConfig);
 				this.logger.info(`Pool '${poolName}' reconfigured`);
 			} catch (error) {
 				this.logger.error(`Failed to reconfigure pool '${poolName}': ${error.message}`);
@@ -771,12 +771,10 @@ export class OperatorProcess {
 		const addPromises = [];
 		for (const poolName of poolsToAdd) {
 			this.logger.info(`Creating new pool: ${poolName}`);
-			const poolConfig = newPoolsConfig.at(poolName);
+			const poolConfig = newPoolsConfig[poolName];
 
 			const addPromise = (async () => {
 				try {
-					const configObj = poolConfig instanceof NANOS ? poolConfig.toObject() : poolConfig;
-
 					const itemFactory = async (itemId) => {
 						return await this.processManager.createProcess(
 							itemId,
@@ -786,7 +784,7 @@ export class OperatorProcess {
 						);
 					};
 
-					const poolManager = new PoolManager(poolName, configObj, itemFactory, this.logger);
+					const poolManager = new PoolManager(poolName, poolConfig, itemFactory, this.logger);
 					await poolManager.initialize();
 
 					this.poolManagers.set(poolName, poolManager);
@@ -847,8 +845,8 @@ export class OperatorProcess {
 	 */
 	validatePrivilegeConfiguration () {
 		const isRoot = Deno.uid() === 0;
-		const uid = this.configData.at('uid');
-		const gid = this.configData.at('gid');
+		const uid = this.configuration.config.uid;
+		const gid = this.configuration.config.gid;
 
 		if (isRoot) {
 			if (!uid || !gid) {

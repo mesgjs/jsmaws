@@ -2,8 +2,8 @@
 
 **Status:** [APPROVED]  
 **Date:** 2026-04-11  
-**Updated:** 2026-04-13 (rev 5)  
-**Scope:** Replace all custom IPC, bidi flow-control, and applet-communication code with the PolyTransport library
+**Updated:** 2026-04-16 (rev 6)  
+**Scope:** Replace all custom IPC, bidi flow-control, and applet-communication code with the PolyTransport library; convert Configuration class to use plain JS objects
 
 ---
 
@@ -1556,4 +1556,278 @@ The PolyTransport adoption simplifies the implementation of the proposed archite
 
 ---
 
-[supplemental keywords: transport, IPC, inter-process communication, pipe, postMessage, WebSocket, flow control, backpressure, channel, multiplexing, sliding window, refactoring, PolyTransport, PipeTransport, PostMessageTransport, WebSocketTransport, NestedTransport, C2C, console content channel, TCC, transport control channel, channel pool, resource management, import map, deno.json, message type naming, req res res-frame res-error con-trace con-debug con-info con-warn con-error bidi-frame, streaming relay, end-of-stream, zero-data frame, dechunk]
+## 14. Configuration Class Refactoring (Sub-Plan)
+
+### 14.1 Problem Statement
+
+The current [`src/configuration.esm.js`](../src/configuration.esm.js) stores configuration as NANOS objects and uses NANOS `.at()` accessors throughout. This creates several issues:
+
+1. **NANOS-specific API**: All configuration access requires NANOS `.at()` calls instead of standard JS property access
+2. **Not JSON-serializable**: NANOS objects cannot be directly serialized with `JSON.stringify()` — they require `toSLID()` or `toObject()` first
+3. **Inconsistency with IPC**: Section 12.3 establishes that JSON is used for all IPC; the Configuration class should produce JSON-serializable objects for IPC transmission
+4. **Obsolete bidiFlowControl section**: The `bidiFlowControl` config section contains credit-based flow control parameters (`initialCredits`, `maxBytesPerSecond`, `maxBufferSize`, `idleTimeout`) that are no longer meaningful now that PolyTransport handles flow control. Only `maxChunkSize` (derived from the global `chunkSize`) is still used.
+5. **Obsolete chunking parameters**: JSMAWS no longer manages chunking directly — PolyTransport handles it at the transport level. Parameters like `maxDirectWrite`, `autoChunkThresh`, `maxWriteBuffer`, and `bpWriteTimeThresh` are obsolete. Only `chunkSize` (passed to PolyTransport as `maxChunkBytes`) is retained.
+
+### 14.2 Proposed Approach
+
+**Parse SLID → NANOS → plain JS objects via `toObject()`**
+
+The configuration pipeline becomes:
+1. Read SLID file (user-facing format)
+2. Parse with `NANOS.parseSLID()` → NANOS object
+3. Convert with `nanos.toObject()` → plain JS object (null-prototype, recursively)
+4. Store as plain JS object in `Configuration`
+5. Access with standard property access (`config.pools.standard.maxWorkers`)
+
+This aligns with section 12.3: SLID is for user-facing config files; JSON (plain objects) is for internal use.
+
+**Key NANOS `toObject()` behavior:**
+- Returns a null-prototype object (`Object.create(null)`) by default
+- Recursively converts nested NANOS to plain objects
+- Index-only NANOS (arrays) can be converted to JS arrays with `{ array: true }` option
+- Named keys become object properties; indexed keys become numeric string properties
+
+### 14.3 Configuration Class Rewrite
+
+The rewritten `Configuration` class:
+
+```javascript
+import { NANOS } from '@nanos';
+
+export class Configuration {
+    constructor (config = {}) {
+        // Accept NANOS (from parseSLID), plain object (from JSON.parse), or empty
+        if (config instanceof NANOS) {
+            this.config = config.toObject();
+        } else {
+            this.config = config; // Already a plain object
+        }
+        this.processType = null;
+        this.processId = null;
+        // Cached computed values
+        this._routing = null;
+        this._pools = null;
+        this._chunking = null;
+    }
+
+    static fromSLID (slidString) {
+        return new Configuration(NANOS.parseSLID(slidString));
+    }
+
+    // Standard property access instead of .at() calls
+    // Note: JSMAWS no longer manages chunking directly — PolyTransport handles it.
+    // Only chunkSize (= maxChunkBytes for PolyTransport) is retained.
+    get chunkSize () {
+        return this.config.chunkSize ?? 65536;
+    }
+
+    get pools () {
+        if (!this._pools) {
+            this._pools = this.config.pools ?? {};
+        }
+        return this._pools;
+    }
+
+    getPoolConfig (poolName) {
+        return this.pools[poolName] ?? null;
+    }
+
+    // Returns only maxChunkSize — the only bidi param still needed by PolyTransport
+    getBidiParams ({ poolName, routeSpec } = {}) {
+        if (!poolName && routeSpec) poolName = routeSpec.pool;
+        poolName = poolName || 'standard';
+        const poolConfig = this.getPoolConfig(poolName);
+        // Route > pool > global for maxChunkSize
+        const routeMaxChunkSize = routeSpec?.maxChunkSize;
+        const poolMaxChunkSize = poolConfig?.maxChunkSize;
+        return {
+            maxChunkSize: routeMaxChunkSize ?? poolMaxChunkSize ?? this.chunkSize,
+        };
+    }
+
+    getTimeoutConfig (poolName, routeSpec = null) {
+        const defaults = {
+            reqTimeout: this.config.reqTimeout ?? 30,
+            idleTimeout: this.config.idleTimeout ?? 0,
+            conTimeout: this.config.conTimeout ?? 0,
+        };
+        const poolConfig = this.getPoolConfig(poolName);
+        const poolTimeouts = {
+            reqTimeout: poolConfig?.reqTimeout ?? defaults.reqTimeout,
+            idleTimeout: poolConfig?.idleTimeout ?? defaults.idleTimeout,
+            conTimeout: poolConfig?.conTimeout ?? defaults.conTimeout,
+        };
+        if (routeSpec) {
+            return {
+                reqTimeout: routeSpec.reqTimeout ?? poolTimeouts.reqTimeout,
+                idleTimeout: routeSpec.idleTimeout ?? poolTimeouts.idleTimeout,
+                conTimeout: routeSpec.conTimeout ?? poolTimeouts.conTimeout,
+            };
+        }
+        return poolTimeouts;
+    }
+
+    getAllowedResponseTypes (poolName) {
+        const poolConfig = this.getPoolConfig(poolName);
+        const resType = poolConfig?.resType;
+        if (!resType) return new Set(['response', 'stream', 'bidi']);
+        // resType is an array (from toObject({ array: true }) or plain array)
+        return new Set(Array.isArray(resType) ? resType : Object.values(resType));
+    }
+
+    get mimeTypes () {
+        return this.config.mimeTypes ?? {};
+    }
+
+    get routes () {
+        return this.config.routes ?? [];
+    }
+
+    get routing () {
+        if (!this._routing) {
+            const c = this.config;
+            const root = c.root ?? '';
+            const appRoot = c.appRoot ?? '';
+            const extensions = c.extensions ?? ['.esm.js', '.js'];
+            this._routing = {
+                root: root.endsWith('/') ? root : (root ? root + '/' : ''),
+                appRoot: appRoot.endsWith('/') ? appRoot : (appRoot ? appRoot + '/' : ''),
+                extensions: Array.isArray(extensions) ? extensions : Object.values(extensions),
+                fsRouting: c.fsRouting ?? false,
+            };
+        }
+        return this._routing;
+    }
+
+    updateConfig (newConfig) {
+        if (newConfig instanceof NANOS) {
+            this.config = newConfig.toObject();
+        } else {
+            this.config = newConfig; // Already a plain object (from JSON.parse)
+        }
+        this._routing = null;
+        this._pools = null;
+        this._chunking = null;
+    }
+}
+```
+
+### 14.4 Removed Configuration Parameters
+
+The following configuration parameters are **removed** from the JSMAWS configuration schema as they are no longer applicable after the PolyTransport refactoring:
+
+#### Removed: `bidiFlowControl` section (entire section)
+The credit-based flow control parameters are no longer meaningful — PolyTransport's sliding-window flow control handles all of this automatically:
+- `initialCredits` — credit multiplier (replaced by PolyTransport sliding window)
+- `maxBytesPerSecond` — rate limiting (replaced by PolyTransport flow control)
+- `maxBufferSize` — buffer size limit (replaced by PolyTransport buffer management)
+- `idleTimeout` — idle connection timeout (this is a connection-level concern, not flow control; if needed, it belongs in pool/route timeout config)
+
+#### Removed: Chunking parameters
+JSMAWS no longer manages chunking directly — PolyTransport handles it at the transport level:
+- `maxDirectWrite` — threshold for direct vs. chunked writes (obsolete)
+- `autoChunkThresh` — auto-chunking threshold (obsolete)
+- `maxWriteBuffer` — write buffer size (obsolete)
+- `bpWriteTimeThresh` — backpressure write time threshold (obsolete)
+
+#### Removed: IPC parameters
+The old custom IPC protocol is replaced by PolyTransport:
+- `ipcTimeout` — IPC connection timeout (obsolete)
+- `ipcBufferSize` — IPC buffer size (obsolete)
+
+#### Retained: `chunkSize` / `maxChunkSize`
+The global `chunkSize` (and pool/route-level `maxChunkSize` overrides) is **retained** — it is passed to PolyTransport as `maxChunkBytes` and `lowBufferBytes` when creating transports. This controls the maximum size of a single PolyTransport chunk.
+
+**Config files should remove the `bidiFlowControl` section and the obsolete chunking/IPC parameters.** The `jsmaws.slid` example file should be updated accordingly.
+
+#### Complete parameter inventory
+
+| Parameter | Status | Reason |
+|-----------|--------|--------|
+| `httpPort`, `httpsPort`, `hostname` | ✅ Retained | Network configuration |
+| `noSSL`, `certFile`, `keyFile`, `sslCheckIntervalHours` | ✅ Retained | SSL configuration |
+| `acmeChallengeDir` | ✅ Retained | ACME challenge directory |
+| `mimeTypes` | ✅ Retained | MIME type mapping for static files |
+| `appRoot` | ✅ Retained | Base path for relative applet paths |
+| `root` | ✅ Retained | Default filesystem root for static files |
+| `routes` | ✅ Retained | Route definitions |
+| `extensions` | ✅ Retained | Applet file extension resolution order |
+| `fsRouting` | ✅ Retained | Enable filesystem-based routing |
+| `pools` | ✅ Retained | Pool configuration (scaling, timeouts, etc.) |
+| `uid`, `gid` | ✅ Retained | Privilege dropping (numeric UID/GID) |
+| `logLevel`, `logDestination`, `logFormat` | ✅ Retained | Logging configuration |
+| `reqTimeout`, `idleTimeout`, `conTimeout` | ✅ Retained | Request/connection timeout defaults |
+| `chunkSize` | ✅ Retained | PolyTransport `maxChunkBytes` (global default) |
+| `maxChunkSize` (pool/route) | ✅ Retained | PolyTransport `maxChunkBytes` (pool/route override) |
+| `bidiFlowControl.*` | ❌ Removed | Credit-based flow control (replaced by PolyTransport) |
+| `maxDirectWrite` | ❌ Removed | Manual chunking (replaced by PolyTransport) |
+| `autoChunkThresh` | ❌ Removed | Manual chunking (replaced by PolyTransport) |
+| `maxWriteBuffer` | ❌ Removed | Manual chunking (replaced by PolyTransport) |
+| `bpWriteTimeThresh` | ❌ Removed | Backpressure detection (replaced by PolyTransport) |
+| `ipcTimeout` | ❌ Removed | Old IPC protocol (replaced by PolyTransport) |
+| `ipcBufferSize` | ❌ Removed | Old IPC protocol (replaced by PolyTransport) |
+
+### 14.5 Impact on Existing Code
+
+The following files use `Configuration` methods or NANOS `.at()` accessors and must be updated:
+
+| File | Current Usage | New Usage |
+|------|--------------|-----------|
+| [`src/configuration.esm.js`](../src/configuration.esm.js) | NANOS `.at()` throughout | Plain property access (`config.pools.standard.maxWorkers`) |
+| [`src/responder-process.esm.js`](../src/responder-process.esm.js) | `config.chunking.chunkSize`, `config.getPoolConfig()`, `config.getAllowedResponseTypes()`, `config.getTimeoutConfig()`, `config.mimeTypes` | `config.chunkSize` (direct); other methods return plain objects |
+| [`src/router-process.esm.js`](../src/router-process.esm.js) | `config.getPoolConfig()`, `config.routing.fsRouting` | Same methods, plain objects |
+| [`src/router-worker.esm.js`](../src/router-worker.esm.js) | `config.routes` (NANOS), `config.routing.extensions`, `config.routing.appRoot`, `config.routing.fsRouting` | `config.routes` is now a plain array; routing properties are plain strings/arrays |
+| [`src/process-manager.esm.js`](../src/process-manager.esm.js) | `config.at('uid')`, `config.at('gid')`, `config.at('chunking')` | `config.config.uid`, `config.config.gid`, `config.chunkSize` |
+| [`src/operator-process.esm.js`](../src/operator-process.esm.js) | `configuration.updateConfig()`, `configuration.getBidiParams()` | Same methods, simplified return value |
+| [`src/operator-request-state.esm.js`](../src/operator-request-state.esm.js) | `operator.configuration.getBidiParams()` | Same method, returns `{ maxChunkSize }` only |
+
+### 14.6 Impact on Tests
+
+| Test File | Change |
+|-----------|--------|
+| [`test/bidi-params-config.test.js`](../test/bidi-params-config.test.js) | **Rewrite** — remove all `initialCredits`, `maxBytesPerSecond`, `maxBufferSize`, `idleTimeout` assertions; test only `maxChunkSize` hierarchy (route > pool > global) |
+| [`test/timeout-config.test.js`](../test/timeout-config.test.js) | **Verify** — should still pass; timeout config is unchanged |
+| [`test/router-worker.test.js`](../test/router-worker.test.js) | **Verify** — may need minor updates if `config.routes` shape changes (NANOS → plain array) |
+| [`test/request-state-machine.test.js`](../test/request-state-machine.test.js) | **Update** — remove `protocolParams.initialCredits` assertions; `getBidiParams()` now returns only `{ maxChunkSize }` |
+
+### 14.7 NANOS `toObject()` Behavior Notes
+
+The NANOS `toObject()` method:
+- Returns `Object.create(null)` (null-prototype object) by default
+- Recursively converts nested NANOS to plain objects
+- With `{ array: true }`: uses JS arrays for levels with only indexed keys
+- With `{ array1: true }`: uses JS arrays for non-empty indexed-only levels
+
+For JSMAWS configuration, the default `toObject()` (without options) is appropriate for most sections. However, array-like sections (e.g., `routes`, `extensions`, `resType`) should use `{ array: true }` or be handled explicitly in the `Configuration` class.
+
+**Important:** `toObject()` produces null-prototype objects. Code that uses `Object.keys()`, `Object.entries()`, `for...in`, or `hasOwnProperty` will work correctly. Code that uses `instanceof Object` or relies on `Object.prototype` methods will need adjustment.
+
+### 14.8 Implementation Order
+
+1. **Rewrite `src/configuration.esm.js`** — convert to plain objects; remove `bidiFlowControl` getter, `chunking` getter, `ipc` getter; simplify `getBidiParams()` to return only `{ maxChunkSize }`; add `chunkSize` getter
+2. **Update `src/responder-process.esm.js`** — replace `config.chunking.chunkSize` with `config.chunkSize`
+3. **Update `src/router-worker.esm.js`** — handle `config.routes` as plain array; update route spec access
+4. **Update `src/process-manager.esm.js`** — replace `config.at('uid')`, `config.at('gid')`, `config.at('chunking')` with plain property access
+5. **Update `src/operator-process.esm.js`** — update `getBidiParams()` call sites
+6. **Update `src/operator-request-state.esm.js`** — update `getBidiParams()` usage (now returns `{ maxChunkSize }` only)
+7. **Update `jsmaws.slid`** — remove `bidiFlowControl` section and obsolete chunking/IPC parameters
+8. **Rewrite `test/bidi-params-config.test.js`** — test simplified `getBidiParams()` (only `maxChunkSize` hierarchy)
+9. **Verify/update other tests** — `timeout-config.test.js`, `router-worker.test.js`, `request-state-machine.test.js`
+
+---
+
+## 15. Relationship to Existing Architectural Plans
+
+This proposal is **additive** to the clean-slate rewrite approved in [`arch/refactoring-assessment-2025-12-10.md`](refactoring-assessment-2025-12-10.md). The class hierarchy proposed there (`ServerRequest`, `ServerConnection`, `BidiConnection`, `WsConnection`, `FlowControlState`) remains valid. The key changes are:
+
+- **`FlowControlState`** is no longer needed — PolyTransport's per-channel flow control replaces it
+- **`WsConnection`** wraps a `WebSocketTransport` channel instead of a raw `WebSocket`
+- **`IPCConnection`** is replaced by `PipeTransport` channels
+- The `ServerRequest` → `ServerConnection` hierarchy is unchanged
+- A new **`RequestChannelPool`** class manages the pool of reusable request channels
+
+The PolyTransport adoption simplifies the implementation of the proposed architecture by eliminating the need to implement `FlowControlState` from scratch and providing a proven, tested foundation for all communication layers.
+
+---
+
+[supplemental keywords: transport, IPC, inter-process communication, pipe, postMessage, WebSocket, flow control, backpressure, channel, multiplexing, sliding window, refactoring, PolyTransport, PipeTransport, PostMessageTransport, WebSocketTransport, NestedTransport, C2C, console content channel, TCC, transport control channel, channel pool, resource management, import map, deno.json, message type naming, req res res-frame res-error con-trace con-debug con-info con-warn con-error bidi-frame, streaming relay, end-of-stream, zero-data frame, dechunk, configuration, NANOS, toObject, plain objects, bidiFlowControl, getBidiParams, maxChunkSize]

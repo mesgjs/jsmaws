@@ -188,8 +188,9 @@ export class ProcessManager {
 			: 'src/router-process.esm.js';
 
 		// Get UID/GID from global config (not pool-specific)
-		const uid = Number(this.config.at('uid'));
-		const gid = Number(this.config.at('gid'));
+		// this.config is a Configuration instance; raw values are in this.config.config
+		const uid = Number(this.config.config?.uid);
+		const gid = Number(this.config.config?.gid);
 
 		// Only validate if we're running as root (validation already done in operator)
 		// This is a safety check in case process manager is used standalone
@@ -222,9 +223,8 @@ export class ProcessManager {
 
 		const child = command.spawn();
 
-		// Get chunking config for transport
-		const chunkingConfig = this.config.at('chunking');
-		const maxChunkBytes = chunkingConfig?.at?.('maxChunkSize') ?? 65536;
+		// Get chunk size for transport (PolyTransport maxChunkBytes)
+		const maxChunkBytes = this.config.chunkSize ?? 65536;
 
 		// Create PipeTransport for operator ↔ responder IPC
 		const c2cSymbol = Symbol('c2c');
@@ -251,9 +251,9 @@ export class ProcessManager {
 		await controlChannel.addMessageTypes(CONTROL_MESSAGE_TYPES);
 		await this.#sendConfigUpdate(controlChannel);
 
-		// Determine pool capacity
-		const maxWorkers = poolConfig.at?.('maxWorkers') ?? poolConfig?.maxWorkers ?? 10;
-		const minWorkers = poolConfig.at?.('minWorkers') ?? poolConfig?.minWorkers ?? 1;
+		// Determine pool capacity (poolConfig is a plain object)
+		const maxWorkers = poolConfig?.maxWorkers ?? 10;
+		const minWorkers = poolConfig?.minWorkers ?? 1;
 
 		// Create request channel pool
 		const reqChannelPool = new RequestChannelPool(transport, minWorkers, maxWorkers);
@@ -410,7 +410,8 @@ export class ProcessManager {
 	 * @param {object} controlChannel - The control channel to write to
 	 */
 	async #sendConfigUpdate (controlChannel) {
-		const configJson = JSON.stringify(this.config.toObject ? this.config.toObject() : this.config);
+		// this.config is a Configuration instance; config.config is the plain object
+		const configJson = JSON.stringify(this.config.config ?? this.config);
 		await controlChannel.write('config-update', configJson);
 	}
 

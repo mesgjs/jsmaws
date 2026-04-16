@@ -41,11 +41,10 @@ class ResponderProcess extends ServiceProcess {
 		this.requestCount = 0;
 		this.maxConcurrentRequests = 10; // Will be set from pool config
 
-		// Response chunking configuration
+		// Chunk size for PolyTransport (maxChunkBytes)
+		// PolyTransport handles chunking; we only need to know the chunk size
 		this.chunkingConfig = {
-			maxDirectWrite: 65536, // 64KB
-			autoChunkThresh: 10485760, // 10MB
-			chunkSize: 65536, // 64KB
+			chunkSize: 65536, // 64KB default; updated from config
 		};
 	}
 
@@ -85,18 +84,15 @@ class ResponderProcess extends ServiceProcess {
 		// Configuration instance is already updated by ServiceProcess base class
 		// Just need to extract relevant settings
 
-		// Update response chunking configuration from config
-		const chunking = this.config.chunking;
+		// Update chunk size from config (PolyTransport handles chunking; we only need maxChunkBytes)
 		this.chunkingConfig = {
-			maxDirectWrite: chunking.maxDirectWrite,
-			autoChunkThresh: chunking.autoChunkThresh,
-			chunkSize: chunking.chunkSize,
+			chunkSize: this.config.chunkSize,
 		};
 
 		// Update max concurrent requests from pool config
 		const poolConfig = this.config.getPoolConfig(this.poolName);
 		if (poolConfig) {
-			this.maxConcurrentRequests = poolConfig.at('maxWorkers', 10);
+			this.maxConcurrentRequests = poolConfig.maxWorkers ?? 10;
 		} else {
 			console.warn(`[${this.processId}] Pool config not found for '${this.poolName}', keeping default ${this.maxConcurrentRequests}`);
 		}
@@ -403,10 +399,9 @@ class ResponderProcess extends ServiceProcess {
 			// Check for built-in applets and prepare configuration
 			let builtinConfig = null;
 			if (app === '@static') {
-				const mimeTypes = this.config.mimeTypes || {};
 				builtinConfig = {
 					root,
-					mimeTypes: mimeTypes.toSLID(), // Serialize NANOS to SLID for worker
+					mimeTypes: this.config.mimeTypes || {}, // Plain object, JSON-serializable
 				};
 			}
 

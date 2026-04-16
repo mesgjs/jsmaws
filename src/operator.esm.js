@@ -3,8 +3,8 @@
  * Operator process entry point
  *
  * This is the main entry point for the privileged operator process.
- * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { parseSLID } from '@nanos';
@@ -50,7 +50,8 @@ async function main () {
 	const operator = new OperatorProcess(config, configFile);
 	globalThis.OperatorProcess = OperatorProcess;
 	OperatorProcess.instance = operator;
-	operator.configData = configData; // Store full config
+	operator.configData = configData; // Store full NANOS config (for legacy compat)
+	operator.configuration.updateConfig(configData); // Update Configuration instance
 	operator.initializeLogger();
 
 	// Handle shutdown signals
