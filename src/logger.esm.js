@@ -7,6 +7,7 @@
 
 /**
  * Log levels with numeric values for filtering
+ * NOTE: Lower numbers are higher levels, higher numbers are lower levels
  */
 const LOG_LEVELS = {
     ERROR: 0,
@@ -35,11 +36,17 @@ class ConsoleBackend {
     }
 
     log (entry) {
-        if (entry.level > this.level) return;
+        // Ignore below logging threshold
+        if (entry.level > this.level) return true;
 
         const message = this.formatMessage(entry);
-        const stream = entry.level <= LOG_LEVELS.WARN ? Deno.stderr : Deno.stdout;
-        stream.writeSync(new TextEncoder().encode(message + '\n'));
+        switch (entry.level) {
+        case LOG_LEVELS.ERROR: console.error(message); break;
+        case LOG_LEVELS.WARN: console.warn(message); break;
+        case LOG_LEVELS.INFO: console.info(message); break;
+        case LOG_LEVELS.DEBUG: console.debug(message); break;
+        }
+        return true;
     }
 
     formatMessage (entry) {
@@ -84,7 +91,7 @@ class SyslogBackend {
         this.host = options.host || '127.0.0.1';
         this.port = options.port || 514;
         this.socket = null;
-        this.connected = false;
+        this.connected = null;
     }
 
     parseFacility (facility) {
@@ -98,7 +105,11 @@ class SyslogBackend {
     }
 
     async connect () {
-        if (this.connected) return;
+        if (this.socket) return true; // Already connected
+        if (this.connected) return this.connected; // Connection attempt pending
+
+        let resolve;
+        const promise = this.connected = new Promise((res) => resolve = res);
 
         try {
             this.socket = await Deno.connect({
@@ -106,23 +117,23 @@ class SyslogBackend {
                 hostname: this.host,
                 port: this.port,
             });
-            this.connected = true;
         } catch (error) {
+            this.socket = null;
             console.error(`Failed to connect to syslog at ${this.host}:${this.port}: ${error.message}`);
-            this.connected = false;
         }
+
+        this.connected = null;
+        resolve(!!this.socket);
+        return promise;
     }
 
     async log (entry) {
-        if (entry.level > this.level) return;
+        // Ignore below threshold
+        if (entry.level > this.level) return true;
 
-        if (!this.connected) {
+        if (!this.socket) {
             await this.connect();
-        }
-
-        if (!this.connected) {
-            // Fallback to console if syslog unavailable
-            return;
+            if (!this.socket) return false;
         }
 
         const message = this.formatMessage(entry);
@@ -131,18 +142,13 @@ class SyslogBackend {
 
         try {
             await this.socket.write(new TextEncoder().encode(syslogMessage));
+            return true;
         } catch (error) {
-            console.error(`Failed to send to syslog: ${error.message}`);
-            this.connected = false;
-            // Try to reconnect on next log attempt
-            if (this.socket) {
-                try {
-                    this.socket.close();
-                } catch {
-                    // Ignore close errors
-                }
-                this.socket = null;
-            }
+            console.error('Failed to send to syslog');
+            try { this.socket.close(); }
+            catch (_) { /**/ }
+            this.socket = null;
+            return false;
         }
     }
 
@@ -158,13 +164,8 @@ class SyslogBackend {
 
     async close () {
         if (this.socket) {
-            try {
-                this.socket.close();
-            } catch (error) {
-                // Ignore close errors
-            }
+            const res = this.socket.close();
             this.socket = null;
-            this.connected = false;
         }
     }
 }
@@ -174,6 +175,9 @@ class SyslogBackend {
  */
 export class Logger {
     constructor (options = {}) {
+        this.console = null;
+        this.syslog = null;
+        this.fallback = null;
         this.backends = [];
         this.component = options.component || 'server';
         this.requestIdCounter = 0;
@@ -182,11 +186,13 @@ export class Logger {
         const target = options.target || 'console';
 
         if (target === 'console' || target === 'both') {
-            this.backends.push(new ConsoleBackend(options));
+            this.console = new ConsoleBackend(options);
+        } else {
+            this.fallback = new ConsoleBackend(options);
         }
 
         if (target === 'syslog' || target === 'both') {
-            this.backends.push(new SyslogBackend(options));
+            this.syslog = new SyslogBackend(options);
         }
     }
 
@@ -249,15 +255,10 @@ export class Logger {
             remote,
         };
 
-        for (const backend of this.backends) {
-            if (backend.log instanceof Function) {
-                const result = backend.log(entry);
-                if (result instanceof Promise) {
-                    // Fire and forget for async backends
-                    result.catch(err => console.error(`Logging error: ${err.message}`));
-                }
-            }
-        }
+        if (this.console) this.console.log(entry);
+        if (this.syslog) this.syslog.log(entry).then((result) => {
+            if (!result && this.fallback) this.fallback.log(entry);
+        }, (err) => console.error(`Logging error: ${err.message}`));
     }
 
     /**
@@ -284,23 +285,18 @@ export class Logger {
             ...context,
         };
 
-        for (const backend of this.backends) {
-            if (backend.log instanceof Function) {
-                const result = backend.log(entry);
-                if (result instanceof Promise) {
-                    // Fire and forget for async backends
-                    result.catch(err => console.error(`Logging error: ${err.message}`));
-                }
-            }
-        }
+        if (this.console) this.console.log(entry);
+        if (this.syslog) this.syslog.log(entry).then((result) => {
+            if (!result && this.fallback) this.fallback.log(entry);
+        }, (err) => console.error(`Logging error: ${err.message}`));
     }
 
     /**
      * Close all backends (for graceful shutdown)
      */
     async close () {
-        const promises = this.backends
-            .filter(b => b.close instanceof Function)
+        const promises = [this.console, this.syslog, this.fallback]
+            .filter(b => typeof b?.close === 'function')
             .map(b => b.close());
 
         await Promise.all(promises);

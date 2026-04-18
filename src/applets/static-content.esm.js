@@ -97,31 +97,15 @@ async function handleFullRequest (server, resolvedPath, fileSize, contentType, c
 		},
 	}));
 
-	// For small files (<= chunkSize), send complete body in single res-frame
-	if (fileSize <= chunkSize) {
-		const buffer = new Uint8Array(fileSize);
-		await file.read(buffer);
-		file.close();
-
-		console.debug('@static sending one-and-done');
-		await server.write('res-frame', buffer);
-		await server.write('res-frame', null);
-		return;
-	}
-
 	// For larger files, send file data in chunks
-	const buffer = new Uint8Array(chunkSize);
+	const buffer = new Uint8Array(Math.min(fileSize, chunkSize));
 
-	console.debug('@static chunking file content');
 	for (;;) {
 		const bytesRead = await file.read(buffer);
 		if (bytesRead === null) break;
 
 		const chunk = buffer.slice(0, bytesRead);
 		await server.write('res-frame', chunk);
-
-		// Yield to event loop for backpressure
-		await new Promise(resolve => setTimeout(resolve, 0));
 	}
 
 	// Send end-of-stream signal
@@ -191,10 +175,6 @@ async function handleRangeRequest (server, resolvedPath, fileSize, rangeHeader, 
 		remaining -= bytesRead;
 
 		await server.write('res-frame', chunk);
-
-		if (remaining > 0) {
-			await new Promise(resolve => setTimeout(resolve, 0));
-		}
 	}
 
 	// Send end-of-stream signal
@@ -208,21 +188,19 @@ async function handleRangeRequest (server, resolvedPath, fileSize, rangeHeader, 
  * Called by bootstrap after environment setup and JSMAWS namespace is frozen
  * @param {object} _setupData - Setup data from bootstrap (appletPath, mode, etc.)
  */
-console.debug('@static loaded');
 export default async function (_setupData) {
 	const server = globalThis.JSMAWS.server;
 
 	// Read the incoming request
-	const reqMsg = await server.read({ only: 'req' });
+	const reqMsg = await server.read({ only: 'req', decode: true });
 	if (!reqMsg) return;
 
 	let requestData;
 	await reqMsg.process(() => {
-		requestData = JSON.parse(reqMsg.data.decode());
+		requestData = JSON.parse(reqMsg.text);
 	});
 
 	const { headers, routeTail, maxChunkSize, config } = requestData;
-	console.debug(`@static type req root ${config?.root} tail ${routeTail}`);
 
 	try {
 		// Validate that root was provided

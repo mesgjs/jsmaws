@@ -19,8 +19,6 @@ import { Configuration } from '../src/configuration.esm.js';
  */
 function makeConfigJson (overrides = {}) {
 	return JSON.stringify({
-		maxDirectWrite: 65536,
-		autoChunkThresh: 10485760,
 		chunkSize: 65536,
 		pools: {
 			standard: {
@@ -30,23 +28,13 @@ function makeConfigJson (overrides = {}) {
 				reqTimeout: 30,
 				idleTimeout: 60,
 				conTimeout: 300,
-				allowedResponseTypes: ['response', 'stream', 'bidi'],
+				resType: ['response', 'stream', 'bidi'],
 			},
 		},
-		routing: { root: '/var/www' },
 		mimeTypes: { '.html': 'text/html', '.js': 'application/javascript' },
-		bidiFlowControl: {
-			initialCredits: 10,
-			maxBytesPerSecond: 10485760,
-			idleTimeout: 60,
-			maxBufferSize: 1048576,
-		},
 		...overrides,
 	});
 }
-
-// FEEDBACK: I believe bidi flow control is superceded by PolyTransport
-// Having symmetrical requests (channels, message types) is OK for testing, but is unnecessary extra traffic for production (operator should manage operator-involved transports, responder for responder-applet transports)
 
 /**
  * Helper: create a connected transport pair and set up a ResponderProcess
@@ -152,23 +140,20 @@ Deno.test('ResponderProcess - availWorkers reflects capacity', () => {
 
 Deno.test('ResponderProcess - handleConfigUpdate updates chunkingConfig', async () => {
 	const proc = new ResponderProcess('test-proc-5', 'standard');
-	proc.config = new Configuration(JSON.parse(makeConfigJson()));
 
 	const configJson = makeConfigJson({
-		maxDirectWrite: 32768,
-		autoChunkThresh: 5242880,
 		chunkSize: 32768,
 	});
+	// Simulate what ServiceProcess.waitForInitialConfig() does:
+	// update proc.config BEFORE calling handleConfigUpdate
+	proc.config = new Configuration(JSON.parse(configJson));
 	await proc.handleConfigUpdate(configJson);
 
-	assertEquals(proc.chunkingConfig.maxDirectWrite, 32768);
-	assertEquals(proc.chunkingConfig.autoChunkThresh, 5242880);
 	assertEquals(proc.chunkingConfig.chunkSize, 32768);
 });
 
 Deno.test('ResponderProcess - handleConfigUpdate updates maxConcurrentRequests from pool', async () => {
 	const proc = new ResponderProcess('test-proc-6', 'standard');
-	proc.config = new Configuration(JSON.parse(makeConfigJson()));
 
 	const configJson = makeConfigJson({
 		pools: {
@@ -179,10 +164,13 @@ Deno.test('ResponderProcess - handleConfigUpdate updates maxConcurrentRequests f
 				reqTimeout: 30,
 				idleTimeout: 60,
 				conTimeout: 300,
-				allowedResponseTypes: ['response', 'stream', 'bidi'],
+				resType: ['response', 'stream', 'bidi'],
 			},
 		},
 	});
+	// Simulate what ServiceProcess.waitForInitialConfig() does:
+	// update proc.config BEFORE calling handleConfigUpdate
+	proc.config = new Configuration(JSON.parse(configJson));
 	await proc.handleConfigUpdate(configJson);
 
 	assertEquals(proc.maxConcurrentRequests, 20);
@@ -246,34 +234,24 @@ Deno.test('ResponderProcess - cleanupRequest is no-op for unknown request', () =
 // ─── handleReqChannel ─────────────────────────────────────────────────────────
 
 Deno.test('ResponderProcess - handleReqChannel registers message types', async () => {
-	const { proc, operatorTransport, cleanup } = await setupResponderProcess('req-channel-test');
+	const { proc, operatorTransport, serviceTransport, cleanup } = await setupResponderProcess('req-channel-test');
 
 	try {
-		// Open a req-N channel from the operator side
-		const operatorReqChannel = await operatorTransport.requestChannel('req-0');
-		await operatorReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
+		// Request the req-0 channel from both sides simultaneously
+		const [operatorReqChannel, serviceReqChannel] = await Promise.all([
+			operatorTransport.requestChannel('req-0'),
+			serviceTransport.requestChannel('req-0'),
+		]);
 
-		// Get the service-side channel (it was accepted by the newChannel listener)
-		// We need to wait for the service side to accept and process it
-		// The service side's handleReqChannel is called when the channel is accepted
-		let serviceReqChannel = null;
-		const channelPromise = new Promise((resolve) => {
-			proc.transport.addEventListener('newChannel', (event) => {
-				if (event.detail.channelName === 'req-0') {
-					resolve(event.detail.channel);
-				}
-			});
-		});
+		// Register message types on both sides
+		await Promise.all([
+			operatorReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+			serviceReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+		]);
 
-		// Trigger the channel open from operator side
-		// (already done above, but we need to wait for service side to process)
-		serviceReqChannel = await Promise.race([
-			channelPromise,
-			new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
-		]).catch(() => null);
-
-		// The channel should have been accepted
+		// Both channels should be available
 		assertExists(operatorReqChannel);
+		assertExists(serviceReqChannel);
 	} finally {
 		await cleanup();
 	}
@@ -341,7 +319,7 @@ Deno.test('ResponderProcess - sendCapacityUpdate sends capacity-update message',
 // ─── Request handling via req-N channel ──────────────────────────────────────
 
 Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
-	const { proc, operatorTransport, cleanup } = await setupResponderProcess('capacity-test');
+	const { proc, operatorTransport, serviceTransport, cleanup } = await setupResponderProcess('capacity-test');
 
 	try {
 		// Fill capacity
@@ -349,28 +327,17 @@ Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 		proc.activeRequests.set('req-existing-1', { timeout: null, worker: null, transport: null });
 		proc.activeRequests.set('req-existing-2', { timeout: null, worker: null, transport: null });
 
-		// Open a req-N channel from the operator side
-		const operatorReqChannel = await operatorTransport.requestChannel('req-0');
-		await operatorReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
-
-		// Wait for service side to accept the channel
-		const serviceReqChannelPromise = new Promise((resolve) => {
-			const handler = (event) => {
-				if (event.detail.channelName === 'req-0') {
-					proc.transport.removeEventListener('newChannel', handler);
-					resolve(event.detail.channel);
-				}
-			};
-			proc.transport.addEventListener('newChannel', handler);
-		});
-
-		const serviceReqChannel = await Promise.race([
-			serviceReqChannelPromise,
-			new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1000)),
+		// Request the req-0 channel from both sides simultaneously (like control channel setup)
+		const [operatorReqChannel, serviceReqChannel] = await Promise.all([
+			operatorTransport.requestChannel('req-0'),
+			serviceTransport.requestChannel('req-0'),
 		]);
 
-		// Call handleReqChannel directly with the service-side channel
-		await serviceReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
+		// Register message types on both sides
+		await Promise.all([
+			operatorReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+			serviceReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+		]);
 
 		// Send a request from operator
 		const requestData = {
@@ -386,7 +353,7 @@ Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 		await operatorReqChannel.write('req', JSON.stringify(requestData));
 
 		// Start handleReqChannel on the service side
-		const handlePromise = proc.handleReqChannel(serviceReqChannel);
+		proc.handleReqChannel(serviceReqChannel);
 
 		// Read the error response from operator side
 		const responseMsg = await operatorReqChannel.read({ only: 'res-error', decode: true });
@@ -399,7 +366,6 @@ Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 
 		// Cleanup
 		proc.activeRequests.clear();
-		await operatorReqChannel.close?.();
 	} finally {
 		await cleanup();
 	}

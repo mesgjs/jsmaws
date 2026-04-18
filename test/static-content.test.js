@@ -1,56 +1,25 @@
 /**
  * Static Content Applet Tests
  * Tests for the built-in static file serving applet
+ *
+ * The static content applet uses PolyTransport channel API via globalThis.JSMAWS.server:
+ * - Reads 'req' message (JSON) for request metadata
+ * - Writes 'res' message (JSON text) for response status + headers
+ * - Writes 'res-frame' messages (binary Uint8Array) for response body chunks
+ * - Signals end-of-stream with zero-data 'res-frame' (null data, default eom:true)
+ * - Writes 'res-error' message (JSON text) on error
+ *
+ * Tests use PostMessageTransport to communicate with the applet via bootstrap.
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { assertEquals, assert, assertExists } from 'https://deno.land/std@0.208.0/assert/mod.ts';
+import { assertEquals, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { join } from 'https://deno.land/std@0.208.0/path/mod.ts';
+import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
 
-// Test helper to create a worker and collect messages
-async function createStaticWorker () {
-	const workerPath = new URL('../src/applets/static-content.esm.js', import.meta.url).href;
-
-	const worker = new Worker(workerPath, {
-		type: 'module',
-		deno: {
-			permissions: {
-				read: true,
-				write: false,
-				net: false,
-				env: false,
-				run: false,
-			}
-		}
-	});
-
-	return worker;
-}
-
-// Helper to collect all frame messages from worker
-async function collectFrames (worker, timeout = 1000) {
-	const frames = [];
-
-	return new Promise((resolve, reject) => {
-		const timer = setTimeout(() => {
-			reject(new Error('Timeout waiting for frames'));
-		}, timeout);
-
-		worker.onmessage = (event) => {
-			frames.push(event.data);
-
-			// Check if this is the final frame
-			if (event.data.final === true || event.data.type === 'error') {
-				clearTimeout(timer);
-				resolve(frames);
-			}
-		};
-
-		worker.onerror = (error) => {
-			clearTimeout(timer);
-			reject(error);
-		};
-	});
-}
+const bootstrapPath = new URL('../src/applets/bootstrap.esm.js', import.meta.url).href;
+const staticContentPath = new URL('../src/applets/static-content.esm.js', import.meta.url).href;
 
 // Setup test directory and files
 let testDir;
@@ -87,85 +56,185 @@ Deno.test.afterAll(async () => {
 	}
 });
 
+/**
+ * Drain remaining messages from a channel until end-of-stream (null/empty frame).
+ * Mirrors the readToEOS helper in applet-bootstrap.test.js.
+ * @param {object} channel - PolyTransport channel to drain
+ */
+async function readToEOS (channel) {
+	let message;
+	while (message = await channel.read()) {
+		message.done();
+		if (!message.data && !message.text) break;
+	}
+}
+
+/**
+ * Set up a static content worker via bootstrap with PostMessageTransport.
+ * @param {symbol} [c2cSymbol] - Optional C2C symbol for console interception.
+ *   If not provided, native console logging is used (helpful for debugging).
+ * Returns { appletChannel, cleanup }
+ */
+async function setupStaticWorker (c2cSymbol = undefined) {
+	const worker = new Worker(bootstrapPath, {
+		type: 'module',
+		deno: {
+			permissions: {
+				read: true, // Static content needs read access
+				write: false,
+				net: true, // Allow network for module loading
+				env: false,
+				run: false,
+			},
+		},
+	});
+
+	const transport = new PostMessageTransport({
+		gateway: worker,
+		c2cSymbol,
+		maxChunkBytes: 65536,
+	});
+
+	transport.addEventListener('newChannel', (event) => {
+		event.accept();
+	});
+
+	await transport.start();
+
+	// Send setup instructions via the 'bootstrap' channel
+	const bootstrapChannel = await transport.requestChannel('bootstrap');
+	await bootstrapChannel.addMessageTypes(['setup']);
+	await bootstrapChannel.write('setup', JSON.stringify({
+		appletPath: staticContentPath,
+		mode: 'response',
+		keepDeno: true, // Static content needs Deno file APIs
+		keepWorkers: false,
+	}));
+
+	// Set up the applet communication channel
+	const appletChannel = await transport.requestChannel('applet');
+	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+
+	const cleanup = async () => {
+		await transport.stop({ discard: true }).catch(() => {});
+		worker.terminate();
+	};
+
+	return { appletChannel, cleanup };
+}
+
+/**
+ * Send a request to the static content applet and collect all response frames.
+ * Returns { status, headers, body, bodyText } or { error } on res-error.
+ */
+async function sendStaticRequest (appletChannel, requestData) {
+	await appletChannel.write('req', JSON.stringify(requestData));
+
+	// Read response metadata (res or res-error)
+	const resMeta = await appletChannel.read({ only: ['res', 'res-error'], decode: true });
+	let metaData;
+	await resMeta.process(() => {
+		metaData = JSON.parse(resMeta.text);
+	});
+
+	if (resMeta.messageType === 'res-error') {
+		return { error: metaData };
+	}
+
+	const { status, headers } = metaData;
+
+	// Collect all body chunks until end-of-stream (null frame: no data, no text).
+	// Read without filters (like readToEOS) to avoid dechunk/only interaction issues.
+	const bodyChunks = [];
+	let message;
+	while (message = await appletChannel.read()) {
+		if (!message.data && !message.text) {
+			message.done();
+			break;
+		}
+		await message.process(() => {
+			if (message.data) {
+				bodyChunks.push(message.data.toUint8Array());
+			} else if (message.text) {
+				bodyChunks.push(new TextEncoder().encode(message.text));
+			}
+		});
+	}
+
+	// Concatenate all body chunks
+	const totalLength = bodyChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+	const body = new Uint8Array(totalLength);
+	let offset = 0;
+	for (const chunk of bodyChunks) {
+		body.set(chunk, offset);
+		offset += chunk.length;
+	}
+
+	const bodyText = new TextDecoder().decode(body);
+
+	return { status, headers, body, bodyText };
+}
+
+// ─── Basic file serving ───────────────────────────────────────────────────────
+
 Deno.test('Static Content - serves small text file', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-1',
-			url: '/test.txt',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
 			headers: {},
 			routeParams: {},
 			routeTail: '/test.txt',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {
-					'.txt': 'text/plain'
-				}
-			}
+				mimeTypes: { '.txt': 'text/plain' },
+			},
 		});
 
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames.length, 1, 'Should send single frame for small file');
-		assertEquals(frames[0].type, 'frame');
-		assertEquals(frames[0].id, 'req-1');
-		assertEquals(frames[0].mode, 'response');
-		assertEquals(frames[0].status, 200);
-		assertEquals(frames[0].headers['content-type'], 'text/plain');
-		assertEquals(frames[0].headers['accept-ranges'], 'bytes');
-		assertEquals(frames[0].final, true);
-		assertEquals(frames[0].keepAlive, false);
-
-		const content = new TextDecoder().decode(frames[0].data);
-		assertEquals(content, 'Hello, World!');
+		assertEquals(result.status, 200);
+		assertEquals(result.headers['content-type'], 'text/plain');
+		assertEquals(result.headers['accept-ranges'], 'bytes');
+		assertEquals(result.bodyText, 'Hello, World!');
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
 Deno.test('Static Content - serves HTML file with correct MIME type', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-2',
-			url: '/test.html',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.html',
 			headers: {},
 			routeParams: {},
 			routeTail: '/test.html',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {
-					'.html': 'text/html'
-				}
-			}
+				mimeTypes: { '.html': 'text/html' },
+			},
 		});
 
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames[0].headers['content-type'], 'text/html');
-
-		const content = new TextDecoder().decode(frames[0].data);
-		assertEquals(content, '<html><body>Test</body></html>');
+		assertEquals(result.status, 200);
+		assertEquals(result.headers['content-type'], 'text/html');
+		assertEquals(result.bodyText, '<html><body>Test</body></html>');
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
 Deno.test('Static Content - MIME type first-match strategy', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		// File ending in .json should match .json before .on
-		worker.postMessage({
-			type: 'request',
-			id: 'req-3',
-			url: '/test.json',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.json',
 			headers: {},
 			routeParams: {},
 			routeTail: '/test.json',
@@ -173,519 +242,454 @@ Deno.test('Static Content - MIME type first-match strategy', async () => {
 			config: {
 				root: testDir,
 				mimeTypes: {
-					'.on': 'text/plain',  // Should not match
+					'.on': 'text/plain',       // Should not match
 					'.json': 'application/json',
-				}
-			}
+				},
+			},
 		});
 
-		const frames = await collectFrames(worker);
-		assertEquals(frames[0].headers['content-type'], 'application/json');
+		assertEquals(result.status, 200);
+		assertEquals(result.headers['content-type'], 'application/json');
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
 Deno.test('Static Content - explicit MIME type overrides extension', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-4',
-			url: '/test.txt',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
 			headers: {},
 			routeParams: {},
 			routeTail: '/test.txt',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {
-					'.txt': 'text/plain'
-				},
-				mimeType: 'application/custom'  // Explicit override
-			}
+				mimeTypes: { '.txt': 'text/plain' },
+				mimeType: 'application/custom', // Explicit override
+			},
 		});
 
-		const frames = await collectFrames(worker);
-		assertEquals(frames[0].headers['content-type'], 'application/custom');
+		assertEquals(result.status, 200);
+		assertEquals(result.headers['content-type'], 'application/custom');
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
 Deno.test('Static Content - default MIME type for unknown extension', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-5',
-			url: '/binary.bin',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/binary.bin',
 			headers: {},
 			routeParams: {},
 			routeTail: '/binary.bin',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {}  // No MIME types configured
-			}
+				mimeTypes: {}, // No MIME types configured
+			},
 		});
 
-		const frames = await collectFrames(worker);
-		assertEquals(frames[0].headers['content-type'], 'application/octet-stream');
+		assertEquals(result.status, 200);
+		assertEquals(result.headers['content-type'], 'application/octet-stream');
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
+// ─── Security ─────────────────────────────────────────────────────────────────
+
 Deno.test('Static Content - prevents path traversal attack', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-6',
-			url: '/../../../etc/passwd',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/../../../etc/passwd',
 			headers: {},
 			routeParams: {},
 			routeTail: '/../../../etc/passwd',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {}
-			}
+				mimeTypes: {},
+			},
 		});
 
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames.length, 1);
-		assertEquals(frames[0].type, 'frame');
-		assertEquals(frames[0].status, 404);
-		assertEquals(frames[0].final, true);
-
-		const content = new TextDecoder().decode(frames[0].data);
-		assertEquals(content, 'File not found');
+		assertEquals(result.status, 404);
+		assertEquals(result.bodyText, 'File not found');
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
 Deno.test('Static Content - returns 404 for non-existent file', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-7',
-			url: '/nonexistent.txt',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/nonexistent.txt',
 			headers: {},
 			routeParams: {},
 			routeTail: '/nonexistent.txt',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {}
-			}
+				mimeTypes: {},
+			},
 		});
 
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames[0].status, 404);
-		assertEquals(frames[0].final, true);
-
-		const content = new TextDecoder().decode(frames[0].data);
-		assertEquals(content, 'File not found');
+		assertEquals(result.status, 404);
+		assertEquals(result.bodyText, 'File not found');
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
 Deno.test('Static Content - returns 404 when root not configured', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-8',
-			url: '/test.txt',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
 			headers: {},
 			routeParams: {},
 			routeTail: '/test.txt',
 			maxChunkSize: 65536,
 			config: {
 				// root missing
-				mimeTypes: {}
-			}
+				mimeTypes: {},
+			},
 		});
 
-		const frames = await collectFrames(worker);
-		assertEquals(frames[0].status, 404);
+		assertEquals(result.status, 404);
 	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
+// ─── Subdirectory and binary ──────────────────────────────────────────────────
+
 Deno.test('Static Content - serves file from subdirectory', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-9',
-			url: '/subdir/nested.txt',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/subdir/nested.txt',
 			headers: {},
 			routeParams: {},
 			routeTail: '/subdir/nested.txt',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {
-					'.txt': 'text/plain'
-				}
-			}
-		});
-
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames[0].status, 200);
-		const content = new TextDecoder().decode(frames[0].data);
-		assertEquals(content, 'Nested file');
-	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - chunks large file', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		const chunkSize = 32768; // 32KB chunks
-
-		worker.postMessage({
-			type: 'request',
-			id: 'req-10',
-			url: '/large.bin',
-			headers: {},
-			routeParams: {},
-			routeTail: '/large.bin',
-			maxChunkSize: chunkSize,
-			config: {
-				root: testDir,
-				mimeTypes: {}
-			}
-		});
-
-		const frames = await collectFrames(worker, 2000);
-
-		// First frame should have headers
-		assertEquals(frames[0].type, 'frame');
-		assertEquals(frames[0].mode, 'response');
-		assertEquals(frames[0].status, 200);
-		assertEquals(frames[0].headers['content-length'], '102400');
-		assertEquals(frames[0].headers['accept-ranges'], 'bytes');
-		assertEquals(frames[0].data, null);
-		assertEquals(frames[0].keepAlive, false);
-
-		// Should have multiple data frames
-		assert(frames.length > 2, 'Should have multiple frames for large file');
-
-		// Collect all data
-		const allData = [];
-		for (let i = 1; i < frames.length; i++) {
-			if (frames[i].data) {
-				allData.push(...frames[i].data);
-			}
-		}
-
-		// Verify total size
-		assertEquals(allData.length, 100 * 1024);
-
-		// Verify last frame is marked final
-		const lastFrame = frames[frames.length - 1];
-		assertEquals(lastFrame.final, true);
-	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - handles Range request', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-11',
-			url: '/test.txt',
-			headers: {
-				'Range': 'bytes=0-4'  // First 5 bytes: "Hello"
+				mimeTypes: { '.txt': 'text/plain' },
 			},
-			routeParams: {},
-			routeTail: '/test.txt',
-			maxChunkSize: 65536,
-			config: {
-				root: testDir,
-				mimeTypes: {
-					'.txt': 'text/plain'
-				}
-			}
 		});
 
-		const frames = await collectFrames(worker);
-
-		// First frame has headers
-		assertEquals(frames[0].status, 206);  // Partial Content
-		assertEquals(frames[0].headers['Content-Range'], 'bytes 0-4/13');
-		assertEquals(frames[0].headers['content-length'], '5');
-
-		// Collect data from all frames
-		const allData = [];
-		for (const frame of frames) {
-			if (frame.data) {
-				allData.push(...frame.data);
-			}
-		}
-
-		const content = new TextDecoder().decode(new Uint8Array(allData));
-		assertEquals(content, 'Hello');
+		assertEquals(result.status, 200);
+		assertEquals(result.bodyText, 'Nested file');
 	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - handles Range request with open end', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-12',
-			url: '/test.txt',
-			headers: {
-				'Range': 'bytes=7-'  // From byte 7 to end: "World!"
-			},
-			routeParams: {},
-			routeTail: '/test.txt',
-			maxChunkSize: 65536,
-			config: {
-				root: testDir,
-				mimeTypes: {
-					'.txt': 'text/plain'
-				}
-			}
-		});
-
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames[0].status, 206);
-		assertEquals(frames[0].headers['Content-Range'], 'bytes 7-12/13');
-
-		const allData = [];
-		for (const frame of frames) {
-			if (frame.data) {
-				allData.push(...frame.data);
-			}
-		}
-
-		const content = new TextDecoder().decode(new Uint8Array(allData));
-		assertEquals(content, 'World!');
-	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - returns 416 for invalid Range', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-13',
-			url: '/test.txt',
-			headers: {
-				'Range': 'bytes=100-200'  // Beyond file size
-			},
-			routeParams: {},
-			routeTail: '/test.txt',
-			maxChunkSize: 65536,
-			config: {
-				root: testDir,
-				mimeTypes: {}
-			}
-		});
-
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames[0].status, 416);  // Range Not Satisfiable
-		assertEquals(frames[0].headers['Content-Range'], 'bytes */13');
-		assertEquals(frames[0].final, true);
-	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - returns 416 for malformed Range header', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-14',
-			url: '/test.txt',
-			headers: {
-				'Range': 'invalid-range-header'
-			},
-			routeParams: {},
-			routeTail: '/test.txt',
-			maxChunkSize: 65536,
-			config: {
-				root: testDir,
-				mimeTypes: {}
-			}
-		});
-
-		const frames = await collectFrames(worker);
-		assertEquals(frames[0].status, 416);
-	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - chunks large Range request', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		const chunkSize = 16384; // 16KB chunks
-
-		worker.postMessage({
-			type: 'request',
-			id: 'req-15',
-			url: '/large.bin',
-			headers: {
-				'Range': 'bytes=0-49999'  // First 50KB
-			},
-			routeParams: {},
-			routeTail: '/large.bin',
-			maxChunkSize: chunkSize,
-			config: {
-				root: testDir,
-				mimeTypes: {}
-			}
-		});
-
-		const frames = await collectFrames(worker, 2000);
-
-		assertEquals(frames[0].status, 206);
-		assertEquals(frames[0].headers['Content-Range'], 'bytes 0-49999/102400');
-		assertEquals(frames[0].headers['content-length'], '50000');
-
-		// Should have multiple frames
-		assert(frames.length > 2, 'Should chunk large range request');
-
-		// Collect all data
-		const allData = [];
-		for (const frame of frames) {
-			if (frame.data) {
-				allData.push(...frame.data);
-			}
-		}
-
-		assertEquals(allData.length, 50000);
-
-		// Verify last frame is final
-		assertEquals(frames[frames.length - 1].final, true);
-	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - handles case-insensitive Range header', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-16',
-			url: '/test.txt',
-			headers: {
-				'range': 'bytes=0-4'  // lowercase 'range'
-			},
-			routeParams: {},
-			routeTail: '/test.txt',
-			maxChunkSize: 65536,
-			config: {
-				root: testDir,
-				mimeTypes: {}
-			}
-		});
-
-		const frames = await collectFrames(worker);
-		assertEquals(frames[0].status, 206);
-	} finally {
-		worker.terminate();
-	}
-});
-
-Deno.test('Static Content - returns 404 for unreadable file', async () => {
-	const worker = await createStaticWorker();
-
-	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-18',
-			url: '/unreadable.txt',
-			headers: {},
-			routeParams: {},
-			routeTail: '/unreadable.txt',
-			maxChunkSize: 65536,
-			config: {
-				root: testDir,
-				mimeTypes: {}
-			}
-		});
-
-		const frames = await collectFrames(worker);
-
-		// Should return 404, not an error message
-		assertEquals(frames[0].type, 'frame');
-		assertEquals(frames[0].status, 404);
-		assertEquals(frames[0].final, true);
-
-		const content = new TextDecoder().decode(frames[0].data);
-		assertEquals(content, 'File not found');
-	} finally {
-		worker.terminate();
+		await cleanup();
 	}
 });
 
 Deno.test('Static Content - serves binary file correctly', async () => {
-	const worker = await createStaticWorker();
+	const { appletChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		worker.postMessage({
-			type: 'request',
-			id: 'req-17',
-			url: '/binary.bin',
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/binary.bin',
 			headers: {},
 			routeParams: {},
 			routeTail: '/binary.bin',
 			maxChunkSize: 65536,
 			config: {
 				root: testDir,
-				mimeTypes: {}
-			}
+				mimeTypes: {},
+			},
 		});
 
-		const frames = await collectFrames(worker);
-
-		assertEquals(frames[0].status, 200);
-		assertEquals(frames[0].data.length, 6);
-
-		// Verify binary content
+		assertEquals(result.status, 200);
+		assertEquals(result.body.length, 6);
 		for (let i = 0; i < 6; i++) {
-			assertEquals(frames[0].data[i], i);
+			assertEquals(result.body[i], i);
 		}
 	} finally {
-		worker.terminate();
+		await cleanup();
+	}
+});
+
+// ─── Chunking ─────────────────────────────────────────────────────────────────
+
+Deno.test('Static Content - chunks large file', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const chunkSize = 32768; // 32KB chunks
+
+		await appletChannel.write('req', JSON.stringify({
+			method: 'GET',
+			url: 'https://example.com/large.bin',
+			headers: {},
+			routeParams: {},
+			routeTail: '/large.bin',
+			maxChunkSize: chunkSize,
+			config: {
+				root: testDir,
+				mimeTypes: {},
+			},
+		}));
+
+		// Read response metadata
+		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		let metaData;
+		await resMeta.process(() => {
+			metaData = JSON.parse(resMeta.text);
+		});
+
+		assertEquals(metaData.status, 200);
+		assertEquals(metaData.headers['content-length'], '102400');
+		assertEquals(metaData.headers['accept-ranges'], 'bytes');
+
+		// Collect all body chunks until end-of-stream.
+		// Read without filters (like readToEOS) to avoid dechunk/only interaction issues.
+		const bodyChunks = [];
+		let frameCount = 0;
+		let message;
+		while (message = await appletChannel.read()) {
+			if (!message.data && !message.text) {
+				message.done();
+				break;
+			}
+			await message.process(() => {
+				bodyChunks.push(message.data.toUint8Array());
+				frameCount++;
+			});
+		}
+
+		// Should have multiple frames for 100KB file with 32KB chunks
+		assert(frameCount >= 3, `Expected at least 3 frames, got ${frameCount}`);
+
+		// Verify total size
+		const totalLength = bodyChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+		assertEquals(totalLength, 100 * 1024);
+	} finally {
+		await cleanup();
+	}
+});
+
+// ─── Range requests ───────────────────────────────────────────────────────────
+
+Deno.test('Static Content - handles Range request', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
+			headers: { 'Range': 'bytes=0-4' }, // First 5 bytes: "Hello"
+			routeParams: {},
+			routeTail: '/test.txt',
+			maxChunkSize: 65536,
+			config: {
+				root: testDir,
+				mimeTypes: { '.txt': 'text/plain' },
+			},
+		});
+
+		assertEquals(result.status, 206); // Partial Content
+		assertEquals(result.headers['Content-Range'], 'bytes 0-4/13');
+		assertEquals(result.headers['content-length'], '5');
+		assertEquals(result.bodyText, 'Hello');
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('Static Content - handles Range request with open end', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
+			headers: { 'Range': 'bytes=7-' }, // From byte 7 to end: "World!"
+			routeParams: {},
+			routeTail: '/test.txt',
+			maxChunkSize: 65536,
+			config: {
+				root: testDir,
+				mimeTypes: { '.txt': 'text/plain' },
+			},
+		});
+
+		assertEquals(result.status, 206);
+		assertEquals(result.headers['Content-Range'], 'bytes 7-12/13');
+		assertEquals(result.bodyText, 'World!');
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('Static Content - returns 416 for invalid Range', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
+			headers: { 'Range': 'bytes=100-200' }, // Beyond file size
+			routeParams: {},
+			routeTail: '/test.txt',
+			maxChunkSize: 65536,
+			config: {
+				root: testDir,
+				mimeTypes: {},
+			},
+		});
+
+		assertEquals(result.status, 416); // Range Not Satisfiable
+		assertEquals(result.headers['Content-Range'], 'bytes */13');
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('Static Content - returns 416 for malformed Range header', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
+			headers: { 'Range': 'invalid-range-header' },
+			routeParams: {},
+			routeTail: '/test.txt',
+			maxChunkSize: 65536,
+			config: {
+				root: testDir,
+				mimeTypes: {},
+			},
+		});
+
+		assertEquals(result.status, 416);
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('Static Content - handles case-insensitive Range header', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
+			headers: { 'range': 'bytes=0-4' }, // lowercase 'range'
+			routeParams: {},
+			routeTail: '/test.txt',
+			maxChunkSize: 65536,
+			config: {
+				root: testDir,
+				mimeTypes: {},
+			},
+		});
+
+		assertEquals(result.status, 206);
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('Static Content - chunks large Range request', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const chunkSize = 16384; // 16KB chunks
+
+		await appletChannel.write('req', JSON.stringify({
+			method: 'GET',
+			url: 'https://example.com/large.bin',
+			headers: { 'Range': 'bytes=0-49999' }, // First 50KB
+			routeParams: {},
+			routeTail: '/large.bin',
+			maxChunkSize: chunkSize,
+			config: {
+				root: testDir,
+				mimeTypes: {},
+			},
+		}));
+
+		// Read response metadata
+		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		let metaData;
+		await resMeta.process(() => {
+			metaData = JSON.parse(resMeta.text);
+		});
+
+		assertEquals(metaData.status, 206);
+		assertEquals(metaData.headers['Content-Range'], 'bytes 0-49999/102400');
+		assertEquals(metaData.headers['content-length'], '50000');
+
+		// Collect all body chunks until end-of-stream.
+		// Read without filters (like readToEOS) to avoid dechunk/only interaction issues.
+		const bodyChunks = [];
+		let frameCount = 0;
+		let message;
+		while (message = await appletChannel.read()) {
+			if (!message.data && !message.text) {
+				message.done();
+				break;
+			}
+			await message.process(() => {
+				bodyChunks.push(message.data.toUint8Array());
+				frameCount++;
+			});
+		}
+
+		// Should have multiple frames for 50KB with 16KB chunks
+		assert(frameCount >= 3, `Expected at least 3 frames, got ${frameCount}`);
+
+		const totalLength = bodyChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+		assertEquals(totalLength, 50000);
+	} finally {
+		await cleanup();
+	}
+});
+
+// ─── Permission errors ────────────────────────────────────────────────────────
+
+Deno.test('Static Content - returns 404 for unreadable file', async () => {
+	const { appletChannel, cleanup } = await setupStaticWorker();
+
+	try {
+		const result = await sendStaticRequest(appletChannel, {
+			method: 'GET',
+			url: 'https://example.com/unreadable.txt',
+			headers: {},
+			routeParams: {},
+			routeTail: '/unreadable.txt',
+			maxChunkSize: 65536,
+			config: {
+				root: testDir,
+				mimeTypes: {},
+			},
+		});
+
+		assertEquals(result.status, 404);
+		assertEquals(result.bodyText, 'File not found');
+	} finally {
+		await cleanup();
 	}
 });

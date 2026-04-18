@@ -512,20 +512,19 @@ if (typeof self !== 'undefined' && self.postMessage) {
 		try {
 			switch (type) {
 				case 'init': {
-					// Initialize router with configuration
-					const { config: slidConfig } = data;
-					config = Configuration.fromSLID(slidConfig);
+					// Initialize router with configuration (JSON plain object)
+					const { config: configJson } = data;
+					config = new Configuration(JSON.parse(configJson));
 					router = new Router(config);
 					self.postMessage({ type: 'init-res', id, success: true });
 					break;
 				}
 
 				case 'config': {
-					// Update router configuration
-					const { config: slidConfig } = data;
-					if (router && slidConfig) {
-						const nanosConfig = NANOS.parseSLID(slidConfig);
-						config.updateConfig(nanosConfig);
+					// Update router configuration (JSON plain object)
+					const { config: configJson } = data;
+					if (router && configJson) {
+						config.updateConfig(JSON.parse(configJson));
 						router.updateConfig();
 						self.postMessage({ type: 'config-res', id, success: true });
 					} else {

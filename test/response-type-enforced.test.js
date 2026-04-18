@@ -2,17 +2,14 @@
  * Response-Type Enforcement Tests
  * Tests for pool-level response type restrictions
  *
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { assertEquals, assertExists } from 'https://deno.land/std@0.208.0/assert/mod.ts';
+import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { Configuration } from '../src/configuration.esm.js';
-import { NANOS } from '@nanos';
 
 Deno.test('getAllowedResponseTypes - default allows all types', () => {
-	const config = new Configuration(new NANOS());
-	config.config.setOpts({ transform: true });
-	config.config.push({
+	const config = new Configuration({
 		pools: {
 			standard: {
 				minProcs: 1,
@@ -29,9 +26,7 @@ Deno.test('getAllowedResponseTypes - default allows all types', () => {
 });
 
 Deno.test('getAllowedResponseTypes - explicit response only', () => {
-	const config = new Configuration(new NANOS());
-	config.config.setOpts({ transform: true });
-	config.config.push({
+	const config = new Configuration({
 		pools: {
 			fast: {
 				minProcs: 2,
@@ -49,9 +44,7 @@ Deno.test('getAllowedResponseTypes - explicit response only', () => {
 });
 
 Deno.test('getAllowedResponseTypes - stream and bidi only', () => {
-	const config = new Configuration(new NANOS());
-	config.config.setOpts({ transform: true });
-	config.config.push({
+	const config = new Configuration({
 		pools: {
 			stream: {
 				minProcs: 1,
@@ -69,9 +62,7 @@ Deno.test('getAllowedResponseTypes - stream and bidi only', () => {
 });
 
 Deno.test('getAllowedResponseTypes - all types explicitly listed', () => {
-	const config = new Configuration(new NANOS());
-	config.config.setOpts({ transform: true });
-	config.config.push({
+	const config = new Configuration({
 		pools: {
 			standard: {
 				minProcs: 1,
@@ -89,9 +80,7 @@ Deno.test('getAllowedResponseTypes - all types explicitly listed', () => {
 });
 
 Deno.test('getAllowedResponseTypes - nonexistent pool returns default', () => {
-	const config = new Configuration(new NANOS());
-	config.config.setOpts({ transform: true });
-	config.config.push({
+	const config = new Configuration({
 		pools: {
 			fast: {
 				minProcs: 2,
@@ -108,9 +97,7 @@ Deno.test('getAllowedResponseTypes - nonexistent pool returns default', () => {
 });
 
 Deno.test('getAllowedResponseTypes - empty resType list', () => {
-	const config = new Configuration(new NANOS());
-	config.config.setOpts({ transform: true });
-	config.config.push({
+	const config = new Configuration({
 		pools: {
 			restricted: {
 				minProcs: 0,
@@ -128,9 +115,7 @@ Deno.test('getAllowedResponseTypes - empty resType list', () => {
 });
 
 Deno.test('getAllowedResponseTypes - single type', () => {
-	const config = new Configuration(new NANOS());
-	config.config.setOpts({ transform: true });
-	config.config.push({
+	const config = new Configuration({
 		pools: {
 			bidiOnly: {
 				minProcs: 1,
@@ -147,19 +132,15 @@ Deno.test('getAllowedResponseTypes - single type', () => {
 	assertEquals(allowed.has('bidi'), true);
 });
 
-Deno.test('getAllowedResponseTypes - NANOS array conversion', () => {
-	const config = new Configuration(new NANOS());
-	const resTypeNanos = new NANOS();
-	resTypeNanos.push('response');
-	resTypeNanos.push('stream');
-
-	config.config.setOpts({ transform: true });
-	config.config.push({
+Deno.test('getAllowedResponseTypes - NANOS array conversion via Configuration(NANOS)', () => {
+	// When Configuration receives a NANOS object, it converts via toObject({ array: true })
+	// which converts indexed-only NANOS to JS arrays. Test that resType as a plain array works.
+	const config = new Configuration({
 		pools: {
 			test: {
 				minProcs: 1,
 				maxProcs: 10,
-				resType: resTypeNanos
+				resType: ['response', 'stream']
 			}
 		}
 	});

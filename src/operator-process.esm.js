@@ -104,28 +104,18 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Convert a plain-object or NANOS headers map to a Headers instance.
-	 * Responder sends headers as a plain JSON object; NANOS is supported for
-	 * any legacy callers.
+	 * Convert a plain-object headers map to a Headers instance.
+	 * Responder sends headers as a plain JSON object (from JSON deserialization).
+	 * Multi-valued headers (e.g. Set-Cookie) are represented as arrays.
 	 */
 	convertHeaders (hdrIn) {
 		const hdrOut = new Headers();
 		if (!hdrIn) return hdrOut;
-		if (hdrIn instanceof NANOS) {
-			for (const [name, content] of hdrIn.entries()) {
-				if (typeof content?.values === 'function') {
-					// Multi-valued, e.g. Set-Cookie
-					for (const content1 of content.values()) hdrOut.append(name, content1);
-				} else hdrOut.set(name, String(content));
-			}
-		} else {
-			// Plain object (from JSON deserialization)
-			for (const [name, value] of Object.entries(hdrIn)) {
-				if (Array.isArray(value)) {
-					for (const v of value) hdrOut.append(name, String(v));
-				} else {
-					hdrOut.set(name, String(value));
-				}
+		for (const [name, value] of Object.entries(hdrIn)) {
+			if (Array.isArray(value)) {
+				for (const v of value) hdrOut.append(name, String(v));
+			} else {
+				hdrOut.set(name, String(value));
 			}
 		}
 		return hdrOut;
@@ -295,8 +285,9 @@ export class OperatorProcess {
 		// Update Configuration instance (converts NANOS to plain objects)
 		this.configuration.updateConfig(newConfig);
 
-		// Apply default pool config if pools section is missing
-		if (!this.configuration.config.pools || Object.keys(this.configuration.config.pools).length === 0) {
+		// Apply default pool config only if pools section is absent (null/undefined).
+		// An explicitly empty pools object ({}) is respected as-is (no pools configured).
+		if (this.configuration.config.pools == null) {
 			this.logger.warn('No pools configured in reload, using defaults');
 			this.configuration.config.pools = getDefaultPoolsConfig();
 			this.configuration._pools = null; // Invalidate cache
@@ -454,12 +445,18 @@ export class OperatorProcess {
 	 * Initialize service process pools
 	 */
 	async initializeProcessPools () {
-		let poolsConfig = this.configuration.pools;
-		if (!poolsConfig || Object.keys(poolsConfig).length === 0) {
+		// Check raw config to distinguish "not configured" (undefined) from "explicitly empty" ({})
+		const rawPools = this.configuration.config.pools;
+		let poolsConfig;
+		if (rawPools == null) {
+			// Pools not configured at all — use defaults
 			this.logger.warn('No pools configured, using defaults');
 			poolsConfig = getDefaultPoolsConfig();
 			this.configuration.config.pools = poolsConfig;
 			this.configuration._pools = null; // Invalidate cache
+		} else {
+			// Pools explicitly configured (even if empty)
+			poolsConfig = rawPools;
 		}
 
 		// Create PoolManager for each pool
@@ -722,10 +719,6 @@ export class OperatorProcess {
 	async updateProcessPools () {
 		this.logger.info('Updating process pools');
 		const newPoolsConfig = this.configuration.pools;
-		if (!newPoolsConfig || Object.keys(newPoolsConfig).length === 0) {
-			this.logger.error('updateProcessPools called but no pools config available');
-			return;
-		}
 
 		const stopTime = this.configuration.config.shutdownDelay ?? 30;
 		const newPoolNames = new Set(Object.keys(newPoolsConfig));

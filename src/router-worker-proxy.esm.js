@@ -97,9 +97,9 @@ export class RouterWorkerProxy {
 	 * @param {Configuration} config Configuration instance
 	 */
 	async initialize (config) {
-		// Serialize configuration to SLID for transmission
-		const slidConfig = config.toSLID();
-		await this.sendMessage('init', { config: slidConfig });
+		// Serialize configuration as JSON (plain objects) for transmission
+		const configJson = JSON.stringify(config.config);
+		await this.sendMessage('init', { config: configJson });
 		this.isInitialized = true;
 		this.isAvailable = true;
 	}
@@ -109,9 +109,9 @@ export class RouterWorkerProxy {
 	 * @param {Configuration} config Configuration instance
 	 */
 	async updateConfig (config) {
-		// Serialize configuration to SLID for transmission
-		const slidConfig = config.toSLID();
-		await this.sendMessage('config', { config: slidConfig });
+		// Serialize configuration as JSON (plain objects) for transmission
+		const configJson = JSON.stringify(config.config);
+		await this.sendMessage('config', { config: configJson });
 	}
 
 	/**

@@ -3,7 +3,7 @@
  */
 
 import { assertEquals, assertThrows } from 'https://deno.land/std@0.208.0/assert/mod.ts';
-import { NANOS } from '@nanos';
+import { Configuration } from '../src/configuration.esm.js';
 import { OperatorProcess, ServerConfig } from '../src/operator.esm.js';
 
 // Mock Deno.uid for testing
@@ -21,13 +21,9 @@ Deno.test('validatePrivilegeConfiguration - running as root with uid/gid configu
 	mockUid(0); // Mock running as root
 
 	try {
-		const config = new NANOS();
-		config.set('uid', 1000);
-		config.set('gid', 1000);
-
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
-		operator.configData = config;
+		operator.configuration = new Configuration({ uid: 1000, gid: 1000 });
 		operator.initializeLogger();
 
 		// Should not throw
@@ -41,12 +37,9 @@ Deno.test('validatePrivilegeConfiguration - running as root without uid/gid thro
 	mockUid(0); // Mock running as root
 
 	try {
-		const config = new NANOS();
-		// No uid/gid set
-
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
-		operator.configData = config;
+		operator.configuration = new Configuration({});
 		operator.initializeLogger();
 
 		// Should throw
@@ -64,13 +57,9 @@ Deno.test('validatePrivilegeConfiguration - running as root with only uid throws
 	mockUid(0); // Mock running as root
 
 	try {
-		const config = new NANOS();
-		config.set('uid', 1000);
-		// No gid set
-
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
-		operator.configData = config;
+		operator.configuration = new Configuration({ uid: 1000 });
 		operator.initializeLogger();
 
 		// Should throw
@@ -88,13 +77,9 @@ Deno.test('validatePrivilegeConfiguration - running as root with only gid throws
 	mockUid(0); // Mock running as root
 
 	try {
-		const config = new NANOS();
-		config.set('gid', 1000);
-		// No uid set
-
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
-		operator.configData = config;
+		operator.configuration = new Configuration({ gid: 1000 });
 		operator.initializeLogger();
 
 		// Should throw
@@ -112,13 +97,9 @@ Deno.test('validatePrivilegeConfiguration - not running as root with uid/gid con
 	mockUid(1000); // Mock running as non-root user
 
 	try {
-		const config = new NANOS();
-		config.set('uid', 1000);
-		config.set('gid', 1000);
-
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
-		operator.configData = config;
+		operator.configuration = new Configuration({ uid: 1000, gid: 1000 });
 		operator.initializeLogger();
 
 		// Capture logger warnings
@@ -143,12 +124,9 @@ Deno.test('validatePrivilegeConfiguration - not running as root without uid/gid 
 	mockUid(1000); // Mock running as non-root user
 
 	try {
-		const config = new NANOS();
-		// No uid/gid set
-
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
-		operator.configData = config;
+		operator.configuration = new Configuration({});
 		operator.initializeLogger();
 
 		// Should not throw or warn
@@ -162,13 +140,9 @@ Deno.test('validatePrivilegeConfiguration - not running as root with only uid lo
 	mockUid(1000); // Mock running as non-root user
 
 	try {
-		const config = new NANOS();
-		config.set('uid', 1000);
-		// No gid set
-
 		const serverConfig = new ServerConfig({ noSSL: true });
 		const operator = new OperatorProcess(serverConfig);
-		operator.configData = config;
+		operator.configuration = new Configuration({ uid: 1000 });
 		operator.initializeLogger();
 
 		// Capture logger warnings

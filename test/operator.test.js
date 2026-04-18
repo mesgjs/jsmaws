@@ -1,6 +1,6 @@
 /**
  * Tests for JSMAWS Operator Process
- * 
+ *
  * The operator is the privileged process that:
  * - Binds to HTTP/HTTPS ports
  * - Manages configuration and SSL certificates
@@ -11,6 +11,7 @@
 
 import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.0/assert/mod.ts";
 import { OperatorProcess, ServerConfig, loadConfig } from "../src/operator.esm.js";
+import { Configuration } from "../src/configuration.esm.js";
 import { NANOS } from '@nanos';
 
 // ============================================================================
@@ -138,8 +139,6 @@ Deno.test("OperatorProcess - initializes router", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 
-	// Set up minimal config data
-	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeRouter();
 
@@ -150,7 +149,6 @@ Deno.test("OperatorProcess - initializes process manager", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 
-	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeProcessManager();
 
@@ -201,7 +199,6 @@ Deno.test("OperatorProcess - ACME challenge path without configured dir redirect
 Deno.test("OperatorProcess - HTTP request in noSSL mode", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeRouter();
 
@@ -235,7 +232,6 @@ Deno.test("OperatorProcess - HTTPS request without router returns 404", async ()
 Deno.test("OperatorProcess - HTTPS request with router but no match returns 404", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeRouter();
 
@@ -252,7 +248,6 @@ Deno.test("OperatorProcess - HTTPS request with router but no match returns 404"
 Deno.test("OperatorProcess - handles configuration update", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.initializeProcessManager();
@@ -306,32 +301,28 @@ Deno.test("OperatorProcess - handles configuration update", async () => {
 // Header Conversion Tests
 // ============================================================================
 
-Deno.test("OperatorProcess - converts NANOS headers to Headers", () => {
+Deno.test("OperatorProcess - converts plain-object headers to Headers", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 
-	const nanosHeaders = new NANOS({
+	const headers = operator.convertHeaders({
 		'content-type': 'application/json',
 		'x-custom': 'value'
 	});
-
-	const headers = operator.convertHeaders(nanosHeaders);
 
 	assertEquals(headers.get('content-type'), 'application/json');
 	assertEquals(headers.get('x-custom'), 'value');
 });
 
-Deno.test("OperatorProcess - converts multi-valued NANOS headers", () => {
+Deno.test("OperatorProcess - converts multi-valued plain-object headers", () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
 
-	// Include multi-valued header (e.g., Set-Cookie)
-	const nanosHeaders = new NANOS({
+	// Multi-valued headers (e.g. Set-Cookie) are represented as arrays in JSON
+	const headers = operator.convertHeaders({
 		'content-type': 'application/json',
-		'set-cookie': new NANOS('session=abc123', 'user=john')
+		'set-cookie': ['session=abc123', 'user=john']
 	});
-
-	const headers = operator.convertHeaders(nanosHeaders);
 
 	assertEquals(headers.get('content-type'), 'application/json');
 
@@ -390,7 +381,6 @@ Deno.test("OperatorProcess - reload sets flag during reload", async () => {
 Deno.test("OperatorProcess - initializeProcessPools with no pools config", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	operator.configData = new NANOS();
 	operator.initializeLogger();
 	operator.initializeProcessManager();
 
@@ -425,8 +415,8 @@ Deno.test("OperatorProcess - initializeProcessPools with no pools config", async
 
 		// Verify default pool was created
 		assert(createCalled, 'Expected createProcess to be called for default pool');
-		assertExists(operator.configData.at('pools'));
-		assertExists(operator.configData.at('pools').at('standard'));
+		assertExists(operator.configuration.config.pools);
+		assertExists(operator.configuration.config.pools.standard);
 
 		// Verify PoolManager was created
 		assertExists(operator.poolManagers.get('standard'), 'Expected PoolManager for standard pool');
@@ -444,8 +434,7 @@ Deno.test("OperatorProcess - initializeProcessPools with no pools config", async
 Deno.test("OperatorProcess - initializeProcessPools with empty pools config", async () => {
 	const config = new ServerConfig({ noSSL: true });
 	const operator = new OperatorProcess(config);
-	operator.configData = new NANOS();
-	operator.configData.set('pools', new NANOS());
+	operator.configuration = new Configuration({ pools: {} });
 	operator.initializeLogger();
 	operator.initializeProcessManager();
 

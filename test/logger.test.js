@@ -10,28 +10,17 @@ class ConsoleCapture {
     constructor() {
         this.stdout = [];
         this.stderr = [];
-        this.originalStdout = Deno.stdout;
-        this.originalStderr = Deno.stderr;
+        const { debug, info, warn, error } = console;
+        this.originalConsole = { debug, info, warn, error };
     }
 
     start() {
-        Deno.stdout = {
-            writeSync: (data) => {
-                this.stdout.push(new TextDecoder().decode(data));
-                return data.length;
-            },
-        };
-        Deno.stderr = {
-            writeSync: (data) => {
-                this.stderr.push(new TextDecoder().decode(data));
-                return data.length;
-            },
-        };
+        console.debug = console.info = (text) => this.stdout.push(text);
+        console.warn = console.error = (text) => this.stderr.push(text);
     }
 
     stop() {
-        Deno.stdout = this.originalStdout;
-        Deno.stderr = this.originalStderr;
+        Object.assign(console, this.originalConsole);
     }
 
     getStdout() {
@@ -346,16 +335,19 @@ Deno.test('Logger: Multiple backends', async () => {
         component: 'test',
     });
 
-    logger.info('Test message');
-    
-    // Wait for async log operations to complete
-    await new Promise(resolve => setTimeout(resolve, 10));
+    try {
+        logger.info('Test message');
+        
+        // Wait for async log operations to complete
+        await new Promise(resolve => setTimeout(resolve, 10));
 
-    capture.stop();
-    const output = capture.getStdout();
-    // Should have logged to console backend
-    assertStringIncludes(output, 'Test message');
-    
-    // Clean up TCP connection
-    await logger.close();
+        capture.stop();
+        const output = capture.getStdout();
+        // Should have logged to console backend
+        assertStringIncludes(output, 'Test message');
+    }
+    finally {
+        // Clean up TCP connection
+        await logger.close();
+    }
 });

@@ -71,7 +71,7 @@ Deno.test('getTimeoutConfig - route overrides pool and global', () => {
 		]
 	`);
 
-	const routeSpec = new NANOS({ reqTimeout: 120 });
+	const routeSpec = { reqTimeout: 120 };
 	const timeouts = config.getTimeoutConfig('standard', routeSpec);
 
 	assertEquals(timeouts.reqTimeout, 120); // Route override
@@ -119,7 +119,7 @@ Deno.test('getTimeoutConfig - route zero overrides pool non-zero', () => {
 		]
 	`);
 
-	const routeSpec = new NANOS({ reqTimeout: 0 });
+	const routeSpec = { reqTimeout: 0 };
 	const timeouts = config.getTimeoutConfig('standard', routeSpec);
 
 	assertEquals(timeouts.reqTimeout, 0); // Route explicitly disables
@@ -188,7 +188,7 @@ Deno.test('getTimeoutConfig - partial route config', () => {
 		]
 	`);
 
-	const routeSpec = new NANOS({ conTimeout: 600 });
+	const routeSpec = { conTimeout: 600 };
 	const timeouts = config.getTimeoutConfig('standard', routeSpec);
 
 	assertEquals(timeouts.reqTimeout, 10);  // Pool override
@@ -210,7 +210,7 @@ Deno.test('getTimeoutConfig - all three tiers different', () => {
 		]
 	`);
 
-	const routeSpec = new NANOS({ reqTimeout: 120, idleTimeout: 90, conTimeout: 600 });
+	const routeSpec = { reqTimeout: 120, idleTimeout: 90, conTimeout: 600 };
 	const timeouts = config.getTimeoutConfig('standard', routeSpec);
 
 	assertEquals(timeouts.reqTimeout, 120); // Route wins
@@ -331,7 +331,7 @@ Deno.test('getTimeoutConfig - route disables all timeouts', () => {
 		]
 	`);
 
-	const routeSpec = new NANOS({ reqTimeout: 0, idleTimeout: 0, conTimeout: 0 });
+	const routeSpec = { reqTimeout: 0, idleTimeout: 0, conTimeout: 0 };
 	const timeouts = config.getTimeoutConfig('standard', routeSpec);
 
 	assertEquals(timeouts.reqTimeout, 0);
@@ -352,7 +352,7 @@ Deno.test('getTimeoutConfig - mixed zero and non-zero', () => {
 		]
 	`);
 
-	const routeSpec = new NANOS({ conTimeout: 0 });
+	const routeSpec = { conTimeout: 0 };
 	const timeouts = config.getTimeoutConfig('mixed', routeSpec);
 
 	assertEquals(timeouts.reqTimeout, 0);   // Pool disables

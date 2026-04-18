@@ -119,8 +119,14 @@ export function handleRequestError (context, error, operator) {
 /**
  * Handle response metadata from the responder.
  * Called when a 'res' message arrives on the req-N channel.
+ *
+ * @param {RequestContext} context - The request context
+ * @param {string} resData - JSON-encoded response metadata
+ * @param {object} operator - The OperatorProcess instance
+ * @param {Function} [upgradeCallback] - Optional bidi upgrade callback (for testing/DI).
+ *   Passed through to initializeBidiConnection. Defaults to webSocketUpgrade.
  */
-export async function handleResponseMetadata (context, resData, operator) {
+export async function handleResponseMetadata (context, resData, operator, upgradeCallback) {
 	// Extract connection data from message
 	const { mode, status, headers: rawHeaders, keepAlive } = JSON.parse(resData);
 
@@ -139,8 +145,8 @@ export async function handleResponseMetadata (context, resData, operator) {
 		context.state = RequestState.BIDI_ACTIVE;
 		operator.logger.debug(`[${context.requestId}] was WAITING_FIRST_FRAME now BIDI_ACTIVE`);
 
-		// Initialize bidi connection immediately (sets up WebSocket)
-		await initializeBidiConnection(context, operator);
+		// Initialize bidi connection immediately (sets up WebSocket by default)
+		await initializeBidiConnection(context, operator, upgradeCallback);
 
 	} else if (mode === 'response' && !keepAlive) {
 		// Transition: streaming response — body will arrive as res-frame chunks
@@ -203,19 +209,20 @@ export async function handleResFrame (context, data, eom, operator) {
 }
 
 /**
- * Initialize bidirectional connection - derive params from configuration.
- * Called from handleResponseMetadata() when status 101 is received.
+ * WebSocket-specific bidi upgrade function.
+ * Upgrades the HTTP request to WebSocket and creates a WebSocketTransport
+ * for the client connection.
+ *
+ * This is the default upgrade function used in production. Tests can inject
+ * an alternative via the upgradeCallback parameter of initializeBidiConnection.
+ *
+ * @param {RequestContext} context - The request context
+ * @param {{ maxChunkSize: number }} bidiParams - Bidi parameters from configuration
+ * @returns {Promise<{ transport: WebSocketTransport, bidiChannel: object, response: Response }>}
  */
-export async function initializeBidiConnection (context, operator) {
-	const { requestId, originalRequest } = context;
-
-	// Derive params from configuration (same as responder will use)
-	const bidiParams = operator.configuration.getBidiParams({
-		routeSpec: context.routeSpec
-	});
-
+export async function webSocketUpgrade (context, bidiParams) {
 	// Upgrade to WebSocket
-	const { socket, response } = Deno.upgradeWebSocket(originalRequest);
+	const { socket, response } = Deno.upgradeWebSocket(context.originalRequest);
 
 	// Create WebSocketTransport for client connection
 	const wsTransport = new WebSocketTransport({
@@ -240,11 +247,34 @@ export async function initializeBidiConnection (context, operator) {
 	const bidiChannel = await wsTransport.requestChannel('bidi');
 	await bidiChannel.addMessageTypes(['bidi-frame']);
 
+	return { transport: wsTransport, bidiChannel, response };
+}
+
+/**
+ * Initialize bidirectional connection - derive params from configuration.
+ * Called from handleResponseMetadata() when status 101 is received.
+ *
+ * @param {RequestContext} context - The request context
+ * @param {object} operator - The OperatorProcess instance
+ * @param {Function} [upgradeCallback] - Optional callback for bidi upgrade (for testing/DI).
+ *   Signature: async (context, bidiParams) => { transport, bidiChannel, response }
+ *   Defaults to webSocketUpgrade (WebSocket upgrade via Deno.upgradeWebSocket).
+ */
+export async function initializeBidiConnection (context, operator, upgradeCallback = webSocketUpgrade) {
+	const { requestId } = context;
+
+	// Derive params from configuration (same as responder will use)
+	const bidiParams = operator.configuration.getBidiParams({
+		routeSpec: context.routeSpec
+	});
+
+	// Perform the bidi upgrade (WebSocket by default, injectable for testing)
+	const { transport: wsTransport, bidiChannel, response } = await upgradeCallback(context, bidiParams);
+
 	// Store bidi state in context
 	context.bidiState = {
 		wsTransport,
 		bidiChannel,
-		socket,
 	};
 
 	// Relay: forward 'bidi-frame' from WS bidi channel → req-N 'bidi-frame'

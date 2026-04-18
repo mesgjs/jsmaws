@@ -24,6 +24,8 @@
  */
 
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
+import { PromiseTracer } from '@poly-transport/promise-tracer.esm.js';
+import { Channel } from '@poly-transport/channel.esm.js';
 
 /**
  * Approved Deno APIs
@@ -143,7 +145,7 @@ function setupConsole (c2c) {
 		return function (...args) {
 			// Use C2C when the channel is open; fall back to original console otherwise
 			// (handles transport disconnect and terminal debugging scenarios)
-			if (c2c.state === c2c.STATE_OPEN) {
+			if (c2c.state === Channel.STATE_OPEN) {
 				const text = args.map(consoleFormat).join(' ');
 				c2c[c2cLevel]?.(text);
 			} else {
@@ -190,9 +192,11 @@ function setupConsole (c2c) {
 async function bootstrap () {
 	// Create PostMessageTransport with C2C channel for console output
 	const c2cSymbol = Symbol('c2c');
+	const promiseTracer = new PromiseTracer(5000, { logRejections: true });
 	const transport = new PostMessageTransport({
 		gateway: self,
 		c2cSymbol,
+		promiseTracer,
 	});
 
 	// Accept all channels (responder initiates)
@@ -205,7 +209,7 @@ async function bootstrap () {
 	// Get the C2C channel and set up console interception immediately
 	// (before any applet code runs, so all console output goes through C2C)
 	const c2c = transport.getChannel(c2cSymbol);
-	setupConsole(c2c);
+	if (c2c) setupConsole(c2c);
 
 	// Read setup instructions from the private 'bootstrap' channel
 	const bootstrapChannel = await transport.requestChannel('bootstrap');
