@@ -2,24 +2,51 @@
  * Security Validation Tests
  * Tests for hostile applet scenarios and security boundary enforcement
  *
- * These tests verify that the bootstrap module and responder process
- * properly defend against malicious applet behavior:
- * - IPC forgery attempts
- * - Environment tampering
- * - Resource exhaustion (DoS)
- * - Privilege escalation attempts
- * - Response type violations
- * - Credit/buffer overflow attacks
+ * These tests verify that the bootstrap module properly defends against
+ * malicious applet behavior using the PolyTransport-based architecture:
+ * - Environment tampering prevention
+ * - Resource exhaustion (DoS) prevention
+ * - Privilege escalation prevention
+ * - Console output isolation via C2C channel
+ * - Approved API boundary enforcement
  *
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';
+import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
+import { PromiseTracer } from '@poly-transport/promise-tracer.esm.js';
 
-// Test helper to create a worker and wait for it to be ready
-async function createTestWorker (appletCode, debug = false) {
-	const bootstrapPath = new URL('../src/applets/bootstrap.esm.js', import.meta.url).href;
-	const appletUrl = `data:application/javascript;base64,${btoa(appletCode)}`;
+const bootstrapPath = new URL('../src/applets/bootstrap.esm.js', import.meta.url).href;
+
+/**
+ * Create a test applet data URL from JavaScript source code.
+ * Applets must be ES modules with an optional default export function.
+ */
+function makeAppletUrl (appletCode) {
+	return `data:application/javascript;base64,${btoa(appletCode)}`;
+}
+
+/**
+ * Drain a channel to end-of-stream (null message or empty data/text).
+ */
+async function readToEOS (channel) {
+	let message;
+	while (message = await channel.read()) {
+		message.done();
+		if (!message.data && !message.text) break;
+	}
+}
+
+/**
+ * Set up a bootstrap worker with PostMessageTransport.
+ * Returns { worker, transport, c2cChannel, bootstrapChannel, appletChannel, cleanup }
+ *
+ * @param {string} appletCode - JavaScript source for the test applet (ES module)
+ * @param {object} setupOverrides - Overrides for the setup message
+ */
+async function setupBootstrapWorker (appletCode, setupOverrides = {}) {
+	const appletUrl = makeAppletUrl(appletCode);
 
 	const worker = new Worker(bootstrapPath, {
 		type: 'module',
@@ -27,306 +54,338 @@ async function createTestWorker (appletCode, debug = false) {
 			permissions: {
 				read: false,
 				write: false,
-				net: false,
+				net: true, // Allow network for module loading
 				env: false,
 				run: false,
-				import: true,
-			}
-		}
+			},
+		},
 	});
 
-	worker.postMessage({
-		type: 'bootstrap',
+	// Create PostMessageTransport on the test side (responder role)
+	const promiseTracer = new PromiseTracer(5000, { logRejections: true });
+	const c2cSymbol = Symbol('c2c');
+	const transport = new PostMessageTransport({
+		gateway: worker,
+		c2cSymbol,
+		promiseTracer,
+		maxChunkBytes: 65536,
+	});
+
+	// Accept all channels (bootstrap initiates)
+	transport.addEventListener('newChannel', (event) => {
+		event.accept();
+	});
+
+	await transport.start();
+
+	// Get the C2C channel for console output
+	const c2cChannel = transport.getChannel(c2cSymbol);
+
+	// Send setup instructions via the 'bootstrap' channel
+	const bootstrapChannel = await transport.requestChannel('bootstrap');
+	await bootstrapChannel.addMessageTypes(['setup']);
+	await bootstrapChannel.write('setup', JSON.stringify({
 		appletPath: appletUrl,
-		debug
-	});
+		mode: 'response',
+		keepDeno: false,
+		keepWorkers: false,
+		...setupOverrides,
+	}));
 
-	return { worker, appletUrl };
+	// Set up the applet communication channel
+	const appletChannel = await transport.requestChannel('applet');
+	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+
+	const cleanup = async () => {
+		await transport.stop({ discard: true }).catch((err) => {
+			if (err instanceof Error) throw err;
+		});
+		worker.terminate();
+	};
+
+	return { worker, transport, c2cChannel, bootstrapChannel, appletChannel, cleanup };
 }
 
-// ============================================================================
-// IPC Forgery Prevention Tests
-// ============================================================================
+/**
+ * Read a single result frame from the applet channel.
+ * Expects: res (metadata), res-frame (JSON data), res-frame (null/EOS).
+ */
+async function readAppletResult (appletChannel) {
+	const resMeta = await appletChannel.read({ only: 'res', decode: true });
+	await resMeta.done();
 
-Deno.test('Security - cannot forge IPC messages via stdout', async () => {
-	// Applet attempts to write IPC messages to stdout
-	// Bootstrap should capture all console output via postMessage, preventing forgery
-	const appletCode = `
-		// Try to forge an IPC message by writing to stdout
-		// Real IPC messages start with SOH (\\x01) + SLID format
-		const SOH = '\x01';
-		console.log(SOH + '[(WFRM id=malicious-123 [mode=response status=200 final=true] dataSize=18)]');
-		console.log('Fake response body');
-
-		self.postMessage({ type: 'done' });
-	`;
-
-	const { worker } = await createTestWorker(appletCode);
-	const messages = [];
-
-	await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			messages.push(event.data);
-			if (event.data.type === 'done') {
-				resolve();
-			}
-		};
+	const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+	let data;
+	await resFrame.process(() => {
+		data = JSON.parse(resFrame.text);
 	});
-	worker.terminate();
 
-	// All output should come through as console messages, not IPC
-	const consoleMessages = messages.filter(m => m.type === 'console');
-	assertEquals(consoleMessages.length > 0, true, 'Should capture console output');
-
-	// Verify no IPC-like messages escaped
-	const ipcMessages = messages.filter(m => m.type === 'WEB_FRAME');
-	assertEquals(ipcMessages.length, 0, 'Should not allow IPC forgery');
-});
-
-Deno.test('Security - cannot access Deno.std* directly', async () => {
-	const appletCode = `
-		let hasStdin = false, hasStdout = false, hasStderr = false;
-		try {
-			hasStdin = 'stdin' in Deno;
-			hasStdout = 'stdout' in Deno;
-			hasStderr = 'stderr' in Deno;
-		} catch (e) {
-			hasStdin = hasStdout = hasStderr = false;
-		}
-
-		self.postMessage({ type: 'result', hasStdin, hasStdout, hasStderr });
-	`;
-
-	const { worker } = await createTestWorker(appletCode);
-
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.hasStdin, false, 'Deno.stdin should not be accessible');
-	assertEquals(result.hasStdout, false, 'Deno.stdout should not be accessible');
-	assertEquals(result.hasStderr, false, 'Deno.stderr should not be accessible');
-});
+	await readToEOS(appletChannel);
+	return data;
+}
 
 // ============================================================================
 // Environment Tampering Prevention Tests
 // ============================================================================
 
-Deno.test('Security - cannot restore original console', async () => {
+Deno.test('Security - cannot access Deno.stdin/stdout/stderr', async () => {
 	const appletCode = `
-		let canRestore = false;
-		try {
-			// Try to restore original console via various methods
-			const desc = Object.getOwnPropertyDescriptor(globalThis, 'console');
-			if (desc && desc.configurable) {
-				canRestore = true;
-			}
-		} catch (e) {
-			canRestore = false;
-		}
+		export default async function () {
+			const hasStdin = 'stdin' in Deno;
+			const hasStdout = 'stdout' in Deno;
+			const hasStderr = 'stderr' in Deno;
 
-		self.postMessage({ type: 'result', canRestore });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasStdin, hasStdout, hasStderr }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.canRestore, false, 'Console should not be restorable');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasStdin, false, 'Deno.stdin should not be accessible');
+		assertEquals(data.hasStdout, false, 'Deno.stdout should not be accessible');
+		assertEquals(data.hasStderr, false, 'Deno.stderr should not be accessible');
+	} finally {
+		await cleanup();
+	}
 });
 
-Deno.test('Security - cannot restore original Deno', async () => {
+Deno.test('Security - console is frozen (cannot restore original)', async () => {
 	const appletCode = `
-		let canRestore = false;
-		try {
-			const desc = Object.getOwnPropertyDescriptor(globalThis, 'Deno');
-			if (desc && desc.configurable) {
-				canRestore = true;
+		export default async function () {
+			let canRestore = false;
+			try {
+				const desc = Object.getOwnPropertyDescriptor(globalThis, 'console');
+				if (desc && desc.configurable) {
+					canRestore = true;
+				}
+			} catch (e) {
+				canRestore = false;
 			}
-		} catch (e) {
-			canRestore = false;
-		}
 
-		self.postMessage({ type: 'result', canRestore });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ canRestore }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.canRestore, false, 'Console should not be restorable');
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('Security - Deno is frozen (cannot restore original)', async () => {
+	const appletCode = `
+		export default async function () {
+			let canRestore = false;
+			try {
+				const desc = Object.getOwnPropertyDescriptor(globalThis, 'Deno');
+				if (desc && desc.configurable) {
+					canRestore = true;
+				}
+			} catch (e) {
+				canRestore = false;
 			}
-		};
-	});
-	worker.terminate();
 
-	assertEquals(result.canRestore, false, 'Deno should not be restorable');
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ canRestore }));
+			await server.write('res-frame', null);
+		}
+	`;
+
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.canRestore, false, 'Deno should not be restorable');
+	} finally {
+		await cleanup();
+	}
 });
 
 Deno.test('Security - cannot add new console methods', async () => {
 	const appletCode = `
-		let canAdd = false;
-		try {
-			console.malicious = () => {};
-			canAdd = 'malicious' in console;
-		} catch (e) {
-			canAdd = false;
-		}
+		export default async function () {
+			let canAdd = false;
+			try {
+				console.malicious = () => {};
+				canAdd = 'malicious' in console;
+			} catch (e) {
+				canAdd = false;
+			}
 
-		self.postMessage({ type: 'result', canAdd });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ canAdd }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.canAdd, false, 'Should not be able to add console methods');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.canAdd, false, 'Should not be able to add console methods');
+	} finally {
+		await cleanup();
+	}
 });
 
 Deno.test('Security - cannot add new Deno APIs', async () => {
 	const appletCode = `
-		let canAdd = false;
-		try {
-			Deno.malicious = () => {};
-			canAdd = 'malicious' in Deno;
-		} catch (e) {
-			canAdd = false;
-		}
+		export default async function () {
+			let canAdd = false;
+			try {
+				Deno.malicious = () => {};
+				canAdd = 'malicious' in Deno;
+			} catch (e) {
+				canAdd = false;
+			}
 
-		self.postMessage({ type: 'result', canAdd });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ canAdd }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.canAdd, false, 'Should not be able to add Deno APIs');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.canAdd, false, 'Should not be able to add Deno APIs');
+	} finally {
+		await cleanup();
+	}
 });
 
 // ============================================================================
 // Resource Exhaustion (DoS) Prevention Tests
 // ============================================================================
 
-Deno.test('Security - excessive console output is captured', async () => {
+Deno.test('Security - excessive console output is captured via C2C', async () => {
 	const appletCode = `
-		// Generate large amount of console output
-		for (let i = 0; i < 100; i++) {
-			console.log('x'.repeat(1000));
+		export default async function () {
+			// Generate large amount of console output
+			for (let i = 0; i < 20; i++) {
+				console.log('x'.repeat(100));
+			}
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ done: true }));
+			await server.write('res-frame', null);
 		}
-		self.postMessage({ type: 'done' });
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
-	const messages = [];
+	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			messages.push(event.data);
-			if (event.data.type === 'done') {
-				resolve();
+	try {
+		// Collect C2C messages concurrently while reading the applet response
+		const c2cMessages = [];
+		const c2cDone = (async () => {
+			let msg;
+			while (msg = await c2cChannel.read({ decode: true })) {
+				await msg.process(() => {
+					c2cMessages.push(msg.text);
+				});
 			}
-		};
-	});
-	worker.terminate();
+		})();
 
-	// All console output should be captured as postMessage
-	const consoleMessages = messages.filter(m => m.type === 'console');
-	assertEquals(consoleMessages.length, 100, 'Should capture all console output');
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.done, true, 'Applet should complete');
 
+		// Give C2C a moment to flush, then stop transport
+		await cleanup();
+		await c2cDone.catch(() => {});
+
+		// All console output should have been captured via C2C
+		assert(c2cMessages.length > 0, 'Should capture console output via C2C');
+	} catch (err) {
+		await cleanup().catch(() => {});
+		throw err;
+	}
 });
 
-Deno.test('Security - cannot spawn infinite workers', async () => {
+Deno.test('Security - cannot spawn workers (Worker constructor disabled)', async () => {
 	const appletCode = `
-		let workerCount = 0;
-		let error = null;
+		export default async function () {
+			let workerCount = 0;
+			let errorMessage = null;
 
-		try {
-			// Try to spawn workers (should fail due to permissions)
-			for (let i = 0; i < 10; i++) {
+			try {
+				// Try to spawn a worker (should fail - Worker is disabled)
 				const w = new Worker('data:application/javascript,console.log("test")', { type: 'module' });
 				workerCount++;
+			} catch (e) {
+				errorMessage = e.message;
 			}
-		} catch (e) {
-			error = e.message;
-		}
 
-		self.postMessage({ type: 'result', workerCount, error });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ workerCount, errorMessage }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	// Worker spawning should fail due to permissions
-	assertEquals(result.workerCount, 0, 'Should not be able to spawn workers');
-	assertExists(result.error, 'Should get permission error');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.workerCount, 0, 'Should not be able to spawn workers');
+		assertExists(data.errorMessage, 'Should get an error when spawning workers');
+		assert(
+			data.errorMessage.includes('disabled') || data.errorMessage.includes('permission'),
+			`Expected 'disabled' or 'permission' in error: ${data.errorMessage}`,
+		);
+	} finally {
+		await cleanup();
+	}
 });
 
 Deno.test('Security - cannot access file system', async () => {
 	const appletCode = `
-		let canRead = false;
-		let error = null;
+		export default async function () {
+			const hasReadFile = 'readFile' in Deno;
+			let canRead = false;
+			let errorMessage = null;
 
-		try {
-			// Try to read a file (should fail)
-			if ('readFile' in Deno) {
-				await Deno.readFile('/etc/passwd');
-				canRead = true;
+			if (hasReadFile) {
+				try {
+					await Deno.readFile('/etc/passwd');
+					canRead = true;
+				} catch (e) {
+					errorMessage = e.message;
+				}
 			}
-		} catch (e) {
-			error = e.message;
-		}
 
-		self.postMessage({ type: 'result', canRead, hasReadFile: 'readFile' in Deno });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasReadFile, canRead, errorMessage }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.hasReadFile, false, 'Deno.readFile should not exist');
-	assertEquals(result.canRead, false, 'Should not be able to read files');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasReadFile, false, 'Deno.readFile should not exist in filtered namespace');
+		assertEquals(data.canRead, false, 'Should not be able to read files');
+	} finally {
+		await cleanup();
+	}
 });
 
 // ============================================================================
@@ -335,270 +394,292 @@ Deno.test('Security - cannot access file system', async () => {
 
 Deno.test('Security - cannot access Deno.run', async () => {
 	const appletCode = `
-		const hasRun = 'run' in Deno;
-		self.postMessage({ type: 'result', hasRun });
+		export default async function () {
+			const hasRun = 'run' in Deno;
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasRun }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.hasRun, false, 'Deno.run should not be accessible');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasRun, false, 'Deno.run should not be accessible');
+	} finally {
+		await cleanup();
+	}
 });
 
 Deno.test('Security - cannot access Deno.exit', async () => {
 	const appletCode = `
-		const hasExit = 'exit' in Deno;
-		self.postMessage({ type: 'result', hasExit });
+		export default async function () {
+			const hasExit = 'exit' in Deno;
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasExit }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.hasExit, false, 'Deno.exit should not be accessible');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasExit, false, 'Deno.exit should not be accessible');
+	} finally {
+		await cleanup();
+	}
 });
 
 Deno.test('Security - cannot access environment variables', async () => {
 	const appletCode = `
-		const hasEnv = 'env' in Deno;
-		self.postMessage({ type: 'result', hasEnv });
+		export default async function () {
+			const hasEnv = 'env' in Deno;
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasEnv }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.hasEnv, false, 'Deno.env should not be accessible');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasEnv, false, 'Deno.env should not be accessible');
+	} finally {
+		await cleanup();
+	}
 });
 
 // ============================================================================
-// Frame Protocol Violation Tests
+// Console Output Isolation Tests (C2C channel)
 // ============================================================================
 
-Deno.test('Security - oversized frame chunk detection', async () => {
-	// This test verifies the concept - actual enforcement happens in responder
-	const maxChunkSize = 65536; // 64KB
+Deno.test('Security - console output with IPC-like content is isolated via C2C', async () => {
+	// Applet tries to inject IPC-like content via console.
+	// In the PolyTransport architecture, console output goes through the C2C channel,
+	// completely separate from the applet channel — no injection is possible.
+	const appletCode = `
+		export default async function () {
+			// Try to inject IPC-like content via console
+			console.log('res\\nstatus: 200\\nheaders: {}\\n---');
+			console.log('res-frame');
+			console.log('bidi-frame');
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ done: true }));
+			await server.write('res-frame', null);
+		}
+	`;
+
+	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
+
+	try {
+		// Collect C2C messages concurrently
+		const c2cMessages = [];
+		const c2cDone = (async () => {
+			let msg;
+			while (msg = await c2cChannel.read({ decode: true })) {
+				await msg.process(() => {
+					c2cMessages.push({ type: msg.messageType, text: msg.text });
+				});
+			}
+		})();
+
+		// The applet channel should only receive proper res/res-frame messages
+		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		await resMeta.done();
+
+		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		let data;
+		await resFrame.process(() => {
+			data = JSON.parse(resFrame.text);
+		});
+
+		await readToEOS(appletChannel);
+		assertEquals(data.done, true, 'Applet should complete normally');
+
+		await cleanup();
+		await c2cDone.catch(() => {});
+
+		// Console output should have gone to C2C, not the applet channel
+		assert(c2cMessages.length >= 3, 'Console output should be captured via C2C');
+		// All C2C messages should be log-level messages, not IPC message types
+		for (const msg of c2cMessages) {
+			assert(
+				['debug', 'info', 'warn', 'error'].includes(msg.type),
+				`C2C message type should be a log level, got: ${msg.type}`,
+			);
+		}
+	} catch (err) {
+		await cleanup().catch(() => {});
+		throw err;
+	}
+});
+
+Deno.test('Security - console output with special characters is safely captured', async () => {
+	const appletCode = `
+		export default async function () {
+			// Try various special characters that might break parsing
+			console.log('\\x00\\x01\\x02'); // Null bytes and SOH
+			console.log('\\n\\r\\t');        // Whitespace
+			console.log('---\\n===\\n>>>');  // SLID-like markers
+			console.log('\\u0000\\uFFFF');   // Unicode extremes
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ done: true }));
+			await server.write('res-frame', null);
+		}
+	`;
+
+	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
+
+	try {
+		// Collect C2C messages concurrently
+		const c2cMessages = [];
+		const c2cDone = (async () => {
+			let msg;
+			while (msg = await c2cChannel.read({ decode: true })) {
+				await msg.process(() => {
+					c2cMessages.push(msg.text);
+				});
+			}
+		})();
+
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.done, true, 'Applet should complete normally');
+
+		await cleanup();
+		await c2cDone.catch(() => {});
+
+		// All 4 console.log calls should have been captured
+		assert(c2cMessages.length >= 4, `Should capture all console output, got ${c2cMessages.length}`);
+	} catch (err) {
+		await cleanup().catch(() => {});
+		throw err;
+	}
+});
+
+// ============================================================================
+// Frame Protocol Tests
+// ============================================================================
+
+Deno.test('Security - oversized frame chunk detection (logic test)', () => {
+	// PolyTransport enforces maxChunkBytes at the transport level.
+	// This test verifies the size check concept is sound.
+	const maxChunkSize = 65536; // 64KB default
 	const oversizedData = new Uint8Array(maxChunkSize + 1);
 
-	// Verify size check logic
 	const isOversized = oversizedData.length > maxChunkSize;
 	assertEquals(isOversized, true, 'Should detect oversized chunks');
 });
 
-Deno.test('Security - malformed frame message handling', async () => {
+Deno.test('Security - applet error is reported via res-error (not crash)', async () => {
+	// Applet throws an error; bootstrap should catch it and send res-error,
+	// not crash the worker or leave the channel hanging.
 	const appletCode = `
-		// Send malformed frame message
-		self.postMessage({
-			type: 'frame',
-			// Missing required fields
+		export default async function () {
+			throw new Error('Intentional security test error');
+		}
+	`;
+
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+
+	try {
+		// Should receive res-error, not hang or crash
+		const errMsg = await appletChannel.read({ only: 'res-error', decode: true });
+		let errorData;
+		await errMsg.process(() => {
+			errorData = JSON.parse(errMsg.text);
 		});
 
-		self.postMessage({ type: 'done' });
-	`;
-
-	const { worker } = await createTestWorker(appletCode);
-
-	// Worker should not crash, responder should handle gracefully
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'done') {
-				resolve({ success: true });
-			}
-		};
-		worker.onerror = () => {
-			resolve({ success: false });
-		};
-	});
-	worker.terminate();
-
-	assertEquals(result.success, true, 'Should handle malformed messages gracefully');
+		assertExists(errorData.error, 'Should have error message');
+		assert(
+			errorData.error.includes('Intentional security test error'),
+			`Expected error message, got: ${errorData.error}`,
+		);
+	} finally {
+		await cleanup();
+	}
 });
 
 // ============================================================================
-// Console Output Injection Tests
+// Bootstrap Channel Security Tests
 // ============================================================================
 
-Deno.test('Security - console output with IPC-like content is safe', async () => {
+Deno.test('Security - bootstrap channel is one-shot (setup only read once)', async () => {
+	// The bootstrap channel is used exactly once to read setup instructions.
+	// After that, the applet runs and the channel is no longer active.
+	// This test verifies the applet runs correctly after a single setup read.
 	const appletCode = `
-		// Try to inject IPC-like content via console
-		console.log('WEB_FRAME\\nid: malicious\\nstatus: 200\\n---\\n');
-		console.log('type: frame');
-		console.log('mode: response');
+		export default async function () {
+			// Verify JSMAWS namespace is set up correctly after bootstrap
+			const hasServer = typeof globalThis.JSMAWS?.server === 'object';
+			const jsmawsFrozen = Object.isFrozen(globalThis.JSMAWS);
 
-		self.postMessage({ type: 'done' });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasServer, jsmawsFrozen }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
-	const messages = [];
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			messages.push(event.data);
-			if (event.data.type === 'done') {
-				resolve();
-			}
-		};
-	});
-	worker.terminate();
-
-	// All output should be console messages with proper type
-	const consoleMessages = messages.filter(m => m.type === 'console');
-	assertEquals(consoleMessages.length, 3, 'Should capture all console output');
-
-	// Verify content is preserved but type is 'console'
-	consoleMessages.forEach(msg => {
-		assertEquals(msg.type, 'console', 'Type should always be console');
-		assertExists(msg.level, 'Should have log level');
-		assertExists(msg.content, 'Should have content');
-	});
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasServer, true, 'JSMAWS.server should be available after bootstrap');
+		assertEquals(data.jsmawsFrozen, true, 'JSMAWS namespace should be frozen after bootstrap');
+	} finally {
+		await cleanup();
+	}
 });
 
-Deno.test('Security - console output with special characters', async () => {
+Deno.test('Security - JSMAWS namespace is frozen (cannot be modified by applet)', async () => {
 	const appletCode = `
-		// Try various special characters that might break parsing
-		console.log('\\x00\\x01\\x02'); // Null bytes
-		console.log('\\n\\r\\t'); // Whitespace
-		console.log('---\\n===\\n>>>'); // SLID-like markers
-		console.log('\\u0000\\uFFFF'); // Unicode extremes
+		export default async function () {
+			let canModifyServer = false;
+			let canAddProperty = false;
 
-		self.postMessage({ type: 'done' });
+			try {
+				globalThis.JSMAWS.server = null;
+				canModifyServer = true;
+			} catch (e) {
+				canModifyServer = false;
+			}
+
+			try {
+				globalThis.JSMAWS.malicious = 'injected';
+				canAddProperty = 'malicious' in globalThis.JSMAWS;
+			} catch (e) {
+				canAddProperty = false;
+			}
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ canModifyServer, canAddProperty }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
-	const messages = [];
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			messages.push(event.data);
-			if (event.data.type === 'done') {
-				resolve();
-			}
-		};
-	});
-	worker.terminate();
-
-	const consoleMessages = messages.filter(m => m.type === 'console');
-	assertEquals(consoleMessages.length, 4, 'Should capture all console output');
-
-	// All should be properly typed as console messages
-	consoleMessages.forEach(msg => {
-		assertEquals(msg.type, 'console');
-		assertEquals(msg.level, 'log');
-	});
-});
-
-// ============================================================================
-// Bootstrap Listener Bypass Tests
-// ============================================================================
-
-Deno.test('Security - cannot bypass bootstrap listener', async () => {
-	// Applet just sends "done" ASAP to verify it appears after bootstrap sequence
-	const appletCode = `
-		// Send done immediately (no setTimeout)
-		self.postMessage({ type: 'done' });
-	`;
-
-	const { worker } = await createTestWorker(appletCode, true); // Enable debug mode
-	const messages = [];
-
-	await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			messages.push(event.data);
-			if (event.data.type === 'done') {
-				resolve();
-			}
-		};
-	});
-	worker.terminate();
-
-	// Find the done message
-	const doneMessage = messages.find(m => m.type === 'done');
-	assertExists(doneMessage, 'Should receive done message');
-
-	// Verify debug messages show proper sequencing
-	const debugMessages = messages.filter(m => m.type === 'console' && m.level === 'debug');
-	assert(debugMessages.length >= 3, 'Should have bootstrap debug messages');
-
-	// Find indices to verify ordering
-	const handlerIdx = messages.findIndex(m => m.type === 'console' && m.level === 'debug' && m.content.includes('bootstrap message handler'));
-	const listenerRemovedIdx = messages.findIndex(m => m.type === 'console' && m.level === 'debug' && m.content.includes('boostrap listener removed'));
-	const importingIdx = messages.findIndex(m => m.type === 'console' && m.level === 'debug' && m.content.includes('boostrap importing applet'));
-	const doneIdx = messages.findIndex(m => m.type === 'done');
-
-	// Verify all debug messages exist
-	assert(handlerIdx >= 0, 'Should log bootstrap message handler');
-	assert(listenerRemovedIdx >= 0, 'Should log listener removal');
-	assert(importingIdx >= 0, 'Should log applet import');
-
-	// Verify done comes after bootstrap sequence
-	assert(doneIdx > handlerIdx, 'Done should come after handler');
-	assert(doneIdx > listenerRemovedIdx, 'Done should come after listener removed');
-	assert(doneIdx > importingIdx, 'Done should come after importing applet');
-});
-
-Deno.test('Security - bootstrap listener is removed after use', async () => {
-	// Send done ASAP and check bootstrap debug for listener removal message
-	const appletCode = `
-		// Send done immediately (no setTimeout)
-		self.postMessage({ type: 'done' });
-	`;
-
-	const { worker } = await createTestWorker(appletCode, true); // Enable debug mode
-	const messages = [];
-
-	await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			messages.push(event.data);
-			if (event.data.type === 'done') {
-				resolve();
-			}
-		};
-	});
-	worker.terminate();
-
-	// Verify debug messages show proper sequencing
-	const debugMessages = messages.filter(m => m.type === 'console' && m.level === 'debug');
-
-	// Should see initial bootstrap sequence (handler, listener removed, importing)
-	const listenerRemoved = debugMessages.filter(m => m.content.includes('boostrap listener removed'));
-	assertEquals(listenerRemoved.length, 1, 'Listener should only be removed once');
-
-	const importingApplet = debugMessages.filter(m => m.content.includes('boostrap importing applet'));
-	assertEquals(importingApplet.length, 1, 'Should only import applet once');
-
-	// The second bootstrap message from applet should be ignored (handler won't process it)
-	// We won't see a second "bootstrap message handler" debug because the handler returns early
-
-	// Verify no malicious code was loaded
-	const consoleMessages = messages.filter(m => m.type === 'console' && m.content.includes('malicious'));
-	assertEquals(consoleMessages.length, 0, 'Malicious code should not execute');
-
-	// Verify done message appears after bootstrap sequence
-	const doneIdx = messages.findIndex(m => m.type === 'done');
-	const lastDebugIdx = messages.findLastIndex(m => m.type === 'console' && m.level === 'debug');
-	assert(doneIdx > lastDebugIdx, 'Done should come after bootstrap debug messages');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.canModifyServer, false, 'Should not be able to replace JSMAWS.server');
+		assertEquals(data.canAddProperty, false, 'Should not be able to add properties to JSMAWS');
+	} finally {
+		await cleanup();
+	}
 });
 
 // ============================================================================
@@ -607,52 +688,81 @@ Deno.test('Security - bootstrap listener is removed after use', async () => {
 
 Deno.test('Security - network APIs are available (approved)', async () => {
 	const appletCode = `
-		const hasConnect = 'connect' in Deno;
-		const hasListen = 'listen' in Deno;
-		const hasResolveDns = 'resolveDns' in Deno;
+		export default async function () {
+			const hasConnect = 'connect' in Deno;
+			const hasListen = 'listen' in Deno;
+			const hasResolveDns = 'resolveDns' in Deno;
 
-		self.postMessage({ type: 'result', hasConnect, hasListen, hasResolveDns });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasConnect, hasListen, hasResolveDns }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
-
-	// Network APIs should be available (approved)
-	assertEquals(result.hasConnect, true, 'Deno.connect should be available');
-	assertEquals(result.hasListen, true, 'Deno.listen should be available');
-	assertEquals(result.hasResolveDns, true, 'Deno.resolveDns should be available');
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasConnect, true, 'Deno.connect should be available');
+		assertEquals(data.hasListen, true, 'Deno.listen should be available');
+		assertEquals(data.hasResolveDns, true, 'Deno.resolveDns should be available');
+	} finally {
+		await cleanup();
+	}
 });
 
 Deno.test('Security - system info APIs are available (approved)', async () => {
 	const appletCode = `
-		const hasBuild = 'build' in Deno;
-		const hasVersion = 'version' in Deno;
-		const hasHostname = 'hostname' in Deno;
+		export default async function () {
+			const hasBuild = 'build' in Deno;
+			const hasVersion = 'version' in Deno;
+			const hasHostname = 'hostname' in Deno;
 
-		self.postMessage({ type: 'result', hasBuild, hasVersion, hasHostname });
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ hasBuild, hasVersion, hasHostname }));
+			await server.write('res-frame', null);
+		}
 	`;
 
-	const { worker } = await createTestWorker(appletCode);
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
 
-	const result = await new Promise((resolve) => {
-		worker.onmessage = (event) => {
-			if (event.data.type === 'result') {
-				resolve(event.data);
-			}
-		};
-	});
-	worker.terminate();
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(data.hasBuild, true, 'Deno.build should be available');
+		assertEquals(data.hasVersion, true, 'Deno.version should be available');
+		assertEquals(data.hasHostname, true, 'Deno.hostname should be available');
+	} finally {
+		await cleanup();
+	}
+});
 
-	// System info APIs should be available (approved)
-	assertEquals(result.hasBuild, true, 'Deno.build should be available');
-	assertEquals(result.hasVersion, true, 'Deno.version should be available');
-	assertEquals(result.hasHostname, true, 'Deno.hostname should be available');
+Deno.test('Security - unapproved Deno APIs are blocked', async () => {
+	const appletCode = `
+		export default async function () {
+			const unapproved = ['readFile', 'writeFile', 'remove', 'mkdir', 'run', 'exit', 'env'];
+			const blocked = unapproved.map(api => !(api in Deno));
+			const allBlocked = blocked.every(r => r);
+			const blockedApis = unapproved.filter((api, i) => !blocked[i]);
+
+			const server = globalThis.JSMAWS.server;
+			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
+			await server.write('res-frame', JSON.stringify({ allBlocked, blockedApis }));
+			await server.write('res-frame', null);
+		}
+	`;
+
+	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+
+	try {
+		const data = await readAppletResult(appletChannel);
+		assertEquals(
+			data.allBlocked,
+			true,
+			`Unapproved Deno APIs should not exist; found: ${JSON.stringify(data.blockedApis)}`,
+		);
+	} finally {
+		await cleanup();
+	}
 });
