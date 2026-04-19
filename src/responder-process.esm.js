@@ -98,6 +98,10 @@ class ResponderProcess extends ServiceProcess {
 		}
 
 		console.debug(`[${this.processId}] Configuration updated`);
+
+		// Send capacity update so the operator knows we are ready to accept requests.
+		// This also serves as a "ready" signal after the initial config-update.
+		await this.sendCapacityUpdate(this.availWorkers, this.maxConcurrentRequests);
 	}
 
 	/**
@@ -439,19 +443,6 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Relay a res-frame chunk from the applet to the operator via req-N channel.
-	 * PolyTransport enforces maxChunkBytes at the transport level, so no manual
-	 * size check is needed here.
-	 * @param {string|number} id - Request ID
-	 * @param {Uint8Array|undefined} data - Frame data
-	 * @param {boolean} eom - End-of-message flag
-	 * @param {object} requestInfo - Active request info
-	 */
-	async #relayResFrame (id, data, eom, requestInfo) {
-		await requestInfo.reqChannel.write('res-frame', data, { eom: eom ?? false });
-	}
-
-	/**
 	 * Send end-of-stream signal to operator (zero-data final res-frame).
 	 * @param {string|number} id - Request ID
 	 */
@@ -460,7 +451,8 @@ class ResponderProcess extends ServiceProcess {
 		if (!requestInfo) return;
 
 		// Send zero-data res-frame with eom:true = end-of-stream signal
-		await requestInfo.reqChannel.write('res-frame', null);
+		const reqChannel = requestInfo.reqChannel;
+		await reqChannel.write('res-frame', null, { ifOpen: true });
 
 		if (!requestInfo.keepAlive) {
 			this.cleanupRequest(id);
@@ -669,10 +661,10 @@ class ResponderProcess extends ServiceProcess {
 					if (!info) return;
 					switch (msg.messageType) {
 					case 'res':
-						await this.#handleAppletResponseMetadata(id, msg.data.decode(), info);
+						await this.#handleAppletResponseMetadata(id, msg.text, info);
 						break;
 					case 'res-error':
-						await this.#handleAppletResError(id, msg.data.decode(), info);
+						await this.#handleAppletResError(id, msg.text, info);
 						break;
 					}
 				});
@@ -681,6 +673,8 @@ class ResponderProcess extends ServiceProcess {
 
 		// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
 		// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
+		// Applets use PostMessageTransport (object stream, no auto text encoding), so
+		// string writes set msg.text (not msg.data). Use msg.data ?? msg.text to handle both.
 		(async () => {
 			while (true) {
 				const msg = await appletChannel.read({ only: 'res-frame', dechunk: false });
@@ -689,10 +683,12 @@ class ResponderProcess extends ServiceProcess {
 				await msg.process(async () => {
 					const info = this.activeRequests.get(id);
 					if (!info) return;
-					if (msg.data === undefined && msg.eom) {
+					const frameData = msg.data ?? msg.text;
+					if (frameData === undefined && msg.eom) {
 						done = true; // zero-data + eom:true = end-of-stream signal
 					} else {
-						await this.#relayResFrame(id, msg.data, msg.eom, info);
+						const reqChannel = info.reqChannel;
+						await reqChannel.write('res-frame', frameData, { eom: msg.eom ?? false });
 					}
 				});
 				if (done) {

@@ -2,12 +2,12 @@
  * Tests for JSMAWS Request State Machine
  *
  * Tests the data-driven state machine for request handling.
- * Uses the new PolyTransport-based API:
- *   - processReqChannelMessages() — main entry point
- *   - handleResponseMetadata() — handles 'res' messages
- *   - handleResFrame() — handles 'res-frame' chunks
- *   - relayBidiFrame() — relays 'bidi-frame' to client WS
- *   - handleRequestError() — error handling
+ * Uses the RequestContext method API:
+ *   - context.processReqChannelMessages(reqChannel) — main entry point
+ *   - context.handleResponseMetadata(resData, upgradeCallback) — handles 'res' messages
+ *   - context.handleResFrame(data, eom) — handles 'res-frame' chunks
+ *   - context.relayBidiFrame(data) — relays 'bidi-frame' to client WS
+ *   - context.handleError(error) — error handling
  *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -17,10 +17,6 @@ import { makeWebSocketTransportPair } from '@poly-transport-test/transport-webso
 import {
 	RequestState,
 	RequestContext,
-	handleResponseMetadata,
-	handleResFrame,
-	relayBidiFrame,
-	handleRequestError,
 	cleanupRequestContext,
 } from '../src/operator-request-state.esm.js';
 import { Configuration } from '../src/configuration.esm.js';
@@ -55,7 +51,7 @@ function createMockOperator () {
 			},
 		}),
 		requestContexts: new Map(),
-		cleanupRequestContext: (requestId) => {
+		cleanupRequestContext: (_requestId) => {
 			// Mock cleanup
 		},
 		logs, // Expose for assertions
@@ -69,6 +65,23 @@ function createMockProcess () {
 	return {
 		id: 'test-process',
 	};
+}
+
+/**
+ * Create a RequestContext with a mock operator pre-wired.
+ */
+function makeContext (requestId, mockOperator, opts = {}) {
+	const mockProcess = opts.process ?? createMockProcess();
+	const req = opts.req ?? new Request('https://example.com/test');
+	return new RequestContext(
+		requestId,
+		mockProcess,
+		opts.poolName ?? 'standard',
+		opts.routeSpec ?? null,
+		req,
+		opts.app ?? null,
+		mockOperator,
+	);
 }
 
 // ============================================================================
@@ -109,14 +122,7 @@ Deno.test('RequestContext - initializes with correct defaults', () => {
 
 Deno.test('handleResponseMetadata - response mode starts streaming', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-1',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-1', mockOperator);
 
 	const resData = JSON.stringify({
 		mode: 'response',
@@ -125,7 +131,7 @@ Deno.test('handleResponseMetadata - response mode starts streaming', async () =>
 		keepAlive: false,
 	});
 
-	await handleResponseMetadata(context, resData, mockOperator);
+	await context.handleResponseMetadata(resData);
 
 	// Verify state transition to STREAMING_RESPONSE
 	assertEquals(context.state, RequestState.STREAMING_RESPONSE);
@@ -143,14 +149,7 @@ Deno.test('handleResponseMetadata - response mode starts streaming', async () =>
 
 Deno.test('handleResponseMetadata - stream mode starts streaming', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-2',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-2', mockOperator);
 
 	const resData = JSON.stringify({
 		mode: 'stream',
@@ -159,7 +158,7 @@ Deno.test('handleResponseMetadata - stream mode starts streaming', async () => {
 		keepAlive: true,
 	});
 
-	await handleResponseMetadata(context, resData, mockOperator);
+	await context.handleResponseMetadata(resData);
 
 	assertEquals(context.state, RequestState.STREAMING_RESPONSE);
 	assertEquals(context.mode, 'stream');
@@ -168,16 +167,9 @@ Deno.test('handleResponseMetadata - stream mode starts streaming', async () => {
 
 Deno.test('handleResponseMetadata - bidi mode transitions to BIDI_ACTIVE', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const mockRequest = new Request('https://example.com/ws');
-
-	const context = new RequestContext(
-		'test-req-3',
-		mockProcess,
-		'standard',
-		null,
-		mockRequest
-	);
+	const context = makeContext('test-req-3', mockOperator, {
+		req: new Request('https://example.com/ws'),
+	});
 
 	// Use makeWebSocketTransportPair to create a real in-memory WS transport pair.
 	// WebSocketTransport requires PolyTransport on both ends.
@@ -221,7 +213,7 @@ Deno.test('handleResponseMetadata - bidi mode transitions to BIDI_ACTIVE', async
 			keepAlive: true,
 		});
 
-		await handleResponseMetadata(context, resData, mockOperator, testUpgradeCallback);
+		await context.handleResponseMetadata(resData, testUpgradeCallback);
 
 		// Verify state transition
 		assertEquals(context.state, RequestState.BIDI_ACTIVE);
@@ -253,14 +245,7 @@ Deno.test('handleResponseMetadata - bidi mode transitions to BIDI_ACTIVE', async
 
 Deno.test('handleResponseMetadata - unknown mode throws error', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-4',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-4', mockOperator);
 
 	const resData = JSON.stringify({
 		mode: 'unknown-mode',
@@ -271,7 +256,7 @@ Deno.test('handleResponseMetadata - unknown mode throws error', async () => {
 
 	let threw = false;
 	try {
-		await handleResponseMetadata(context, resData, mockOperator);
+		await context.handleResponseMetadata(resData);
 	} catch (err) {
 		threw = true;
 		assert(err.message.includes('Unknown mode'));
@@ -285,14 +270,7 @@ Deno.test('handleResponseMetadata - unknown mode throws error', async () => {
 
 Deno.test('handleResFrame - enqueues data to stream controller', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-5',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-5', mockOperator);
 
 	context.state = RequestState.STREAMING_RESPONSE;
 	const chunks = [];
@@ -303,7 +281,7 @@ Deno.test('handleResFrame - enqueues data to stream controller', async () => {
 	};
 
 	const data = new TextEncoder().encode('chunk data');
-	await handleResFrame(context, data, false, mockOperator);
+	await context.handleResFrame(data, false);
 
 	assertEquals(chunks.length, 1);
 	assertEquals(context.state, RequestState.STREAMING_RESPONSE);
@@ -312,14 +290,7 @@ Deno.test('handleResFrame - enqueues data to stream controller', async () => {
 
 Deno.test('handleResFrame - eom:true with no data closes stream', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-6',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-6', mockOperator);
 
 	context.state = RequestState.STREAMING_RESPONSE;
 	const chunks = [];
@@ -330,23 +301,16 @@ Deno.test('handleResFrame - eom:true with no data closes stream', async () => {
 	};
 
 	// Zero-data + eom:true = end-of-stream signal
-	await handleResFrame(context, undefined, true, mockOperator);
+	await context.handleResFrame(undefined, true);
 
 	assertEquals(chunks.length, 0);
 	assertEquals(context.state, RequestState.COMPLETED);
 	assertEquals(context.streamController.closed, true);
 });
 
-Deno.test('handleResFrame - data with eom:true enqueues and closes', async () => {
+Deno.test('handleResFrame - data with eom:false enqueues without closing', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-7',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-7', mockOperator);
 
 	context.state = RequestState.STREAMING_RESPONSE;
 	const chunks = [];
@@ -357,7 +321,7 @@ Deno.test('handleResFrame - data with eom:true enqueues and closes', async () =>
 	};
 
 	const data = new TextEncoder().encode('final chunk');
-	await handleResFrame(context, data, false, mockOperator);
+	await context.handleResFrame(data, false);
 
 	// Data enqueued, stream still open (eom:false)
 	assertEquals(chunks.length, 1);
@@ -371,14 +335,9 @@ Deno.test('handleResFrame - data with eom:true enqueues and closes', async () =>
 
 Deno.test('relayBidiFrame - forwards data to bidi channel', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-8',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/ws')
-	);
+	const context = makeContext('test-req-8', mockOperator, {
+		req: new Request('https://example.com/ws'),
+	});
 
 	context.state = RequestState.BIDI_ACTIVE;
 	const sentData = [];
@@ -391,7 +350,7 @@ Deno.test('relayBidiFrame - forwards data to bidi channel', async () => {
 	};
 
 	const data = new Uint8Array([1, 2, 3, 4]);
-	await relayBidiFrame(context, data, mockOperator);
+	await context.relayBidiFrame(data);
 
 	assertEquals(sentData.length, 1);
 	assertEquals(sentData[0].type, 'bidi-frame');
@@ -402,14 +361,9 @@ Deno.test('relayBidiFrame - forwards data to bidi channel', async () => {
 
 Deno.test('relayBidiFrame - no-op when state is COMPLETED', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-9',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/ws')
-	);
+	const context = makeContext('test-req-9', mockOperator, {
+		req: new Request('https://example.com/ws'),
+	});
 
 	context.state = RequestState.COMPLETED;
 	const sentData = [];
@@ -422,7 +376,7 @@ Deno.test('relayBidiFrame - no-op when state is COMPLETED', async () => {
 	};
 
 	const data = new Uint8Array([1, 2, 3]);
-	await relayBidiFrame(context, data, mockOperator);
+	await context.relayBidiFrame(data);
 
 	// Should not forward when COMPLETED
 	assertEquals(sentData.length, 0);
@@ -430,40 +384,28 @@ Deno.test('relayBidiFrame - no-op when state is COMPLETED', async () => {
 
 Deno.test('relayBidiFrame - no-op when no bidiState', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-10',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/ws')
-	);
+	const context = makeContext('test-req-10', mockOperator, {
+		req: new Request('https://example.com/ws'),
+	});
 
 	context.state = RequestState.BIDI_ACTIVE;
 	context.bidiState = null; // No bidi state
 
 	// Should not throw
 	const data = new Uint8Array([1, 2, 3]);
-	await relayBidiFrame(context, data, mockOperator);
+	await context.relayBidiFrame(data);
 });
 
 // ============================================================================
-// handleRequestError Tests
+// handleError Tests
 // ============================================================================
 
-Deno.test('handleRequestError - rejects promise in WAITING_FIRST_FRAME', async () => {
+Deno.test('handleError - rejects promise in WAITING_FIRST_FRAME', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-11',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-11', mockOperator);
 
 	const error = new Error('Test error');
-	handleRequestError(context, error, mockOperator);
+	context.handleError(error);
 
 	assertEquals(context.state, RequestState.COMPLETED);
 
@@ -475,16 +417,9 @@ Deno.test('handleRequestError - rejects promise in WAITING_FIRST_FRAME', async (
 	assertEquals(rejectedWith, error);
 });
 
-Deno.test('handleRequestError - closes stream in STREAMING_RESPONSE', () => {
+Deno.test('handleError - closes stream in STREAMING_RESPONSE', () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-12',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-12', mockOperator);
 
 	context.state = RequestState.STREAMING_RESPONSE;
 	let streamErrored = false;
@@ -496,22 +431,17 @@ Deno.test('handleRequestError - closes stream in STREAMING_RESPONSE', () => {
 	};
 
 	const error = new Error('Stream error');
-	handleRequestError(context, error, mockOperator);
+	context.handleError(error);
 
 	assert(streamErrored);
 	assertEquals(context.state, RequestState.COMPLETED);
 });
 
-Deno.test('handleRequestError - stops WS transport in BIDI_ACTIVE', () => {
+Deno.test('handleError - stops WS transport in BIDI_ACTIVE', () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-13',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/ws')
-	);
+	const context = makeContext('test-req-13', mockOperator, {
+		req: new Request('https://example.com/ws'),
+	});
 
 	context.state = RequestState.BIDI_ACTIVE;
 	let transportStopped = false;
@@ -524,25 +454,18 @@ Deno.test('handleRequestError - stops WS transport in BIDI_ACTIVE', () => {
 	};
 
 	const error = new Error('Bidi error');
-	handleRequestError(context, error, mockOperator);
+	context.handleError(error);
 
 	assert(transportStopped);
 	assertEquals(context.state, RequestState.COMPLETED);
 });
 
-Deno.test('handleRequestError - logs error message', async () => {
+Deno.test('handleError - logs error message', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-14',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-14', mockOperator);
 
 	const error = new Error('Specific error message');
-	handleRequestError(context, error, mockOperator);
+	context.handleError(error);
 
 	// Suppress unhandled rejection from responsePromise.reject()
 	await context.responsePromise.promise.catch(() => {});
@@ -558,14 +481,7 @@ Deno.test('handleRequestError - logs error message', async () => {
 
 Deno.test('cleanupRequestContext - removes COMPLETED context', () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-15',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-15', mockOperator);
 
 	context.state = RequestState.COMPLETED;
 	mockOperator.requestContexts.set('test-req-15', context);
@@ -577,14 +493,7 @@ Deno.test('cleanupRequestContext - removes COMPLETED context', () => {
 
 Deno.test('cleanupRequestContext - does not remove non-COMPLETED context', () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-16',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-16', mockOperator);
 
 	context.state = RequestState.STREAMING_RESPONSE;
 	mockOperator.requestContexts.set('test-req-16', context);
@@ -608,14 +517,7 @@ Deno.test('cleanupRequestContext - no-op for unknown requestId', () => {
 
 Deno.test('State transitions - WAITING_FIRST_FRAME to STREAMING_RESPONSE', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-17',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-17', mockOperator);
 
 	assertEquals(context.state, RequestState.WAITING_FIRST_FRAME);
 
@@ -626,20 +528,13 @@ Deno.test('State transitions - WAITING_FIRST_FRAME to STREAMING_RESPONSE', async
 		keepAlive: false,
 	});
 
-	await handleResponseMetadata(context, resData, mockOperator);
+	await context.handleResponseMetadata(resData);
 	assertEquals(context.state, RequestState.STREAMING_RESPONSE);
 });
 
 Deno.test('State transitions - STREAMING_RESPONSE to COMPLETED via end-of-stream', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-18',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-18', mockOperator);
 
 	context.state = RequestState.STREAMING_RESPONSE;
 	context.streamController = {
@@ -649,24 +544,17 @@ Deno.test('State transitions - STREAMING_RESPONSE to COMPLETED via end-of-stream
 	};
 
 	// Send end-of-stream signal (zero-data + eom:true)
-	await handleResFrame(context, undefined, true, mockOperator);
+	await context.handleResFrame(undefined, true);
 	assertEquals(context.state, RequestState.COMPLETED);
 });
 
 Deno.test('State transitions - WAITING_FIRST_FRAME to COMPLETED via error', async () => {
 	const mockOperator = createMockOperator();
-	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-19',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test')
-	);
+	const context = makeContext('test-req-19', mockOperator);
 
 	assertEquals(context.state, RequestState.WAITING_FIRST_FRAME);
 
-	handleRequestError(context, new Error('Test'), mockOperator);
+	context.handleError(new Error('Test'));
 	assertEquals(context.state, RequestState.COMPLETED);
 
 	// Suppress unhandled rejection from responsePromise.reject()

@@ -22,7 +22,6 @@ import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
 import {
 	RequestContext,
-	processReqChannelMessages,
 	cleanupRequestContext,
 } from './operator-request-state.esm.js';
 
@@ -184,6 +183,7 @@ export class OperatorProcess {
 				routeSpec,
 				req,
 				appletPath,
+				this,  // operator
 			);
 
 			// Store pool manager and item ID for cleanup
@@ -194,7 +194,7 @@ export class OperatorProcess {
 			this.requestContexts.set(requestId, context);
 
 			// Start processing req-N channel messages (handles res, res-error, res-frame, bidi-frame, con-*)
-			processReqChannelMessages(context, reqChannel, this);
+			context.processReqChannelMessages(reqChannel);
 
 			// Build request payload
 			const requestPayload = JSON.stringify({

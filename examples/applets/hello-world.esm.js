@@ -38,7 +38,7 @@ export default async function (_setupData) {
 		if (method === 'POST' && body && body.length > 0) {
 			try {
 				const contentType = headers['content-type'] || '';
-				const bodyText = new TextDecoder().decode(body);
+				const bodyText = new TextDecoder().decode(new Uint8Array(body));
 
 				if (contentType.includes('application/json')) {
 					const bodyData = JSON.parse(bodyText);

@@ -1,43 +1,46 @@
 /**
  * E2E Testing Utilities for JSMAWS
- * 
+ *
  * Provides utilities for end-to-end testing with actual server instances.
+ *
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { OperatorProcess, ServerConfig, loadConfig } from '../src/operator.esm.js';
-import { NANOS } from '../src/vendor.esm.js';
+import { OperatorProcess, ServerConfig } from '../src/operator.esm.js';
+import { Configuration } from '../src/configuration.esm.js';
 
 /**
  * Create a test server instance with custom configuration
- * @param {Object} configOverrides - Configuration overrides
- * @returns {Promise<{operator: OperatorProcess, config: ServerConfig, baseUrl: string}>}
+ * @param {Object} configOverrides - Configuration overrides (plain JS object)
+ * @returns {Promise<{operator: OperatorProcess, configuration: Configuration}>}
  */
 export async function createTestServer (configOverrides = {}) {
-	// Create test configuration with safe defaults
+	// Create test configuration with safe defaults (plain JS object)
 	const testConfig = {
 		noSSL: true,
 		httpPort: 0, // Let OS assign port
 		httpsPort: 0,
 		hostname: 'localhost',
-		logging: { level: /* 'debug' */ 'debug' },
+		logLevel: 'debug',
 		...configOverrides
 	};
 
-	//console.log('[E2E-UTILS] Creating test server with config:', JSON.stringify(testConfig, null, 2));
-	const configData = new NANOS().setOpts({ transform: true }).push(testConfig);
-	const config = ServerConfig.fromNANOS(configData);
-	//console.log('[E2E-UTILS] Config data pools:', configData.at('pools')?.toObject());
+	// ServerConfig handles network/SSL settings
+	const config = new ServerConfig(testConfig);
+
+	// Configuration handles routing/pools/applet settings
+	const configuration = new Configuration(testConfig);
 
 	// Create operator instance
 	const operator = new OperatorProcess(config);
-	operator.configData = configData;
+	operator.configuration = configuration;
 	operator.initializeLogger();
 
 	// Set global instance for IPC handlers
 	globalThis.OperatorProcess = OperatorProcess;
 	OperatorProcess.instance = operator;
 
-	return { operator, config, configData };
+	return { operator, configuration };
 }
 
 /**
@@ -46,21 +49,13 @@ export async function createTestServer (configOverrides = {}) {
  * @returns {Promise<string>} Base URL of the running server
  */
 export async function startTestServer (operator) {
-	// Start the server
-	//console.log('[E2E-UTILS] Starting test server...');
-	//console.log('[E2E-UTILS] Operator logger exists?', !!operator.logger);
-	//console.log('[E2E-UTILS] Operator config:', operator.config);
-
 	try {
 		await operator.start();
-		//console.log('[E2E-UTILS] Server started successfully');
 	} catch (error) {
 		console.error('[E2E-UTILS] FATAL: operator.start() threw error:', error);
 		console.error('[E2E-UTILS] Stack:', error.stack);
 		throw error;
 	}
-
-	//console.log('[E2E-UTILS] Pool managers:', Array.from(operator.poolManagers.keys()));
 
 	// Get the actual port assigned by OS
 	const addr = operator.httpServer?.addr;
@@ -85,9 +80,6 @@ export async function startTestServer (operator) {
 export async function stopTestServer (operator) {
 	// Shutdown operator (which shuts down pools internally)
 	await operator.shutdown(5);
-
-	// Give server a moment to fully shut down
-	//await new Promise(resolve => setTimeout(resolve, 200));
 }
 
 /**
@@ -142,7 +134,7 @@ export async function connectWebSocket (url, timeoutMs = 5000) {
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(url);
 		ws.binaryType = 'arraybuffer'; // Set binary type for consistent handling
-		
+
 		const timeoutId = setTimeout(() => {
 			ws.close();
 			reject(new Error(`WebSocket connection timeout after ${timeoutMs}ms`));
@@ -208,17 +200,6 @@ export async function readSSEEvents (response, maxEvents = 10, timeoutMs = 5000)
 	}
 
 	return events;
-}
-
-/**
- * Create a test configuration file
- * @param {string} path - File path
- * @param {Object} config - Configuration object
- */
-export async function createTestConfig (path, config) {
-	const nanos = new NANOS(config);
-	const slid = nanos.toSLID();
-	await Deno.writeTextFile(path, `[(${slid})]`);
 }
 
 /**

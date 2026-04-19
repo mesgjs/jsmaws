@@ -14,6 +14,8 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
+import { Channel } from '@poly-transport/channel.esm.js';
+
 /**
  * Message types registered on every req-N channel.
  * Defined as a shared constant to avoid repetition across channel creation and reopening.
@@ -129,18 +131,19 @@ export class RequestChannelPool {
 	 * @param {object} channel - The channel to release
 	 */
 	async release (channel) {
+		const name = channel.name;
 		this.#inUse.delete(channel);
 		// Always close the channel between requests to eliminate state carry-over.
 		await channel.close();
-		const index = this.#channelIndex.get(channel.name);
+		const index = this.#channelIndex.get(name);
 		// Pool attrition on down-sizing: if this channel's index is beyond the
 		// current pool size, remove its map entry and do not reopen it.
 		if (index >= this.#maxSize) {
-			this.#channelIndex.delete(channel.name);
+			this.#channelIndex.delete(name);
 			return;
 		}
 		// Reopen the channel immediately so it is ready for the next request.
-		await this.#reopenChannel(index, channel.name);
+		await this.#reopenChannel(index, name);
 	}
 
 	/**
@@ -150,6 +153,7 @@ export class RequestChannelPool {
 	 */
 	async #reopenChannel (index, name) {
 		const channel = await this.#transport.requestChannel(name);
+		if (channel.state !== Channel.STATE_OPEN) throw new Error('requestChannel returned non-open channel', name);
 		await channel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
 		// #channelIndex entry is retained (same name → same index); no update needed
 		this.#available.push(channel);

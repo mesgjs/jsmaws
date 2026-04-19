@@ -21,194 +21,6 @@ export const RequestState = {
 };
 
 /**
- * Request context for state machine
- * Stores all state as data rather than in code flow
- */
-export class RequestContext {
-	constructor (requestId, process, poolName, routeSpec, req, app) {
-		this.requestId = requestId;
-		this.process = process;
-		this.poolName = poolName;
-		this.routeSpec = routeSpec;
-		this.originalRequest = req;  // For WebSocket upgrade
-		this.app = app;
-
-		// State machine
-		this.state = RequestState.WAITING_FIRST_FRAME;
-
-		// Response promise
-		this.responsePromise = Promise.withResolvers();
-
-		// Response data (populated from first frame)
-		this.mode = null;
-		this.status = null;
-		this.headers = null;
-		this.keepAlive = false;
-
-		// Stream controller (for response/stream modes)
-		this.streamController = null;
-
-		// Bidi connection state
-		this.bidiState = null;
-
-		// req-N channel for this request
-		this.reqChannel = null;
-
-		// Pool manager and item ID for cleanup
-		this.poolManager = null;
-		this.poolItemId = null;
-	}
-}
-
-/**
- * Cleanup completed request context
- */
-export function cleanupRequestContext (requestId, requestContexts, logger) {
-	const context = requestContexts.get(requestId);
-	if (context && context.state === RequestState.COMPLETED) {
-		requestContexts.delete(requestId);
-		logger.debug(`[${requestId}] Context cleaned up`);
-	}
-}
-
-/**
- * Relay a bidi-frame chunk from the responder to the client WebSocket bidi channel.
- * Called when a 'bidi-frame' message arrives on the req-N channel from the responder.
- */
-export async function relayBidiFrame (context, data, operator) {
-	// Forward to WebSocket bidi channel
-	if (data && context.state !== RequestState.COMPLETED) {
-		if (context.bidiState?.bidiChannel) {
-			await context.bidiState.bidiChannel.write('bidi-frame', data, { eom: false });
-		}
-	}
-}
-
-/**
- * Handle error in state machine
- */
-export function handleRequestError (context, error, operator) {
-	operator.logger.error(`[${context.requestId}] Error in state ${context.state}: ${error.message}`);
-
-	// Reject promise if not yet resolved
-	if (context.state === RequestState.WAITING_FIRST_FRAME) {
-		context.responsePromise.reject(error);
-	}
-
-	// Close stream if active
-	if (context.streamController) {
-		try {
-			context.streamController.error(error);
-		} catch (e) {
-			// Ignore if already closed
-		}
-	}
-
-	// Close WebSocket transport if active
-	if (context.bidiState?.wsTransport) {
-		try {
-			context.bidiState.wsTransport.stop({ discard: true });
-		} catch (e) {
-			// Ignore if already closed
-		}
-	}
-
-	context.state = RequestState.COMPLETED;
-}
-
-/**
- * Handle response metadata from the responder.
- * Called when a 'res' message arrives on the req-N channel.
- *
- * @param {RequestContext} context - The request context
- * @param {string} resData - JSON-encoded response metadata
- * @param {object} operator - The OperatorProcess instance
- * @param {Function} [upgradeCallback] - Optional bidi upgrade callback (for testing/DI).
- *   Passed through to initializeBidiConnection. Defaults to webSocketUpgrade.
- */
-export async function handleResponseMetadata (context, resData, operator, upgradeCallback) {
-	// Extract connection data from message
-	const { mode, status, headers: rawHeaders, keepAlive } = JSON.parse(resData);
-
-	const headers = operator.convertHeaders(rawHeaders);
-
-	// Save in context
-	context.mode = mode;
-	context.status = status;
-	context.headers = headers;
-	context.keepAlive = keepAlive ?? false;
-
-	// Transition based on mode, state
-	if (mode === 'bidi' && status === 101) {
-		// Bidi upgrade: immediately initialize connection
-		// The first frame (status 101) should have no data (policy enforced by responder)
-		context.state = RequestState.BIDI_ACTIVE;
-		operator.logger.debug(`[${context.requestId}] was WAITING_FIRST_FRAME now BIDI_ACTIVE`);
-
-		// Initialize bidi connection immediately (sets up WebSocket by default)
-		await initializeBidiConnection(context, operator, upgradeCallback);
-
-	} else if (mode === 'response' && !keepAlive) {
-		// Transition: streaming response — body will arrive as res-frame chunks
-		context.state = RequestState.STREAMING_RESPONSE;
-		operator.logger.debug(`[${context.requestId}] was WAITING_FIRST_FRAME now STREAMING_RESPONSE`);
-
-		// Create ReadableStream
-		const stream = new ReadableStream({
-			start (controller) {
-				context.streamController = controller;
-			}
-		});
-
-		// Create Response and resolve promise
-		const response = new Response(stream, { status, headers });
-		context.responsePromise.resolve(response);
-
-	} else if (mode === 'response' || mode === 'stream') {
-		// Transition: streaming response (keepAlive or stream mode)
-		context.state = RequestState.STREAMING_RESPONSE;
-		operator.logger.debug(`[${context.requestId}] was WAITING_FIRST_FRAME now STREAMING_RESPONSE`);
-
-		// Create ReadableStream
-		const stream = new ReadableStream({
-			start (controller) {
-				context.streamController = controller;
-			}
-		});
-
-		// Create Response and resolve promise
-		const response = new Response(stream, { status, headers });
-		context.responsePromise.resolve(response);
-
-	} else {
-		throw new Error(`Unknown mode: ${mode}`);
-	}
-}
-
-/**
- * Handle a res-frame body chunk from the responder.
- * Called when a 'res-frame' chunk arrives on the req-N channel.
- */
-export async function handleResFrame (context, data, eom, operator) {
-	// Enqueue data
-	if (data && data.length > 0) {
-		context.streamController?.enqueue(data);
-	}
-
-	// Check for end-of-stream (zero-data + eom:true)
-	if (data === undefined && eom) {
-		context.streamController?.close();
-		context.state = RequestState.COMPLETED;
-		operator.logger.debug(`[${context.requestId}] was STREAMING_RESPONSE now COMPLETED`);
-
-		// Mark pool item idle now that stream is closed
-		if (context.poolManager && context.poolItemId) {
-			await context.poolManager.decrementItemUsage(context.poolItemId);
-		}
-	}
-}
-
-/**
  * WebSocket-specific bidi upgrade function.
  * Upgrades the HTTP request to WebSocket and creates a WebSocketTransport
  * for the client connection.
@@ -251,155 +63,390 @@ export async function webSocketUpgrade (context, bidiParams) {
 }
 
 /**
- * Initialize bidirectional connection - derive params from configuration.
- * Called from handleResponseMetadata() when status 101 is received.
- *
- * @param {RequestContext} context - The request context
- * @param {object} operator - The OperatorProcess instance
- * @param {Function} [upgradeCallback] - Optional callback for bidi upgrade (for testing/DI).
- *   Signature: async (context, bidiParams) => { transport, bidiChannel, response }
- *   Defaults to webSocketUpgrade (WebSocket upgrade via Deno.upgradeWebSocket).
+ * Request context for state machine.
+ * Stores all state as data rather than in code flow, and owns all state
+ * transition logic as methods.
  */
-export async function initializeBidiConnection (context, operator, upgradeCallback = webSocketUpgrade) {
-	const { requestId } = context;
+export class RequestContext {
+	constructor (requestId, process, poolName, routeSpec, req, app, operator) {
+		this.requestId = requestId;
+		this.process = process;
+		this.poolName = poolName;
+		this.routeSpec = routeSpec;
+		this.originalRequest = req;  // For WebSocket upgrade
+		this.app = app;
+		this.operator = operator ?? null; // OperatorProcess instance (may be set later)
 
-	// Derive params from configuration (same as responder will use)
-	const bidiParams = operator.configuration.getBidiParams({
-		routeSpec: context.routeSpec
-	});
+		// State machine
+		this.state = RequestState.WAITING_FIRST_FRAME;
 
-	// Perform the bidi upgrade (WebSocket by default, injectable for testing)
-	const { transport: wsTransport, bidiChannel, response } = await upgradeCallback(context, bidiParams);
+		// Response promise
+		this.responsePromise = Promise.withResolvers();
 
-	// Store bidi state in context
-	context.bidiState = {
-		wsTransport,
-		bidiChannel,
-	};
+		// Response data (populated from first frame)
+		this.mode = null;
+		this.status = null;
+		this.headers = null;
+		this.keepAlive = false;
 
-	// Relay: forward 'bidi-frame' from WS bidi channel → req-N 'bidi-frame'
-	// dechunk: false — bidi-frame carries NestedTransport byte-stream chunks
-	// eom: false on write — NestedTransport chunks are not application messages
-	(async () => {
-		while (true) {
-			const msg = await bidiChannel.read({ only: 'bidi-frame', dechunk: false });
-			if (!msg) break;
-			await msg.process(async () => {
-				if (context.state !== RequestState.COMPLETED && context.reqChannel) {
-					await context.reqChannel.write('bidi-frame', msg.data, { eom: false });
+		// Stream controller (for response/stream modes)
+		this.streamController = null;
+
+		// Bidi connection state
+		this.bidiState = null;
+
+		// req-N channel for this request
+		this.reqChannel = null;
+
+		// Pool manager and item ID for cleanup
+		this.poolManager = null;
+		this.poolItemId = null;
+	}
+
+	/**
+	 * Handle error in state machine.
+	 * @param {Error} error
+	 */
+	handleError (error) {
+		this.operator?.logger.error(`[${this.requestId}] Error in state ${this.state}: ${error.message}`);
+
+		// Reject promise if not yet resolved
+		if (this.state === RequestState.WAITING_FIRST_FRAME) {
+			this.responsePromise.reject(error);
+		}
+
+		// Close stream if active
+		if (this.streamController) {
+			try {
+				this.streamController.error(error);
+			} catch (_) {
+				// Ignore if already closed
+			}
+		}
+
+		// Close WebSocket transport if active
+		if (this.bidiState?.wsTransport) {
+			try {
+				this.bidiState.wsTransport.stop({ discard: true });
+			} catch (_) {
+				// Ignore if already closed
+			}
+		}
+
+		this.state = RequestState.COMPLETED;
+	}
+
+	/**
+	 * Initialize bidirectional connection — derive params from configuration.
+	 * Called from handleResponseMetadata() when status 101 is received.
+	 *
+	 * @param {Function} [upgradeCallback] - Optional callback for bidi upgrade (for testing/DI).
+	 *   Signature: async (context, bidiParams) => { transport, bidiChannel, response }
+	 *   Defaults to webSocketUpgrade (WebSocket upgrade via Deno.upgradeWebSocket).
+	 */
+	async initializeBidiConnection (upgradeCallback = webSocketUpgrade) {
+		const { requestId, operator } = this;
+
+		// Derive params from configuration (same as responder will use)
+		const bidiParams = operator.configuration.getBidiParams({
+			routeSpec: this.routeSpec
+		});
+
+		// Perform the bidi upgrade (WebSocket by default, injectable for testing)
+		const { transport: wsTransport, bidiChannel, response } = await upgradeCallback(this, bidiParams);
+
+		// Store bidi state in context
+		this.bidiState = {
+			wsTransport,
+			bidiChannel,
+		};
+
+		// Relay: forward 'bidi-frame' from WS bidi channel → req-N 'bidi-frame'
+		// dechunk: false — bidi-frame carries NestedTransport byte-stream chunks
+		// eom: false on write — NestedTransport chunks are not application messages
+		(async () => {
+			while (true) {
+				const msg = await bidiChannel.read({ only: 'bidi-frame', dechunk: false });
+				if (!msg) break;
+				await msg.process(async () => {
+					if (this.state !== RequestState.COMPLETED && this.reqChannel) {
+						await this.reqChannel.write('bidi-frame', msg.data, { eom: false });
+					}
+				});
+			}
+		})();
+
+		// Handle transport stop (WebSocket close)
+		wsTransport.addEventListener('stopped', async () => {
+			operator.logger.debug(`Bidi connection ${requestId} WebSocket transport stopped`);
+			this.state = RequestState.COMPLETED;
+
+			// Mark pool item idle now that connection is closed
+			if (this.poolManager && this.poolItemId) {
+				await this.poolManager.decrementItemUsage(this.poolItemId);
+			}
+
+			operator.cleanupRequestContext(requestId);
+		});
+
+		// Resolve the response promise with the WebSocket upgrade response
+		this.responsePromise.resolve(response);
+	}
+
+	/**
+	 * Process incoming messages on a req-N channel for this request.
+	 * Handles 'res', 'res-error', 'res-frame', 'bidi-frame', and 'con-*' messages.
+	 *
+	 * @param {object} reqChannel - The req-N channel from the RequestChannelPool
+	 */
+	processReqChannelMessages (reqChannel) {
+		this.reqChannel = reqChannel;
+		const { operator } = this;
+
+		const CON_TYPES = ['con-trace', 'con-debug', 'con-info', 'con-warn', 'con-error'];
+
+		// Loop 1: metadata and console output (dechunked)
+		// 'res' carries HTTP response status + headers (sent once, before any res-frame chunks)
+		// 'res-error' carries error response (sent instead of res + res-frame)
+		// con-* carry forwarded applet console output
+		(async () => {
+			while (true) {
+				const msg = await reqChannel.read({ only: ['res', 'res-error', ...CON_TYPES] });
+				if (!msg) break;
+				await msg.process(async () => {
+					switch (msg.messageType) {
+					case 'res':
+						try {
+							await this.handleResponseMetadata(msg.data.decode());
+						} catch (error) {
+							this.handleError(error);
+						}
+						break;
+					case 'res-error': {
+						const errorData = JSON.parse(msg.data.decode());
+						const status = errorData.status ?? 500;
+						const errorMsg = errorData.error ?? 'Internal Server Error';
+						operator.logger.error(`[${this.requestId}] Responder error: ${errorMsg}`);
+						if (this.state === RequestState.WAITING_FIRST_FRAME) {
+							const body = JSON.stringify({ error: errorMsg });
+							this.responsePromise.resolve(new Response(body, {
+								status,
+								headers: { 'content-type': 'application/json' },
+							}));
+						} else if (this.streamController) {
+							this.streamController.error(new Error(errorMsg));
+						}
+						this.state = RequestState.COMPLETED;
+						if (this.poolManager && this.poolItemId) {
+							await this.poolManager.decrementItemUsage(this.poolItemId);
+						}
+						break;
+					}
+					default:
+						// con-* messages: applet console output
+						if (msg.messageType.startsWith('con-')) {
+							const text = msg.data?.decode() ?? '';
+							const level = msg.messageType.slice(4); // strip 'con-' prefix
+							const appFile = this.app?.split('/').pop();
+							operator.logger.asComponent(this.process.id, () =>
+								operator.logger.log(level, `[Applet:${appFile || this.requestId}] ${text}`)
+							);
+						}
+						break;
+					}
+				});
+			}
+		})();
+
+		// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
+		// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
+		// Pass msg.data ?? msg.text so string and binary writes are both handled lazily.
+		(async () => {
+			while (true) {
+				const msg = await reqChannel.read({ only: 'res-frame', dechunk: false });
+				if (!msg) break;
+				await msg.process(async () => {
+					if (this.state === RequestState.STREAMING_RESPONSE) {
+						await this.handleResFrame(msg.data, msg.eom);
+					}
+				});
+			}
+		})();
+
+		// Loop 3: bidi-frame relay (dechunk: false — forward chunks verbatim)
+		// Only active for bidi requests; runs concurrently with loops 1 and 2.
+		(async () => {
+			while (true) {
+				const msg = await reqChannel.read({ only: 'bidi-frame', dechunk: false });
+				if (!msg) break;
+				await msg.process(async () => {
+					if (this.state === RequestState.BIDI_ACTIVE) {
+						await this.relayBidiFrame(msg.data);
+					}
+				});
+			}
+		})();
+	}
+
+	/**
+	 * Handle response metadata from the responder.
+	 * Called when a 'res' message arrives on the req-N channel.
+	 *
+	 * @param {string} resData - JSON-encoded response metadata
+	 * @param {Function} [upgradeCallback] - Optional bidi upgrade callback (for testing/DI).
+	 *   Passed through to initializeBidiConnection. Defaults to webSocketUpgrade.
+	 */
+	async handleResponseMetadata (resData, upgradeCallback) {
+		// Extract connection data from message
+		const { mode, status, headers: rawHeaders, keepAlive } = JSON.parse(resData);
+
+		const headers = this.operator.convertHeaders(rawHeaders);
+
+		// Save in context
+		this.mode = mode;
+		this.status = status;
+		this.headers = headers;
+		this.keepAlive = keepAlive ?? false;
+
+		// Transition based on mode
+		if (mode === 'bidi' && status === 101) {
+			// Bidi upgrade: immediately initialize connection
+			// The first frame (status 101) should have no data (policy enforced by responder)
+			this.state = RequestState.BIDI_ACTIVE;
+			this.operator.logger.debug(`[${this.requestId}] was WAITING_FIRST_FRAME now BIDI_ACTIVE`);
+
+			// Initialize bidi connection immediately (sets up WebSocket by default)
+			await this.initializeBidiConnection(upgradeCallback);
+
+		} else if (mode === 'response' || mode === 'stream') {
+			// Transition: body will arrive as res-frame chunks, EOS signaled by null res-frame
+			this.state = RequestState.STREAMING_RESPONSE;
+			this.operator.logger.debug(`[${this.requestId}] was WAITING_FIRST_FRAME now STREAMING_RESPONSE`);
+
+			// Create ReadableStream; body chunks arrive via handleResFrame()
+			const stream = new ReadableStream({
+				start: (controller) => {
+					this.streamController = controller;
 				}
 			});
+
+			// Create Response and resolve promise
+			const response = new Response(stream, { status, headers });
+			this.responsePromise.resolve(response);
+
+		} else {
+			throw new Error(`Unknown mode: ${mode}`);
 		}
-	})();
+	}
 
-	// Handle transport stop (WebSocket close)
-	wsTransport.addEventListener('stopped', async () => {
-		operator.logger.debug(`Bidi connection ${requestId} WebSocket transport stopped`);
-		context.state = RequestState.COMPLETED;
-
-		// Mark pool item idle now that connection is closed
-		if (context.poolManager && context.poolItemId) {
-			await context.poolManager.decrementItemUsage(context.poolItemId);
+	/**
+	 * Handle a res-frame body chunk from the responder.
+	 * Called when a 'res-frame' chunk arrives on the req-N channel.
+	 *
+	 * @param {VirtualBuffer|string|Uint8Array|undefined} data - Frame data
+	 * @param {boolean} eom - End-of-message flag
+	 */
+	async handleResFrame (data, eom) {
+		// Enqueue data into the ReadableStream.
+		// data may be a VirtualBuffer (binary write), a string (text write), or null/undefined (EOS).
+		// ReadableStream requires Uint8Array chunks; convert lazily at the terminal enqueue point.
+		if (data != null) {
+			let chunk;
+			if (typeof data === 'string') {
+				chunk = new TextEncoder().encode(data);
+			} else if (data.toUint8Array) {
+				chunk = data.toUint8Array();
+			} else {
+				chunk = data; // Already Uint8Array or compatible
+			}
+			if (chunk.length > 0) {
+				this.streamController?.enqueue(chunk);
+			}
 		}
 
-		operator.cleanupRequestContext(requestId);
-	});
+		// Check for end-of-stream (null/undefined data + eom:true)
+		if (data == null && eom) {
+			this.streamController?.close();
+			this.state = RequestState.COMPLETED;
+			this.operator.logger.debug(`[${this.requestId}] was STREAMING_RESPONSE now COMPLETED`);
 
-	// Resolve the response promise with the WebSocket upgrade response
-	context.responsePromise.resolve(response);
+			// Mark pool item idle now that stream is closed
+			if (this.poolManager && this.poolItemId) {
+				await this.poolManager.decrementItemUsage(this.poolItemId);
+			}
+		}
+	}
+
+	/**
+	 * Relay a bidi-frame chunk from the responder to the client WebSocket bidi channel.
+	 * Called when a 'bidi-frame' message arrives on the req-N channel from the responder.
+	 *
+	 * @param {VirtualBuffer|Uint8Array|undefined} data - Frame data
+	 */
+	async relayBidiFrame (data) {
+		// Forward to WebSocket bidi channel
+		if (data && this.state !== RequestState.COMPLETED) {
+			if (this.bidiState?.bidiChannel) {
+				await this.bidiState.bidiChannel.write('bidi-frame', data, { eom: false });
+			}
+		}
+	}
 }
 
 /**
- * Process incoming messages on a req-N channel for a request.
- * Handles 'res', 'res-error', 'res-frame', 'bidi-frame', and 'con-*' messages.
- *
- * @param {RequestContext} context - The request context
- * @param {object} reqChannel - The req-N channel from the RequestChannelPool
- * @param {object} operator - The OperatorProcess instance
+ * Cleanup completed request context.
+ * Standalone function since it operates on the operator's requestContexts map.
  */
+export function cleanupRequestContext (requestId, requestContexts, logger) {
+	const context = requestContexts.get(requestId);
+	if (context && context.state === RequestState.COMPLETED) {
+		requestContexts.delete(requestId);
+		logger.debug(`[${requestId}] Context cleaned up`);
+	}
+}
+
+// ─── Backward-compatible standalone function exports ─────────────────────────
+// These delegate to the RequestContext methods for callers that use the old API.
+// New code should call context.method() directly.
+
+/** @deprecated Use context.handleResponseMetadata(resData, upgradeCallback) */
+export async function handleResponseMetadata (context, resData, operator, upgradeCallback) {
+	console.warn(new Error('deprecated handleResponseMetadata').stack);
+	if (!context.operator) context.operator = operator;
+	return context.handleResponseMetadata(resData, upgradeCallback);
+}
+
+/** @deprecated Use context.handleResFrame(data, eom) */
+export async function handleResFrame (context, data, eom, operator) {
+	console.warn(new Error('deprecated handleResFrame').stack);
+	if (!context.operator) context.operator = operator;
+	return context.handleResFrame(data, eom);
+}
+
+/** @deprecated Use context.relayBidiFrame(data) */
+export async function relayBidiFrame (context, data, operator) {
+	console.warn(new Error('deprecated relayBidiFrame').stack);
+	if (!context.operator) context.operator = operator;
+	return context.relayBidiFrame(data);
+}
+
+/** @deprecated Use context.handleError(error) */
+export function handleRequestError (context, error, operator) {
+	console.warn(new Error('deprecated handleRequestError').stack);
+	if (!context.operator) context.operator = operator;
+	return context.handleError(error);
+}
+
+/** @deprecated Use context.processReqChannelMessages(reqChannel) */
 export function processReqChannelMessages (context, reqChannel, operator) {
-	context.reqChannel = reqChannel;
+	console.warn(new Error('deprecated handleRequestChannelMessages').stack);
+	if (!context.operator) context.operator = operator;
+	return context.processReqChannelMessages(reqChannel);
+}
 
-	const CON_TYPES = ['con-trace', 'con-debug', 'con-info', 'con-warn', 'con-error'];
-
-	// Loop 1: metadata and console output (dechunked)
-	// 'res' carries HTTP response status + headers (sent once, before any res-frame chunks)
-	// 'res-error' carries error response (sent instead of res + res-frame)
-	// con-* carry forwarded applet console output
-	(async () => {
-		while (true) {
-			const msg = await reqChannel.read({ only: ['res', 'res-error', ...CON_TYPES] });
-			if (!msg) break;
-			await msg.process(async () => {
-				switch (msg.messageType) {
-				case 'res':
-						try {
-							await handleResponseMetadata(context, msg.data.decode(), operator);
-						} catch (error) {
-							handleRequestError(context, error, operator);
-						}
-						break;
-				case 'res-error': {
-					const errorData = JSON.parse(msg.data.decode());
-					const status = errorData.status ?? 500;
-					const errorMsg = errorData.error ?? 'Internal Server Error';
-					operator.logger.error(`[${context.requestId}] Responder error: ${errorMsg}`);
-					if (context.state === RequestState.WAITING_FIRST_FRAME) {
-						const body = JSON.stringify({ error: errorMsg });
-						context.responsePromise.resolve(new Response(body, {
-							status,
-							headers: { 'content-type': 'application/json' },
-						}));
-					} else if (context.streamController) {
-						context.streamController.error(new Error(errorMsg));
-					}
-					context.state = RequestState.COMPLETED;
-					if (context.poolManager && context.poolItemId) {
-						await context.poolManager.decrementItemUsage(context.poolItemId);
-					}
-					break;
-				}
-				default:
-					// con-* messages: applet console output
-					if (msg.messageType.startsWith('con-')) {
-						const text = msg.data?.decode() ?? '';
-						const level = msg.messageType.slice(4); // strip 'con-' prefix
-						const appFile = context.app?.split('/').pop();
-						operator.logger.asComponent(context.process.id, () =>
-							operator.logger.log(level, `[Applet:${appFile || context.requestId}] ${text}`)
-						);
-					}
-					break;
-				}
-			});
-		}
-	})();
-
-	// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
-	// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
-	(async () => {
-		while (true) {
-			const msg = await reqChannel.read({ only: 'res-frame', dechunk: false });
-			if (!msg) break;
-			await msg.process(async () => {
-				if (context.state === RequestState.STREAMING_RESPONSE) {
-						await handleResFrame(context, msg.data, msg.eom, operator);
-					}
-			});
-		}
-	})();
-
-	// Loop 3: bidi-frame relay (dechunk: false — forward chunks verbatim)
-	// Only active for bidi requests; runs concurrently with loops 1 and 2.
-	(async () => {
-		while (true) {
-			const msg = await reqChannel.read({ only: 'bidi-frame', dechunk: false });
-			if (!msg) break;
-			await msg.process(async () => {
-				if (context.state === RequestState.BIDI_ACTIVE) {
-						await relayBidiFrame(context, msg.data, operator);
-					}
-			});
-		}
-	})();
+/** @deprecated Use context.initializeBidiConnection(upgradeCallback) */
+export async function initializeBidiConnection (context, operator, upgradeCallback) {
+	console.warn(new Error('deprecated initializeBidiConnection').stack);
+	if (!context.operator) context.operator = operator;
+	return context.initializeBidiConnection(upgradeCallback);
 }

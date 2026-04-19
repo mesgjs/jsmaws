@@ -255,7 +255,12 @@ export class ProcessManager {
 		const maxWorkers = poolConfig?.maxWorkers ?? 10;
 		const minWorkers = poolConfig?.minWorkers ?? 1;
 
-		// Create request channel pool
+		// Wait for the responder to acknowledge the initial config-update by sending
+		// a capacity-update. This ensures the responder has fully processed its startup
+		// sequence (including handleConfigUpdate) before we open any req-N channels.
+		await this.#waitForInitialCapacity(controlChannel, processId);
+
+		// Create request channel pool (now safe: responder is ready for req-N channels)
 		const reqChannelPool = new RequestChannelPool(transport, minWorkers, maxWorkers);
 
 		// Create managed process
@@ -413,6 +418,25 @@ export class ProcessManager {
 		// this.config is a Configuration instance; config.config is the plain object
 		const configJson = JSON.stringify(this.config.config ?? this.config);
 		await controlChannel.write('config-update', configJson);
+	}
+
+	/**
+	 * Wait for the first capacity-update from a newly spawned responder.
+	 * The responder sends a capacity-update after processing the initial config-update,
+	 * signaling that it is fully initialized and ready to accept req-N channels.
+	 * @param {object} controlChannel - The control channel to read from
+	 * @param {string} processId - Process ID for logging
+	 */
+	async #waitForInitialCapacity (controlChannel, processId) {
+		const msg = await controlChannel.read({ only: 'capacity-update', decode: true });
+		if (!msg) {
+			throw new Error(`Process ${processId}: control channel closed before initial capacity-update`);
+		}
+		let availableWorkers = 0, totalWorkers = 0;
+		await msg.process(() => {
+			({ availableWorkers, totalWorkers } = JSON.parse(msg.text));
+		});
+		this.logger.debug(`Process ${processId} ready (capacity: ${availableWorkers}/${totalWorkers})`);
 	}
 
 	/**

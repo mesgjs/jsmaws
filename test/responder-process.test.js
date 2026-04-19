@@ -299,7 +299,11 @@ Deno.test('ResponderProcess - sendCapacityUpdate sends capacity-update message',
 	const { proc, operatorControlChannel, cleanup } = await setupResponderProcess('cap-test');
 
 	try {
-		// Send capacity update from service process
+		// Drain the initial capacity-update sent by handleConfigUpdate() during setup
+		const initMsg = await operatorControlChannel.read({ only: 'capacity-update', decode: true });
+		await initMsg.process(() => {});
+
+		// Send a specific capacity update from service process
 		await proc.sendCapacityUpdate(5, 10);
 
 		// Read it on the operator side

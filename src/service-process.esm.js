@@ -61,11 +61,19 @@ export class ServiceProcess {
 			c2cSymbol,
 		});
 
-		// Accept control channel and all req-N channels; reject everything else
+		// Accept control channel and all req-N channels; reject everything else.
+		// For req-N channels, queue a microtask to retrieve the channel and call
+		// handleReqChannel() — the channel object doesn't exist yet at event time.
 		this.transport.addEventListener('newChannel', (event) => {
 			const { channelName } = event.detail;
-			if (channelName === 'control' || channelName.startsWith('req-')) {
+			if (channelName === 'control') {
 				event.accept();
+			} else if (channelName.startsWith('req-')) {
+				event.accept().
+				then((channel) => this.handleReqChannel(channel)).
+				catch((err) => {
+					console.error(`[${this.processId}] Error handling ${channelName}:`, err);
+				});
 			} else {
 				event.reject();
 			}
@@ -214,27 +222,6 @@ export class ServiceProcess {
 	}
 
 	/**
-	 * Process incoming req-N channel events.
-	 * Listens for new req-N channels and calls handleReqChannel() for each.
-	 * Runs as a background task (fire and forget from start()).
-	 */
-	#processReqChannels () {
-		this.transport.addEventListener('newChannel', (event) => {
-			const { channelName } = event.detail;
-			if (channelName.startsWith('req-')) {
-				// Channel is already accepted by the transport listener in createTransport()
-				// Get the channel object and start handling it
-				const channel = event.detail.channel;
-				if (channel) {
-					this.handleReqChannel(channel).catch((err) => {
-						console.error(`[${this.processId}] Error handling ${channelName}:`, err);
-					});
-				}
-			}
-		});
-	}
-
-	/**
 	 * Create and run a service process with signal handlers.
 	 * Static factory method for consistent process creation.
 	 */
@@ -305,9 +292,6 @@ export class ServiceProcess {
 
 		// Start control channel message loop (background)
 		this.#processControlMessages();
-
-		// Start req-N channel accept loop (background)
-		this.#processReqChannels();
 
 		// Keep process alive until transport stops
 		await new Promise((resolve) => {

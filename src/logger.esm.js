@@ -187,7 +187,7 @@ export class Logger {
 
         if (target === 'console' || target === 'both') {
             this.console = new ConsoleBackend(options);
-        } else {
+        } else if (target === 'syslog') {
             this.fallback = new ConsoleBackend(options);
         }
 
@@ -211,31 +211,44 @@ export class Logger {
         return `req-${++this.requestIdCounter}`;
     }
 
+    #getMessageContext (params) {
+        const { message, context } = params.reduce((state, param) => {
+            if (typeof param === 'string') state.message.push(param);
+            else state.context ??= param;
+            return state;
+        }, { message: [], context: null });
+        return { message: message.join(' '), context: context ?? {} };
+    }
+
     /**
      * Log an error message
      */
-    error (message, context = {}) {
+    error (...params) {
+        const { message, context } = this.#getMessageContext(params);
         this.log(LOG_LEVELS.ERROR, message, context);
     }
 
     /**
      * Log a warning message
      */
-    warn (message, context = {}) {
+    warn (...params) {
+        const { message, context } = this.#getMessageContext(params);
         this.log(LOG_LEVELS.WARN, message, context);
     }
 
     /**
      * Log an info message
      */
-    info (message, context = {}) {
+    info (...params) {
+        const { message, context } = this.#getMessageContext(params);
         this.log(LOG_LEVELS.INFO, message, context);
     }
 
     /**
      * Log a debug message
      */
-    debug (message, context = {}) {
+    debug (...params) {
+        const { message, context } = this.#getMessageContext(params);
         this.log(LOG_LEVELS.DEBUG, message, context);
     }
 
@@ -264,7 +277,8 @@ export class Logger {
     /**
      * Internal log method
      */
-    log (level, message, context = {}) {
+    log (level, ...params) {
+        const { message, context } = this.#getMessageContext(params);
         switch (level) {
         case LOG_LEVELS.DEBUG:
         case LOG_LEVELS.INFO:
