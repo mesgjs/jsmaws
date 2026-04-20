@@ -24,6 +24,7 @@
  */
 
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
+import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
 import { PromiseTracer } from '@poly-transport/promise-tracer.esm.js';
 import { Channel } from '@poly-transport/channel.esm.js';
 
@@ -190,6 +191,13 @@ function setupConsole (c2c) {
  * locks down the environment, exposes globalThis.JSMAWS, and imports the applet.
  */
 async function bootstrap () {
+	// Create buffer pool for this applet worker
+	const bufferPool = new BufferPool({
+		sizeClasses: [1024, 4096, 16384, 65536],
+		lowWaterMark: 2,
+		highWaterMark: 10,
+	});
+
 	// Create PostMessageTransport with C2C channel for console output
 	const c2cSymbol = Symbol('c2c');
 	const promiseTracer = new PromiseTracer(5000, { logRejections: true });
@@ -197,6 +205,7 @@ async function bootstrap () {
 		gateway: self,
 		c2cSymbol,
 		promiseTracer,
+		bufferPool,
 	});
 
 	// Accept all channels (responder initiates)
@@ -271,6 +280,10 @@ async function bootstrap () {
 
 	// Stop transport and close worker
 	await transport.stop();
+
+	// Stop buffer pool (worker is exiting)
+	bufferPool.stop();
+
 	self.close();
 }
 

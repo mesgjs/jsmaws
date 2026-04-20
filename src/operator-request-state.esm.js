@@ -42,6 +42,7 @@ export async function webSocketUpgrade (context, bidiParams) {
 		maxChunkBytes: bidiParams.maxChunkSize,
 		lowBufferBytes: bidiParams.maxChunkSize,
 		c2cSymbol: null,  // No C2C needed for client-facing transport
+		bufferPool: context.operator.bufferPool,  // Use operator's shared buffer pool
 	});
 
 	// Only accept the single pre-designated 'bidi' channel

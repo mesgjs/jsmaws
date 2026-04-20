@@ -20,6 +20,7 @@
  */
 
 import { PipeTransport } from '@poly-transport/transport/pipe.esm.js';
+import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
 import { Configuration } from './configuration.esm.js';
 
 /**
@@ -46,6 +47,7 @@ export class ServiceProcess {
 		this.controlChannel = null; // 'control' channel on the transport
 		this.isShuttingDown = false;
 		this._c2cSymbol = null; // Set in createTransport()
+		this._bufferPool = null; // Shared buffer pool for all transports in this process
 	}
 
 	/**
@@ -55,10 +57,19 @@ export class ServiceProcess {
 	createTransport () {
 		const c2cSymbol = Symbol('c2c');
 		this._c2cSymbol = c2cSymbol;
+
+		// Create shared buffer pool for this process
+		this._bufferPool = new BufferPool({
+			sizeClasses: [1024, 4096, 16384, 65536],
+			lowWaterMark: 2,
+			highWaterMark: 10,
+		});
+
 		this.transport = new PipeTransport({
 			readable: Deno.stdin.readable,
 			writable: Deno.stdout.writable,
 			c2cSymbol,
+			bufferPool: this._bufferPool,
 		});
 
 		// Accept control channel and all req-N channels; reject everything else.
@@ -299,6 +310,11 @@ export class ServiceProcess {
 		});
 
 		console.info(`[${this.processId}] Transport stopped, process exiting`);
+
+		// Stop buffer pool
+		if (this._bufferPool) {
+			this._bufferPool.stop();
+		}
 	}
 
 	/**

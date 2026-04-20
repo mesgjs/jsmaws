@@ -13,6 +13,7 @@
  */
 
 import { NANOS, parseSLID } from '@nanos';
+import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
 import { createSSLManager } from './ssl-manager.esm.js';
 import { Router } from './router-worker.esm.js';
 import { Configuration } from './configuration.esm.js';
@@ -93,6 +94,12 @@ export class OperatorProcess {
 		this.isReloading = false;
 		this.requestContexts = new Map(); // requestId -> RequestContext
 		this.healthCheckInterval = null;
+		// Shared buffer pool for all operator-side transports (WebSocketTransports to clients)
+		this.bufferPool = new BufferPool({
+			sizeClasses: [1024, 4096, 16384, 65536],
+			lowWaterMark: 2,
+			highWaterMark: 10,
+		});
 	}
 
 	/**
@@ -571,11 +578,19 @@ export class OperatorProcess {
 		}
 
 		if (tasks.length) {
-			const wrapupPromise = Promise.withResolvers();
-			Promise.all(tasks).then(() => wrapupPromise.resolve(true));
-			const timer = setTimeout(wrapupPromise.resolve, (stopTime + 5) * 1000);
-			await wrapupPromise.promise;
-			clearTimeout(timer);
+			const wrapUpPromise = Promise.withResolvers();
+			wrapUpPromise.promise.then((completed) => {
+				if (!completed) this.logger.info('Operator shutdown timed out');
+			});
+			const wrapUpTimer = setTimeout(wrapUpPromise.resolve, (stopTime + 2) * 1000);
+			await Promise.race([Promise.all(tasks), wrapUpPromise.promise]);
+			wrapUpPromise.resolve(true);
+			clearTimeout(wrapUpTimer);
+		}
+
+		// Stop buffer pool (operator process is exiting)
+		if (this.bufferPool) {
+			this.bufferPool.stop();
 		}
 
 		this.logger.info('JSMAWS operator process shutdown complete');

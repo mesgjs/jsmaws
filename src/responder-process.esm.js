@@ -57,21 +57,27 @@ class ResponderProcess extends ServiceProcess {
 
 	/**
 	 * Cleanup request resources.
-	 * Centralized cleanup for all request-related state.
+	 * Clears timeouts, terminates the worker, and initiates a disconnected
+	 * transport stop.  The 'stopped' event listener (set up in
+	 * #setupWorkerTerminationHandler) is responsible for sending a 503 error
+	 * response (if no response was started) and removing the entry from
+	 * activeRequests.
+	 *
+	 * Idempotent: guarded by requestInfo.cleaningUp.
 	 */
 	cleanupRequest (id) {
 		const requestInfo = this.activeRequests.get(id);
-		if (requestInfo) {
-			clearTimeout(requestInfo.timeout);           // Request timeout
-			clearTimeout(requestInfo.idleTimeout);       // Idle timeout
-			clearTimeout(requestInfo.connectionTimeout); // Connection timeout
-			// Stop the PostMessageTransport (terminates worker)
-			requestInfo.transport?.stop({ discard: true }).catch(() => {});
-			requestInfo.worker?.terminate();
-		}
+		if (!requestInfo || requestInfo.cleaningUp) return;
+		requestInfo.cleaningUp = true;
 
-		// Clean up all request-related state
-		this.activeRequests.delete(id);
+		clearTimeout(requestInfo.timeout);           // Request timeout
+		clearTimeout(requestInfo.idleTimeout);       // Idle timeout
+		clearTimeout(requestInfo.connectionTimeout); // Connection timeout
+		requestInfo.worker?.terminate();
+
+		// Disconnected stop triggers the 'stopped' event, which handles
+		// the 503 response (if needed) and removes the entry from activeRequests.
+		requestInfo.transport?.stop({ disconnected: true }).catch(() => {});
 	}
 
 	/**
@@ -165,41 +171,54 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleShutdown (msg) {
 		const timeout = msg ? (JSON.parse(msg.text ?? '{}').timeout ?? 30) : 30;
+		msg?.done();
 		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
 
 		this.isShuttingDown = true;
 
-		// Wait for active requests to complete (with timeout)
+		// Phase 1: fire-and-forget graceful stop on each applet transport so
+		// applets can finish in-flight work.  Collect the stop promises so we
+		// can await them all at the end (after any hard-terminate phase).
+		const stopPromises = [];
+		for (const requestInfo of this.activeRequests.values()) {
+			if (requestInfo.transport) {
+				stopPromises.push(requestInfo.transport.stop().catch(() => {}));
+			}
+		}
+
+		// Phase 2: wait for active requests to drain (with timeout)
 		const shutdownStart = Date.now();
 		while (this.activeRequests.size > 0 && (Date.now() - shutdownStart) < timeout * 1000) {
 			console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active requests...`);
 			await new Promise((resolve) => setTimeout(resolve, 1000));
 		}
 
-		// Terminate any remaining workers and error-out their connections.
-		const tasks = [];
+		// Phase 3: hard-terminate any workers still running after the timeout.
+		// stop({ disconnected: true }) overrides the in-progress graceful stop
+		// and triggers the 'stopped' event, which handles 503 + state cleanup.
+		// Collect the disconnected-stop promises so we can await them below.
 		for (const [id, requestInfo] of this.activeRequests.entries()) {
-			console.debug(`[${this.processId}] Terminating worker for request ${id}`);
-			clearTimeout(requestInfo.timeout);
-			requestInfo.transport?.stop({ discard: true }).catch(() => {});
+			console.debug(`[${this.processId}] Hard-terminating worker for request ${id}`);
 			requestInfo.worker?.terminate();
-			if (requestInfo.reqChannel) {
-				tasks.push(
-					this.#sendErrorResponse(requestInfo.reqChannel, id, 503, 'Service Unavailable').catch(() => {})
-				);
+			if (requestInfo.transport) {
+				stopPromises.push(requestInfo.transport.stop({ disconnected: true }).catch(() => {}));
 			}
 		}
-		if (tasks.length) await Promise.all(tasks);
-		this.activeRequests.clear();
+
+		// Phase 4: await all stop promises — ensures every 'stopped' event and
+		// its handler (503 response + activeRequests cleanup) has completed
+		// before we tear down the operator transport.
+		await Promise.all(stopPromises);
 
 		// Log shutdown complete BEFORE stopping transport (which closes stdout)
 		console.info(`[${this.processId}] Shutdown complete`);
 
-		// Stop transport (graceful drain)
+		// Stop operator transport (graceful drain)
 		if (this.transport) {
 			await this.transport.stop();
 		}
 
+		console.info(`[${this.processId}] Exiting`);
 		Deno.exit(0);
 	}
 
@@ -243,6 +262,33 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
+	 * General worker-termination handler.
+	 * Attached to the applet PostMessageTransport 'stopped' event.
+	 * Sends a 503 error response if no response was started, then removes
+	 * the request from activeRequests.
+	 *
+	 * This is the single, authoritative cleanup path for all cases where an
+	 * applet transport stops (graceful completion, timeout abort, shutdown
+	 * hard-terminate, or unexpected worker exit).
+	 *
+	 * @param {string|number} id - Request ID
+	 */
+	#handleAppletTransportStopped (id) {
+		const requestInfo = this.activeRequests.get(id);
+		if (!requestInfo) return; // Already cleaned up
+
+		// Clear all timers (request, idle, connection timeouts)
+		clearTimeout(requestInfo.timeout);
+		clearTimeout(requestInfo.idleTimeout);
+		clearTimeout(requestInfo.connectionTimeout);
+
+		if (!requestInfo.responseStarted) {
+			this.#sendErrorResponse(requestInfo.reqChannel, id, 503, 'Service Unavailable').catch(() => {});
+		}
+		this.activeRequests.delete(id);
+	}
+
+	/**
 	 * Handle response metadata ('res' message) from applet.
 	 * Sends the response metadata to the operator via the req-N channel.
 	 * @param {string|number} id - Request ID
@@ -264,8 +310,9 @@ class ResponderProcess extends ServiceProcess {
 				`[${this.processId}] Pool "${this.poolName}" does not allow ` +
 				`response type "${effectiveType}" (mode=${mode}, keepAlive=${keepAlive})`
 			);
-			this.cleanupRequest(id);
+			// Send error first (sets responseStarted), then abort the worker.
 			await this.#sendErrorResponse(requestInfo.reqChannel, id, 500, 'Internal Server Error');
+			this.cleanupRequest(id);
 			return;
 		}
 
@@ -300,6 +347,7 @@ class ResponderProcess extends ServiceProcess {
 		});
 
 		console.debug(`[${this.processId}] Sending response metadata to operator...`);
+		requestInfo.responseStarted = true;
 		await requestInfo.reqChannel.write('res', resPayload);
 		console.debug(`[${this.processId}] Response metadata sent successfully`);
 	}
@@ -320,8 +368,9 @@ class ResponderProcess extends ServiceProcess {
 		console.error(`[${this.processId}] Applet error for request ${id}:`, errorData.error);
 		if (errorData.stack) console.error(errorData.stack);
 
-		this.cleanupRequest(id);
+		// Send error first (sets responseStarted), then abort the worker.
 		await this.#sendErrorResponse(requestInfo.reqChannel, id, 500, 'Internal Server Error');
+		this.cleanupRequest(id);
 	}
 
 	/**
@@ -366,12 +415,12 @@ class ResponderProcess extends ServiceProcess {
 			const { worker, transport, c2cChannel, appletChannel, appletBidiChannel } =
 				await this.#spawnAppletWorker(app, mode);
 
-			// Set up request timeout
+			// Set up request timeout: send error first (sets responseStarted), then abort.
 			const timeout = reqTimeout ? setTimeout(() => {
 				if (this.activeRequests.has(id)) {
 					console.warn(`[${this.processId}] Request ${id} timed out after ${reqTimeout}s`);
+					this.#sendErrorResponse(reqChannel, id, 504, 'Gateway Timeout').catch(console.error); // should use logger, not console directly
 					this.cleanupRequest(id);
-					this.#sendErrorResponse(reqChannel, id, 504, 'Gateway Timeout').catch(console.error);
 				}
 			}, reqTimeout * 1000) : null;
 
@@ -384,20 +433,28 @@ class ResponderProcess extends ServiceProcess {
 				appletBidiChannel,
 				timeout,
 				isStreaming: false,
+				responseStarted: false,
 				timeouts: { reqTimeout, idleTimeout, conTimeout },
 				routeSpec,
 				mode,
 			});
 
+			// Register the general worker-termination handler on the applet transport.
+			// This is the single authoritative path for 503 + state cleanup when the
+			// transport stops for any reason (graceful, disconnected, or shutdown).
+			transport.addEventListener('stopped', () => this.#handleAppletTransportStopped(id));
+
 			// Forward applet C2C console output to operator via the req-N channel
 			// (con-* message types, not the C2C channel — associates output with the request)
 			this.#startC2CForwarding(id, c2cChannel, reqChannel);
 
-			// Handle worker errors
+			// Handle worker errors: send 500 (sets responseStarted), then abort.
+			// The transport 'stopped' handler will not send a duplicate 503 because
+			// responseStarted is already true by the time the stopped event fires.
 			worker.onerror = (error) => {
 				console.error(`[${this.processId}] Worker error for request ${id}:`, error);
+				this.#sendErrorResponse(reqChannel, id, 500, 'Internal Server Error').catch(() => {});
 				this.cleanupRequest(id);
-				this.#sendErrorResponse(reqChannel, id, 500, 'Internal Server Error');
 			};
 
 			// Check for built-in applets and prepare configuration
@@ -454,15 +511,18 @@ class ResponderProcess extends ServiceProcess {
 		const reqChannel = requestInfo.reqChannel;
 		await reqChannel.write('res-frame', null, { ifOpen: true });
 
-		if (!requestInfo.keepAlive) {
-			this.cleanupRequest(id);
-		} else if (requestInfo.keepAlive && requestInfo.timeouts.idleTimeout > 0) {
+		// For non-keepAlive requests: the bootstrap stops the transport after the
+		// applet entry point returns, so the 'stopped' event will handle cleanup.
+		// For keepAlive requests: start the idle timeout between frames.
+		if (requestInfo.keepAlive && requestInfo.timeouts.idleTimeout > 0) {
 			requestInfo.idleTimeout = this.#startIdleTimeout(id, requestInfo.timeouts.idleTimeout);
 		}
 	}
 
 	/**
 	 * Send error response to operator via req-N channel.
+	 * Sets responseStarted on the requestInfo (if found) so that the transport
+	 * 'stopped' handler does not send a duplicate 503.
 	 * @param {object} reqChannel - The req-N channel to write to
 	 * @param {string|number|null} id - Request ID (may be null for early errors)
 	 * @param {number} status - HTTP status code
@@ -470,6 +530,8 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async #sendErrorResponse (reqChannel, id, status, message) {
 		if (!reqChannel) return;
+		const requestInfo = id != null ? this.activeRequests.get(id) : null;
+		if (requestInfo) requestInfo.responseStarted = true;
 		await reqChannel.write('res-error', JSON.stringify({ id, status, error: message }));
 	}
 
@@ -503,6 +565,7 @@ class ResponderProcess extends ServiceProcess {
 		const permissions = {
 			read: readAny || readable,
 			net: true, // Always allow network for module loading
+			import: true,
 			write: false,
 			run: false,
 			env: false,
@@ -522,6 +585,7 @@ class ResponderProcess extends ServiceProcess {
 			gateway: worker,
 			c2cSymbol,
 			maxChunkBytes: this.chunkingConfig.chunkSize,
+			bufferPool: this._bufferPool, // Use shared buffer pool from ServiceProcess base class
 		});
 
 		// Accept all channels (responder initiates)
@@ -614,8 +678,8 @@ class ResponderProcess extends ServiceProcess {
 			const requestInfo = this.activeRequests.get(id);
 			if (requestInfo && requestInfo.keepAlive) {
 				console.debug(`[${this.processId}] Connection ${id} lifetime timeout after ${conTimeout}s`);
-				this.cleanupRequest(id);
 				this.#sendErrorResponse(requestInfo.reqChannel, id, 408, 'Request Timeout').catch(console.error);
+				this.cleanupRequest(id);
 			}
 		}, conTimeout * 1000);
 	}
@@ -631,8 +695,8 @@ class ResponderProcess extends ServiceProcess {
 			const requestInfo = this.activeRequests.get(id);
 			if (requestInfo && requestInfo.keepAlive) {
 				console.debug(`[${this.processId}] Connection ${id} idle timeout after ${idleTimeout}s`);
-				this.cleanupRequest(id);
 				this.#sendErrorResponse(requestInfo.reqChannel, id, 408, 'Request Timeout').catch(console.error);
+				this.cleanupRequest(id);
 			}
 		}, idleTimeout * 1000);
 	}

@@ -16,6 +16,7 @@
  */
 
 import { PipeTransport } from '@poly-transport/transport/pipe.esm.js';
+import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
 import { RequestChannelPool } from './request-channel-pool.esm.js';
 import { CONTROL_MESSAGE_TYPES } from './service-process.esm.js';
 
@@ -154,6 +155,12 @@ export class ProcessManager {
 		this.processes = new Map(); // processId -> ManagedProcess
 		this.nextProcessId = 1;
 		this.isShuttingDown = false;
+		// Shared buffer pool for all operator-side transports
+		this.bufferPool = new BufferPool({
+			sizeClasses: [1024, 4096, 16384, 65536],
+			lowWaterMark: 2,
+			highWaterMark: 10,
+		});
 	}
 
 	/**
@@ -206,6 +213,7 @@ export class ProcessManager {
 				'--allow-write',
 				'--allow-net',
 				'--allow-env',
+				'--allow-import',
 				'--unstable-worker-options',
 				scriptPath,
 			],
@@ -234,6 +242,7 @@ export class ProcessManager {
 			c2cSymbol,
 			logger: this.logger,
 			maxChunkBytes,
+			bufferPool: this.bufferPool,
 		});
 
 		// Accept all channels (operator initiates)
@@ -458,6 +467,11 @@ export class ProcessManager {
 		// Wait for all processes to shutdown
 		if (tasks.length) await Promise.all(tasks);
 
+		// Stop buffer pool
+		if (this.bufferPool) {
+			this.bufferPool.stop();
+		}
+
 		this.logger.info('Process manager shutdown complete');
 	}
 
@@ -498,7 +512,7 @@ export class ProcessManager {
 			});
 
 			// Stop transport (graceful drain)
-			await managedProc.transport.stop({ discard: true });
+			await managedProc.transport.stop();
 		} catch (error) {
 			this.logger.error(`Error shutting down process ${processId}: ${error.message}`);
 		} finally {

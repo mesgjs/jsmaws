@@ -3,8 +3,8 @@
 		"@escape-js": "https://cdn.jsdelivr.net/gh/mesgjs/escape-js@0.0.4/src/escape.esm.js",
 		"@eventable": "https://cdn.jsdelivr.net/gh/mesgjs/eventable@main/src/eventable.esm.js",
 		"@nanos": "https://cdn.jsdelivr.net/gh/mesgjs/nanos@1.4.2/src/nanos.esm.js",
-		"@poly-transport/": "https://cdn.jsdelivr.net/gh/mesgjs/poly-transport@1.3.8/src/",
-		"@poly-transport-test/": "https://cdn.jsdelivr.net/gh/mesgjs/poly-transport@1.3.8/test/",
+		"@poly-transport/": "https://cdn.jsdelivr.net/gh/mesgjs/poly-transport@1.3.9/src/",
+		"@poly-transport-test/": "https://cdn.jsdelivr.net/gh/mesgjs/poly-transport@1.3.9/test/",
 		"@task-queue": "https://cdn.jsdelivr.net/gh/mesgjs/task-queue@0.1.1/src/task-queue.esm.js",
 		"@updatable-event": "https://cdn.jsdelivr.net/gh/mesgjs/updatable-event@main/src/updatable-event.esm.js"
 	}

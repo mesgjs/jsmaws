@@ -209,19 +209,35 @@ Deno.test('ResponderProcess - handleHealthCheck sends health-response', async ()
 
 // ─── cleanupRequest ───────────────────────────────────────────────────────────
 
-Deno.test('ResponderProcess - cleanupRequest removes active request', () => {
+Deno.test('ResponderProcess - cleanupRequest clears timers and initiates transport stop', async () => {
 	const proc = new ResponderProcess('test-proc-7', 'standard');
 
-	// Add a fake request with a timeout
+	// Add a fake request with a timeout and a mock transport
 	const timeout = setTimeout(() => {}, 10000);
-	proc.activeRequests.set('req-1', { timeout, worker: null, transport: null });
+	let stopCalled = false;
+	let stopOpts = null;
+	const mockTransport = {
+		stop: (opts) => {
+			stopCalled = true;
+			stopOpts = opts;
+			return Promise.resolve();
+		},
+		addEventListener: () => {},
+	};
+	proc.activeRequests.set('req-1', { timeout, worker: null, transport: mockTransport, responseStarted: false, reqChannel: null });
 
 	assertEquals(proc.activeRequests.has('req-1'), true);
 	proc.cleanupRequest('req-1');
-	assertEquals(proc.activeRequests.has('req-1'), false);
+
+	// cleanupRequest sets cleaningUp and calls transport.stop({ disconnected: true })
+	// The entry remains in activeRequests until the 'stopped' event fires
+	// (which is handled by the listener registered in #handleWebRequest)
+	assertEquals(stopCalled, true);
+	assertEquals(stopOpts?.disconnected, true);
 
 	// Cleanup the timeout (cleanupRequest should have cleared it)
 	clearTimeout(timeout); // Safe to call even if already cleared
+	proc.activeRequests.clear();
 });
 
 Deno.test('ResponderProcess - cleanupRequest is no-op for unknown request', () => {

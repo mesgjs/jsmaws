@@ -113,6 +113,7 @@ class RouterProcess extends ServiceProcess {
 	 */
 	async handleShutdown (msg) {
 		const timeout = msg ? (JSON.parse(msg.text ?? '{}').timeout ?? 30) : 30;
+		msg?.done(); // ACK the shutdown message before transport.stop() to avoid channel-close deadlock
 		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
 
 		this.isShuttingDown = true;
