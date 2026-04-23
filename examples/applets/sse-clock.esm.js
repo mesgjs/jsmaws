@@ -30,6 +30,7 @@ export default async function (_setupData) {
 		// Send response metadata (streaming SSE connection)
 		await server.write('res', JSON.stringify({
 			status: 200,
+			mode: 'stream',
 			headers: {
 				'content-type': 'text/event-stream',
 				'Cache-Control': 'no-cache',

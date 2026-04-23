@@ -297,6 +297,8 @@ Deno.test('ResponderProcess - handleShutdown sets isShuttingDown', async () => {
 		// Create a mock shutdown message
 		const mockMsg = {
 			text: JSON.stringify({ timeout: 0 }),
+			done: () => {},
+			process: () => {},
 		};
 
 		await proc.handleShutdown(mockMsg);

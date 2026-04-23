@@ -21,10 +21,7 @@ import { createConfigMonitor } from './config-monitor.esm.js';
 import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
-import {
-	RequestContext,
-	cleanupRequestContext,
-} from './operator-request-state.esm.js';
+import { RequestContext, RequestState } from './operator-request-state.esm.js';
 
 const DEFAULT_HTTP_PORT = 80;
 const DEFAULT_HTTPS_PORT = 443;
@@ -103,10 +100,15 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Cleanup completed request context
+	 * Remove a completed request context from the requestContexts map.
+	 * No-op if the context is not in COMPLETED state.
 	 */
 	cleanupRequestContext (requestId) {
-		cleanupRequestContext(requestId, this.requestContexts, this.logger);
+		const context = this.requestContexts.get(requestId);
+		if (context?.state === RequestState.COMPLETED) {
+			this.requestContexts.delete(requestId);
+			this.logger.debug(`[${requestId}] Context cleaned up`);
+		}
 	}
 
 	/**
@@ -165,6 +167,24 @@ export class OperatorProcess {
 		// Acquire a req-N channel from the process's channel pool
 		const reqChannel = await process.reqChannelPool.acquire();
 
+		// Create context before the try block so the catch block can always call
+		// context.releaseReqChannel() without a null check.
+		const requestId = `${process.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const context = new RequestContext(
+			requestId,
+			process,
+			poolName,
+			routeSpec,
+			req,
+			appletPath,
+			this,  // operator
+		);
+		context.poolManager = poolManager;
+		context.poolItemId = poolItem.id;
+		// Store reqChannel now so releaseReqChannel() works even if an error occurs
+		// before processReqChannelMessages() is called.
+		context.reqChannel = reqChannel;
+
 		try {
 			if (appletPath) {
 				this.updateAffinity(poolItem, appletPath);
@@ -176,26 +196,8 @@ export class OperatorProcess {
 			// Convert headers to plain object for JSON serialization
 			const headersObj = Object.fromEntries(req.headers.entries());
 
-			// Generate a unique request ID
-			const requestId = `${process.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
 			const url = new URL(req.url);
 			this.logger.debug(`Sending ${requestId} to ${process.id} (usage ${poolItem.usageCount}) for ${req.method} ${url.pathname}`);
-
-			// Create context with initial state
-			const context = new RequestContext(
-				requestId,
-				process,
-				poolName,
-				routeSpec,
-				req,
-				appletPath,
-				this,  // operator
-			);
-
-			// Store pool manager and item ID for cleanup
-			context.poolManager = poolManager;
-			context.poolItemId = poolItem.id;
 
 			// Store context
 			this.requestContexts.set(requestId, context);
@@ -222,7 +224,9 @@ export class OperatorProcess {
 			// Send request via req-N channel
 			await reqChannel.write('req', requestPayload);
 
-			// Return Response promise that will be resolved by state machine
+			// Return Response promise that will be resolved by state machine.
+			// Note: the req-N channel is released by context.releaseReqChannel() when
+			// the state machine reaches COMPLETED (EOS for streaming, WS close for bidi).
 			const response = await context.responsePromise.promise;
 
 			// Note: decrementItemUsage() is called by the state machine when connections actually close:
@@ -235,6 +239,8 @@ export class OperatorProcess {
 
 		} catch (error) {
 			this.logger.error(`Request error with ${process.id}: ${error.message}`);
+			// Release the req-N channel on error (state machine won't do it)
+			context.releaseReqChannel();
 			// Mark idle on error
 			await poolItem.decrementUsage();
 			return new Response(
@@ -244,9 +250,6 @@ export class OperatorProcess {
 					headers: { 'content-type': 'application/json' },
 				}
 			);
-		} finally {
-			// Always release the req-N channel back to the pool
-			await process.reqChannelPool.release(reqChannel);
 		}
 	}
 

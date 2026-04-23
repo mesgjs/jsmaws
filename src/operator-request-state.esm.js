@@ -96,7 +96,7 @@ export class RequestContext {
 		// Bidi connection state
 		this.bidiState = null;
 
-		// req-N channel for this request
+		// req-N channel for this request (set in processReqChannelMessages)
 		this.reqChannel = null;
 
 		// Pool manager and item ID for cleanup
@@ -135,6 +135,22 @@ export class RequestContext {
 		}
 
 		this.state = RequestState.COMPLETED;
+		this.releaseReqChannel();
+	}
+
+	/**
+	 * Release the req-N channel back to the process's channel pool.
+	 * Idempotent: clears this.reqChannel after the first call so subsequent
+	 * calls are no-ops.  Must only be called once the state machine has
+	 * reached COMPLETED (i.e. all data has been sent / received).
+	 */
+	releaseReqChannel () {
+		const channel = this.reqChannel;
+		if (!channel) return; // Already released
+		this.reqChannel = null;
+		this.process.reqChannelPool.release(channel).catch((err) => {
+			this.operator?.logger.warn(`[${this.requestId}] Failed to release req-N channel: ${err.message}`);
+		});
 	}
 
 	/**
@@ -182,6 +198,9 @@ export class RequestContext {
 			operator.logger.debug(`Bidi connection ${requestId} WebSocket transport stopped`);
 			this.state = RequestState.COMPLETED;
 
+			// Release the req-N channel now that the bidi connection is fully closed
+			this.releaseReqChannel();
+
 			// Mark pool item idle now that connection is closed
 			if (this.poolManager && this.poolItemId) {
 				await this.poolManager.decrementItemUsage(this.poolItemId);
@@ -201,7 +220,6 @@ export class RequestContext {
 	 * @param {object} reqChannel - The req-N channel from the RequestChannelPool
 	 */
 	processReqChannelMessages (reqChannel) {
-		this.reqChannel = reqChannel;
 		const { operator } = this;
 
 		const CON_TYPES = ['con-trace', 'con-debug', 'con-info', 'con-warn', 'con-error'];
@@ -371,6 +389,9 @@ export class RequestContext {
 			this.state = RequestState.COMPLETED;
 			this.operator.logger.debug(`[${this.requestId}] was STREAMING_RESPONSE now COMPLETED`);
 
+			// Release the req-N channel now that the stream is fully consumed
+			this.releaseReqChannel();
+
 			// Mark pool item idle now that stream is closed
 			if (this.poolManager && this.poolItemId) {
 				await this.poolManager.decrementItemUsage(this.poolItemId);
@@ -392,62 +413,4 @@ export class RequestContext {
 			}
 		}
 	}
-}
-
-/**
- * Cleanup completed request context.
- * Standalone function since it operates on the operator's requestContexts map.
- */
-export function cleanupRequestContext (requestId, requestContexts, logger) {
-	const context = requestContexts.get(requestId);
-	if (context && context.state === RequestState.COMPLETED) {
-		requestContexts.delete(requestId);
-		logger.debug(`[${requestId}] Context cleaned up`);
-	}
-}
-
-// ─── Backward-compatible standalone function exports ─────────────────────────
-// These delegate to the RequestContext methods for callers that use the old API.
-// New code should call context.method() directly.
-
-/** @deprecated Use context.handleResponseMetadata(resData, upgradeCallback) */
-export async function handleResponseMetadata (context, resData, operator, upgradeCallback) {
-	console.warn(new Error('deprecated handleResponseMetadata').stack);
-	if (!context.operator) context.operator = operator;
-	return context.handleResponseMetadata(resData, upgradeCallback);
-}
-
-/** @deprecated Use context.handleResFrame(data, eom) */
-export async function handleResFrame (context, data, eom, operator) {
-	console.warn(new Error('deprecated handleResFrame').stack);
-	if (!context.operator) context.operator = operator;
-	return context.handleResFrame(data, eom);
-}
-
-/** @deprecated Use context.relayBidiFrame(data) */
-export async function relayBidiFrame (context, data, operator) {
-	console.warn(new Error('deprecated relayBidiFrame').stack);
-	if (!context.operator) context.operator = operator;
-	return context.relayBidiFrame(data);
-}
-
-/** @deprecated Use context.handleError(error) */
-export function handleRequestError (context, error, operator) {
-	console.warn(new Error('deprecated handleRequestError').stack);
-	if (!context.operator) context.operator = operator;
-	return context.handleError(error);
-}
-
-/** @deprecated Use context.processReqChannelMessages(reqChannel) */
-export function processReqChannelMessages (context, reqChannel, operator) {
-	console.warn(new Error('deprecated handleRequestChannelMessages').stack);
-	if (!context.operator) context.operator = operator;
-	return context.processReqChannelMessages(reqChannel);
-}
-
-/** @deprecated Use context.initializeBidiConnection(upgradeCallback) */
-export async function initializeBidiConnection (context, operator, upgradeCallback) {
-	console.warn(new Error('deprecated initializeBidiConnection').stack);
-	if (!context.operator) context.operator = operator;
-	return context.initializeBidiConnection(upgradeCallback);
 }

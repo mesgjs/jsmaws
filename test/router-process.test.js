@@ -126,6 +126,8 @@ Deno.test('RouterProcess - handleShutdown sets isShuttingDown and calls pool shu
 		// Create a mock PolyTransport message with shutdown payload
 		const mockMsg = {
 			text: JSON.stringify({ timeout: 5 }),
+			done: () => {},
+			process: () => {},
 		};
 
 		await proc.handleShutdown(mockMsg);

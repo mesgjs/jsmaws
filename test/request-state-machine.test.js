@@ -17,7 +17,6 @@ import { makeWebSocketTransportPair } from '@poly-transport-test/transport-webso
 import {
 	RequestState,
 	RequestContext,
-	cleanupRequestContext,
 } from '../src/operator-request-state.esm.js';
 import { Configuration } from '../src/configuration.esm.js';
 
@@ -51,8 +50,11 @@ function createMockOperator () {
 			},
 		}),
 		requestContexts: new Map(),
-		cleanupRequestContext: (_requestId) => {
-			// Mock cleanup
+		cleanupRequestContext (requestId) {
+			const context = this.requestContexts.get(requestId);
+			if (context?.state === RequestState.COMPLETED) {
+				this.requestContexts.delete(requestId);
+			}
 		},
 		logs, // Expose for assertions
 	};
@@ -486,7 +488,7 @@ Deno.test('cleanupRequestContext - removes COMPLETED context', () => {
 	context.state = RequestState.COMPLETED;
 	mockOperator.requestContexts.set('test-req-15', context);
 
-	cleanupRequestContext('test-req-15', mockOperator.requestContexts, mockOperator.logger);
+	mockOperator.cleanupRequestContext('test-req-15');
 
 	assertEquals(mockOperator.requestContexts.has('test-req-15'), false);
 });
@@ -498,7 +500,7 @@ Deno.test('cleanupRequestContext - does not remove non-COMPLETED context', () =>
 	context.state = RequestState.STREAMING_RESPONSE;
 	mockOperator.requestContexts.set('test-req-16', context);
 
-	cleanupRequestContext('test-req-16', mockOperator.requestContexts, mockOperator.logger);
+	mockOperator.cleanupRequestContext('test-req-16');
 
 	// Should still be present (not COMPLETED)
 	assertEquals(mockOperator.requestContexts.has('test-req-16'), true);
@@ -508,7 +510,7 @@ Deno.test('cleanupRequestContext - no-op for unknown requestId', () => {
 	const mockOperator = createMockOperator();
 
 	// Should not throw
-	cleanupRequestContext('nonexistent', mockOperator.requestContexts, mockOperator.logger);
+	mockOperator.cleanupRequestContext('nonexistent');
 });
 
 // ============================================================================
