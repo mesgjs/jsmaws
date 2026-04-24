@@ -8,11 +8,10 @@
  * - Spawns and manages service processes (responders and routers)
  * - Routes requests to appropriate service processes via IPC
  * - Never executes user code directly
- * 
+ *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { NANOS, parseSLID } from '@nanos';
 import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
 import { createSSLManager } from './ssl-manager.esm.js';
 import { Router } from './router-worker.esm.js';
@@ -23,60 +22,18 @@ import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
 import { RequestContext, RequestState } from './operator-request-state.esm.js';
 
-const DEFAULT_HTTP_PORT = 80;
-const DEFAULT_HTTPS_PORT = 443;
 const ACME_CHALLENGE_PREFIX = '/.well-known/acme-challenge/';
-
-/**
- * Get default pool configuration when none is provided
- * @returns {Object} Default pools configuration (plain object)
- */
-function getDefaultPoolsConfig () {
-	return {
-		standard: {
-			minProcs: 1,
-			maxProcs: 20,
-			maxWorkers: 4,
-			maxReqs: 100,
-			reqTimeout: 60,
-			conTimeout: 300,
-		},
-	};
-}
-
-/**
- * Server configuration
- */
-export class ServerConfig {
-	constructor (options = {}) {
-		this.httpPort = options.httpPort ?? DEFAULT_HTTP_PORT;
-		this.httpsPort = options.httpsPort ?? DEFAULT_HTTPS_PORT;
-		this.certFile = options.certFile;
-		this.keyFile = options.keyFile;
-		this.hostname = options.hostname ?? 'localhost';
-		this.acmeChallengeDir = options.acmeChallengeDir;
-		this.noSSL = options.noSSL ?? false;
-		this.sslCheckIntervalHours = options.sslCheckIntervalHours ?? 1;
-	}
-
-	/**
-	 * Create ServerConfig from a NANOS configuration object
-	 * @param {NANOS} config NANOS configuration object from SLID file
-	 * @returns {ServerConfig}
-	 */
-	static fromNANOS (config) {
-		return new ServerConfig(config.toObject());
-	}
-}
 
 /**
  * Main operator class (privileged process)
  */
 export class OperatorProcess {
+	static instance = null; // Singleton instance
+
 	constructor (config, configPath) {
-		this.config = config;
-		this.configData = new NANOS(); // Full SLID configuration (NANOS, for legacy compat)
-		this.configuration = new Configuration({}); // Configuration instance (plain objects)
+		this.constructor.instance = this;
+		// Accept NANOS (from parseSLID), plain object (from JSON.parse), or Configuration instance
+		this.config = (config instanceof Configuration) ? config : new Configuration(config ?? {});
 		this.configPath = configPath;
 		this.httpServer = null;
 		this.httpsServer = null;
@@ -190,8 +147,14 @@ export class OperatorProcess {
 				this.updateAffinity(poolItem, appletPath);
 			}
 
-			// Read request body
-			const bodyBytes = req.body ? await req.arrayBuffer() : new ArrayBuffer(0);
+			// Read request body — skip for WebSocket upgrade requests.
+			// Deno.upgradeWebSocket() requires the original, unread Request object;
+			// calling req.arrayBuffer() first locks the body stream and causes the
+			// upgrade to fail/be canceled on the client side.
+			const isWebSocketUpgrade = req.headers.get('upgrade')?.toLowerCase() === 'websocket';
+			const bodyBytes = (!isWebSocketUpgrade && req.body)
+				? await req.arrayBuffer()
+				: new ArrayBuffer(0);
 
 			// Convert headers to plain object for JSON serialization
 			const headersObj = Object.fromEntries(req.headers.entries());
@@ -290,21 +253,10 @@ export class OperatorProcess {
 	 */
 	async handleConfigUpdate (newConfig) {
 		this.logger.info('Configuration updated; reloading...');
-		this.configData = newConfig; // Keep NANOS for legacy compat
 
 		// Update Configuration instance (converts NANOS to plain objects)
-		this.configuration.updateConfig(newConfig);
-
-		// Apply default pool config only if pools section is absent (null/undefined).
-		// An explicitly empty pools object ({}) is respected as-is (no pools configured).
-		if (this.configuration.config.pools == null) {
-			this.logger.warn('No pools configured in reload, using defaults');
-			this.configuration.config.pools = getDefaultPoolsConfig();
-			this.configuration._pools = null; // Invalidate cache
-		}
-
-		// Update server config
-		this.config = ServerConfig.fromNANOS(newConfig);
+		// The pools getter handles the default-pool fallback automatically.
+		this.config.updateConfig(newConfig);
 
 		// Update router configuration
 		if (this.router) {
@@ -435,7 +387,7 @@ export class OperatorProcess {
 	 * Initialize logger
 	 */
 	initializeLogger () {
-		const loggingConfig = this.configuration.logging;
+		const loggingConfig = this.config.logging;
 		this.logger = createLogger({
 			target: loggingConfig.destination ?? 'console',
 			level: loggingConfig.level ?? 'info',
@@ -448,31 +400,21 @@ export class OperatorProcess {
 	 * Initialize process manager
 	 */
 	initializeProcessManager () {
-		this.processManager = new ProcessManager(this.configuration, this.logger);
+		this.processManager = new ProcessManager(this.config, this.logger);
 	}
 
 	/**
 	 * Initialize service process pools
 	 */
 	async initializeProcessPools () {
-		// Check raw config to distinguish "not configured" (undefined) from "explicitly empty" ({})
-		const rawPools = this.configuration.config.pools;
-		let poolsConfig;
-		if (rawPools == null) {
-			// Pools not configured at all — use defaults
-			this.logger.warn('No pools configured, using defaults');
-			poolsConfig = getDefaultPoolsConfig();
-			this.configuration.config.pools = poolsConfig;
-			this.configuration._pools = null; // Invalidate cache
-		} else {
-			// Pools explicitly configured (even if empty)
-			poolsConfig = rawPools;
-		}
+		// config.pools always returns the effective pools (defaults applied by updateConfig).
+		// An explicitly empty pools object ({}) is respected as-is (no pools configured).
+		const poolsConfig = this.config.pools;
 
 		// Create PoolManager for each pool
 		for (const [poolName, poolConfig] of Object.entries(poolsConfig)) {
 			if (poolName === '@router') {
-				const fsRouting = this.configuration.routing.fsRouting;
+				const fsRouting = this.config.routing.fsRouting;
 				if (fsRouting) {
 					this.logger.info(`Initializing router pool '${poolName}' (filesystem routing)`);
 				}
@@ -500,9 +442,7 @@ export class OperatorProcess {
 	 * Initialize router with current configuration
 	 */
 	initializeRouter () {
-		// this.configuration is already initialized in constructor and updated via handleConfigUpdate
-		// Just create the router with the current configuration
-		this.router = new Router(this.configuration);
+		this.router = new Router(this.config);
 		this.logger.debug(`Router initialized with ${this.router.routes.length} route(s)`);
 	}
 
@@ -543,7 +483,7 @@ export class OperatorProcess {
 		}
 		this.isShuttingDown = true;
 
-		stopTime ??= this.configuration.config.shutdownDelay ?? 30;
+		stopTime ??= this.config.config.shutdownDelay ?? 30;
 		this.logger.info(`Shutting down JSMAWS operator process (${stopTime}s)...`);
 
 		if (this.healthCheckInterval) {
@@ -645,7 +585,7 @@ export class OperatorProcess {
 	 * Start health check monitoring
 	 */
 	startHealthCheckMonitoring () {
-		const intervalSeconds = this.configuration.config.healthCheckInterval ?? 60;
+		const intervalSeconds = this.config.config.healthCheckInterval ?? 60;
 
 		this.healthCheckInterval = setInterval(async () => {
 			try {
@@ -736,9 +676,9 @@ export class OperatorProcess {
 	 */
 	async updateProcessPools () {
 		this.logger.info('Updating process pools');
-		const newPoolsConfig = this.configuration.pools;
+		const newPoolsConfig = this.config.pools;
 
-		const stopTime = this.configuration.config.shutdownDelay ?? 30;
+		const stopTime = this.config.config.shutdownDelay ?? 30;
 		const newPoolNames = new Set(Object.keys(newPoolsConfig));
 		const oldPoolNames = new Set(this.poolManagers.keys());
 
@@ -856,8 +796,8 @@ export class OperatorProcess {
 	 */
 	validatePrivilegeConfiguration () {
 		const isRoot = Deno.uid() === 0;
-		const uid = this.configuration.config.uid;
-		const gid = this.configuration.config.gid;
+		const uid = this.config.config.uid;
+		const gid = this.config.config.gid;
 
 		if (isRoot) {
 			if (!uid || !gid) {

@@ -6,13 +6,15 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { OperatorProcess, ServerConfig } from '../src/operator.esm.js';
+import { OperatorProcess } from '../src/operator.esm.js';
 import { Configuration } from '../src/configuration.esm.js';
+import { WebSocketTransport } from '@poly-transport/transport/websocket.esm.js';
+import { NestedTransport } from '@poly-transport/transport/nested.esm.js';
 
 /**
  * Create a test server instance with custom configuration
  * @param {Object} configOverrides - Configuration overrides (plain JS object)
- * @returns {Promise<{operator: OperatorProcess, configuration: Configuration}>}
+ * @returns {Promise<{operator: OperatorProcess, config: Configuration}>}
  */
 export async function createTestServer (configOverrides = {}) {
 	// Create test configuration with safe defaults (plain JS object)
@@ -25,22 +27,18 @@ export async function createTestServer (configOverrides = {}) {
 		...configOverrides
 	};
 
-	// ServerConfig handles network/SSL settings
-	const config = new ServerConfig(testConfig);
-
-	// Configuration handles routing/pools/applet settings
-	const configuration = new Configuration(testConfig);
+	// Single Configuration instance holds all settings (network, routing, pools, etc.)
+	const config = new Configuration(testConfig);
 
 	// Create operator instance
 	const operator = new OperatorProcess(config);
-	operator.configuration = configuration;
 	operator.initializeLogger();
 
 	// Set global instance for IPC handlers
 	globalThis.OperatorProcess = OperatorProcess;
 	OperatorProcess.instance = operator;
 
-	return { operator, configuration };
+	return { operator, config };
 }
 
 /**
@@ -213,5 +211,88 @@ export async function cleanupTestFiles (paths) {
 		} catch {
 			// Ignore errors if file doesn't exist
 		}
+	}
+}
+
+/**
+ * Create a PolyTransport WebSocket connection with NestedTransport
+ * @param {string} url - WebSocket URL
+ * @param {number} timeoutMs - Connection timeout in milliseconds
+ * @returns {Promise<{wsTransport: WebSocketTransport, nestedTransport: NestedTransport, bidiChannel: Channel, appChannel: Channel}>}
+ */
+export async function connectPolyTransportWebSocket (url, timeoutMs = 5000) {
+	// First, wait for the WebSocket to open
+	const ws = await new Promise((resolve, reject) => {
+		const socket = new WebSocket(url);
+		const timeoutId = setTimeout(() => {
+			socket.close();
+			reject(new Error(`WebSocket connection timeout after ${timeoutMs}ms`));
+		}, timeoutMs);
+
+		socket.onopen = () => {
+			clearTimeout(timeoutId);
+			resolve(socket);
+		};
+
+		socket.onerror = (error) => {
+			clearTimeout(timeoutId);
+			reject(new Error(`WebSocket connection error: ${error.message || 'unknown error'}`));
+		};
+	});
+
+	// Now create the PolyTransport stack
+	// Create WebSocketTransport
+	const wsTransport = new WebSocketTransport({ ws });
+	
+	// Accept all channels
+	wsTransport.addEventListener('newChannel', (event) => {
+		event.accept();
+	});
+	
+	await wsTransport.start();
+	
+	// Open the pre-designated 'bidi' channel
+	const bidiChannel = await wsTransport.requestChannel('bidi');
+	await bidiChannel.addMessageTypes(['bidi-frame']);
+	
+	// Establish NestedTransport over the bidi channel
+	const nestedTransport = new NestedTransport({
+		channel: bidiChannel,
+		messageType: 'bidi-frame',
+	});
+	
+	// Accept all channels on the nested transport
+	nestedTransport.addEventListener('newChannel', (event) => {
+		event.accept();
+	});
+	
+	await nestedTransport.start();
+	
+	// Request the application channel (must match what the applet opens)
+	const appChannel = await nestedTransport.requestChannel('echo');
+	await appChannel.addMessageTypes(['data']);
+	
+	return { wsTransport, nestedTransport, bidiChannel, appChannel };
+}
+
+/**
+ * Close a PolyTransport WebSocket connection
+ * @param {Object} connection - Connection object from connectPolyTransportWebSocket
+ */
+export async function closePolyTransportWebSocket (connection) {
+	const { appChannel, nestedTransport, bidiChannel, wsTransport } = connection;
+	
+	// Close in reverse order of creation
+	if (appChannel) {
+		await appChannel.close();
+	}
+	if (nestedTransport) {
+		await nestedTransport.stop();
+	}
+	if (bidiChannel) {
+		await bidiChannel.close();
+	}
+	if (wsTransport) {
+		await wsTransport.stop();
 	}
 }

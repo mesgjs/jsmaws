@@ -40,6 +40,7 @@ export default async function (_setupData) {
 	// Accept WebSocket upgrade (status 101)
 	await server.write('res', JSON.stringify({
 		status: 101,
+		mode: 'bidi',
 		headers: {
 			upgrade: 'websocket',
 			connection: 'upgrade',

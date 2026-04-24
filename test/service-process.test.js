@@ -26,11 +26,9 @@ class TestServiceProcess extends ServiceProcess {
 		this.onStartedCalled = false;
 	}
 
-	async handleConfigUpdate (configJson) {
-		this.configUpdates.push(JSON.parse(configJson));
-		if (!this.config) {
-			this.config = new Configuration(JSON.parse(configJson));
-		}
+	async handleConfigUpdate () {
+		// this.config is already set/updated by the base class
+		this.configUpdates.push({ ...this.config.config });
 	}
 
 	async handleHealthCheck (msg) {
@@ -131,7 +129,7 @@ Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async (
 
 	const proc = new IncompleteProcess();
 	await assertRejects(
-		() => proc.handleConfigUpdate('{}'),
+		() => proc.handleConfigUpdate(),
 		Error,
 		'Subclass must implement handleConfigUpdate()'
 	);
@@ -209,8 +207,9 @@ Deno.test('ServiceProcess - handles config-update message', async () => {
 				if (msg) {
 					await msg.process(async () => {
 						if (msg.messageType === 'config-update') {
-							await proc.handleConfigUpdate(msg.text);
-						}
+								proc.config.updateConfig(JSON.parse(msg.text));
+								await proc.handleConfigUpdate();
+							}
 					});
 				}
 			} catch (err) {
@@ -227,6 +226,8 @@ Deno.test('ServiceProcess - handles config-update message', async () => {
 
 		assertEquals(proc.configUpdates.length, 1);
 		assertEquals(proc.configUpdates[0].maxChunkSize, 65536);
+		// Verify this.config was updated by the base class
+		assertEquals(proc.config.chunkSize, 65536);
 	} finally {
 		await cleanup();
 	}

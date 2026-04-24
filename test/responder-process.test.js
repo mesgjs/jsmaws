@@ -71,11 +71,11 @@ async function setupResponderProcess (processId = 'test-responder-1', poolName =
 	const configJson = makeConfigJson();
 	await operatorControlChannel.write('config-update', configJson);
 
-	// Process the config-update on the service side
+	// Process the config-update on the service side (base class sets proc.config)
 	const configMsg = await serviceControlChannel.read({ only: 'config-update', decode: true });
 	await configMsg.process(async () => {
 		proc.config = new Configuration(JSON.parse(configMsg.text));
-		await proc.handleConfigUpdate(configMsg.text);
+		await proc.handleConfigUpdate();
 	});
 
 	const cleanup = async () => {
@@ -141,13 +141,9 @@ Deno.test('ResponderProcess - availWorkers reflects capacity', () => {
 Deno.test('ResponderProcess - handleConfigUpdate updates chunkingConfig', async () => {
 	const proc = new ResponderProcess('test-proc-5', 'standard');
 
-	const configJson = makeConfigJson({
-		chunkSize: 32768,
-	});
-	// Simulate what ServiceProcess.waitForInitialConfig() does:
-	// update proc.config BEFORE calling handleConfigUpdate
-	proc.config = new Configuration(JSON.parse(configJson));
-	await proc.handleConfigUpdate(configJson);
+	// Base class sets proc.config before calling handleConfigUpdate()
+	proc.config = new Configuration(JSON.parse(makeConfigJson({ chunkSize: 32768 })));
+	await proc.handleConfigUpdate();
 
 	assertEquals(proc.chunkingConfig.chunkSize, 32768);
 });
@@ -155,7 +151,8 @@ Deno.test('ResponderProcess - handleConfigUpdate updates chunkingConfig', async 
 Deno.test('ResponderProcess - handleConfigUpdate updates maxConcurrentRequests from pool', async () => {
 	const proc = new ResponderProcess('test-proc-6', 'standard');
 
-	const configJson = makeConfigJson({
+	// Base class sets proc.config before calling handleConfigUpdate()
+	proc.config = new Configuration(JSON.parse(makeConfigJson({
 		pools: {
 			standard: {
 				minProcs: 1,
@@ -167,11 +164,8 @@ Deno.test('ResponderProcess - handleConfigUpdate updates maxConcurrentRequests f
 				resType: ['response', 'stream', 'bidi'],
 			},
 		},
-	});
-	// Simulate what ServiceProcess.waitForInitialConfig() does:
-	// update proc.config BEFORE calling handleConfigUpdate
-	proc.config = new Configuration(JSON.parse(configJson));
-	await proc.handleConfigUpdate(configJson);
+	})));
+	await proc.handleConfigUpdate();
 
 	assertEquals(proc.maxConcurrentRequests, 20);
 });

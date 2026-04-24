@@ -15,14 +15,15 @@ function createTestConfig(configData) {
 	return new Configuration(slid);
 }
 
-Deno.test('getTimeoutConfig - global defaults only', () => {
+Deno.test('getTimeoutConfig - global defaults only (no matching pool)', () => {
 	const config = createTestConfig(`
 		reqTimeout=30
 		idleTimeout=60
 		conTimeout=300
 	`);
 
-	const timeouts = config.getTimeoutConfig('standard');
+	// Use a pool name not present in the default pool config
+	const timeouts = config.getTimeoutConfig('nonexistent');
 
 	assertEquals(timeouts.reqTimeout, 30);
 	assertEquals(timeouts.idleTimeout, 60);

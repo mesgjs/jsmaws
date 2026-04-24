@@ -60,9 +60,6 @@ Deno.test('RouterProcess - constructor initializes correctly', () => {
 Deno.test('RouterProcess - handleConfigUpdate updates pool manager config', async () => {
 	const proc = new RouterProcess('router-test-2');
 
-	// Set up initial config
-	proc.config = makeConfig();
-
 	// Create a mock pool manager
 	let updateConfigCalled = false;
 	let lastPoolConfig = null;
@@ -74,10 +71,9 @@ Deno.test('RouterProcess - handleConfigUpdate updates pool manager config', asyn
 		},
 	};
 
-	// Simulate a config update (ServiceProcess base sets proc.config before calling handleConfigUpdate)
-	const newConfig = makeConfig({ fsRouting: false });
-	proc.config = newConfig;
-	await proc.handleConfigUpdate(JSON.stringify(newConfig.config));
+	// Base class sets proc.config before calling handleConfigUpdate()
+	proc.config = makeConfig({ fsRouting: false });
+	await proc.handleConfigUpdate();
 
 	// Pool manager should have been updated
 	assertEquals(updateConfigCalled, true);
@@ -91,7 +87,7 @@ Deno.test('RouterProcess - handleConfigUpdate with no pool manager is a no-op', 
 	proc.poolManager = null;
 
 	// Should not throw
-	await proc.handleConfigUpdate(JSON.stringify(proc.config.config));
+	await proc.handleConfigUpdate();
 });
 
 // ============================================================================

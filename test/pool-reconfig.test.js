@@ -10,7 +10,7 @@
  */
 
 import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.0/assert/mod.ts";
-import { OperatorProcess, ServerConfig } from "../src/operator.esm.js";
+import { OperatorProcess } from "../src/operator.esm.js";
 import { Configuration } from "../src/configuration.esm.js";
 import { NANOS, parseSLID } from '@nanos';
 
@@ -71,14 +71,8 @@ function createMockProcessManager (operator) {
  * Create an OperatorProcess with a Configuration from a SLID string
  */
 function makeOperator (slidStr) {
-	const config = new ServerConfig({ noSSL: true });
-	const operator = new OperatorProcess(config);
-	if (slidStr) {
-		const nanos = parseSLID(slidStr);
-		operator.configData = nanos;
-		operator.configuration = new Configuration(nanos);
-	}
-	return operator;
+	const config = slidStr ? new Configuration(parseSLID(slidStr)) : new Configuration({ noSSL: true });
+	return new OperatorProcess(config);
 }
 
 /**
@@ -113,9 +107,9 @@ Deno.test("Pool Reconfig - applies default pool when pools section missing", asy
 	// Handle config update
 	await operator.handleConfigUpdate(newConfig);
 
-	// Verify default pool config was applied to configuration.config.pools
-	assertExists(operator.configuration.config.pools);
-	assertExists(operator.configuration.config.pools.standard);
+	// Verify default pool config was applied to config.pools
+	assertExists(operator.config.pools);
+	assertExists(operator.config.pools.standard);
 
 	// Verify pool manager still exists
 	assertExists(operator.poolManagers.get('standard'));
@@ -145,9 +139,9 @@ Deno.test("Pool Reconfig - applies default pool when pools section is omitted", 
 	// Handle config update
 	await operator.handleConfigUpdate(newConfig);
 
-	// Verify default pool config was applied to configuration.config.pools
-	assertExists(operator.configuration.config.pools);
-	assertExists(operator.configuration.config.pools.standard);
+	// Verify default pool config was applied to config.pools
+	assertExists(operator.config.pools);
+	assertExists(operator.config.pools.standard);
 
 	// Cleanup
 	for (const [poolName, poolManager] of operator.poolManagers) {
@@ -178,10 +172,10 @@ Deno.test("Pool Reconfig - uses provided pools config when present", async () =>
 	await operator.handleConfigUpdate(newConfig);
 
 	// Verify custom pools config was used (not defaults)
-	assertExists(operator.configuration.config.pools.fast);
-	assertExists(operator.configuration.config.pools.slow);
-	assertEquals(operator.configuration.config.pools.fast.minProcs, 2);
-	assertEquals(operator.configuration.config.pools.slow.minProcs, 1);
+	assertExists(operator.config.pools.fast);
+	assertExists(operator.config.pools.slow);
+	assertEquals(operator.config.pools.fast.minProcs, 2);
+	assertEquals(operator.config.pools.slow.minProcs, 1);
 
 	// Wait for pool creation
 	await waitForAsync(100);

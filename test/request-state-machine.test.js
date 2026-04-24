@@ -43,7 +43,7 @@ function createMockOperator () {
 			}
 			return headers;
 		},
-		configuration: new Configuration({
+		config: new Configuration({
 			chunkSize: 65536,
 			pools: {
 				standard: { maxChunkSize: 65536 },

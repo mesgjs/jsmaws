@@ -82,13 +82,10 @@ class ResponderProcess extends ServiceProcess {
 
 	/**
 	 * Handle configuration update from operator.
-	 * @param {string} configJson - JSON-encoded configuration
+	 * Called after this.config has been updated by the ServiceProcess base class.
 	 */
-	async handleConfigUpdate (configJson) {
+	async handleConfigUpdate () {
 		console.info(`[${this.processId}] Received configuration update`);
-
-		// Configuration instance is already updated by ServiceProcess base class
-		// Just need to extract relevant settings
 
 		// Update chunk size from config (PolyTransport handles chunking; we only need maxChunkBytes)
 		this.chunkingConfig = {

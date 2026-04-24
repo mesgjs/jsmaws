@@ -8,7 +8,7 @@
  */
 
 import { parseSLID } from '@nanos';
-import { OperatorProcess, ServerConfig } from './operator-process.esm.js';
+import { OperatorProcess } from './operator-process.esm.js';
 
 const DEFAULT_CONFIG_FILE = 'jsmaws.slid';
 
@@ -33,25 +33,22 @@ async function main () {
 
 	// Load configuration from SLID file
 	console.log(`Loading configuration from: ${configFile}`);
-	const configData = await loadConfig(configFile);
-	const config = ServerConfig.fromNANOS(configData);
+	const configNANOS = await loadConfig(configFile);
+
+	// Create and start operator (Configuration is created internally from NANOS)
+	const operator = new OperatorProcess(configNANOS, configFile);
+	globalThis.OperatorProcess = OperatorProcess;
 
 	console.log('Operator configuration:');
-	console.log(`  HTTP Port: ${config.httpPort}`);
-	console.log(`  HTTPS Port: ${config.httpsPort}`);
-	console.log(`  Hostname: ${config.hostname}`);
-	console.log(`  SSL Mode: ${config.noSSL ? 'disabled' : 'enabled'}`);
-	console.log(`  Cert File: ${config.certFile || '(not configured)'}`);
-	console.log(`  Key File: ${config.keyFile || '(not configured)'}`);
-	console.log(`  SSL Check Interval: ${config.sslCheckIntervalHours} hour(s)`);
-	console.log(`  ACME Challenge Dir: ${config.acmeChallengeDir || '(not configured)'}`);
+	console.log(`  HTTP Port: ${operator.config.httpPort}`);
+	console.log(`  HTTPS Port: ${operator.config.httpsPort}`);
+	console.log(`  Hostname: ${operator.config.hostname}`);
+	console.log(`  SSL Mode: ${operator.config.noSSL ? 'disabled' : 'enabled'}`);
+	console.log(`  Cert File: ${operator.config.certFile || '(not configured)'}`);
+	console.log(`  Key File: ${operator.config.keyFile || '(not configured)'}`);
+	console.log(`  SSL Check Interval: ${operator.config.sslCheckIntervalHours} hour(s)`);
+	console.log(`  ACME Challenge Dir: ${operator.config.acmeChallengeDir || '(not configured)'}`);
 
-	// Create and start operator
-	const operator = new OperatorProcess(config, configFile);
-	globalThis.OperatorProcess = OperatorProcess;
-	OperatorProcess.instance = operator;
-	operator.configData = configData; // Store full NANOS config (for legacy compat)
-	operator.configuration.updateConfig(configData); // Update Configuration instance
 	operator.initializeLogger();
 
 	// Handle shutdown signals
@@ -76,4 +73,4 @@ if (import.meta.main) {
 }
 
 // Export for testing and module usage
-export { OperatorProcess, ServerConfig };
+export { OperatorProcess };

@@ -18,28 +18,44 @@
 
 import { NANOS } from '@nanos';
 
+// Default network port values
+const DEFAULT_HTTP_PORT = 80;
+const DEFAULT_HTTPS_PORT = 443;
+
+/**
+ * Default pool configuration used when no pools are defined in the config file.
+ * Returns a new object each time to prevent accidental mutation.
+ * @returns {Object} Default pools configuration (plain object)
+ */
+function getDefaultPoolsConfig () {
+	return {
+		standard: {
+			minProcs: 1,
+			maxProcs: 20,
+			maxWorkers: 4,
+			maxReqs: 100,
+			reqTimeout: 60,
+			conTimeout: 300,
+		},
+	};
+}
+
 /**
  * Configuration class
  * Holds all process configuration and provides scoped access
  */
 export class Configuration {
 	constructor (config = {}) {
-		// Accept NANOS (from parseSLID), plain object (from JSON.parse), or empty
-		if (config instanceof NANOS) {
-			// Convert NANOS to plain JS objects/arrays
-			// { array: true } converts indexed-only NANOS to JS arrays (routes, extensions, etc.)
-			this.config = config.toObject({ array: true });
-		} else {
-			this.config = config; // Already a plain object (from JSON.parse or test)
-		}
-
 		this.processType = null; // 'operator', 'router', 'responder'
 		this.processId = null;
 
 		// Cached/computed values (invalidated on config update)
+		// Note: _pools is not cached since config.pools is always a plain object reference
 		this._routing = null;
-		this._pools = null;
 		this._logging = null;
+
+		// Delegate to updateConfig() to avoid code duplication
+		this.updateConfig(config);
 	}
 
 	/**
@@ -53,12 +69,76 @@ export class Configuration {
 	}
 
 	/**
+	 * Get ACME challenge directory path
+	 * @returns {string|undefined}
+	 */
+	get acmeChallengeDir () {
+		return this.config.acmeChallengeDir;
+	}
+
+	/**
+	 * Get SSL certificate file path
+	 * @returns {string|undefined}
+	 */
+	get certFile () {
+		return this.config.certFile;
+	}
+
+	/**
 	 * Get chunk size for PolyTransport (maxChunkBytes).
 	 * This is the only chunking parameter retained after the PolyTransport refactoring.
 	 * @returns {number} Chunk size in bytes (default: 65536)
 	 */
 	get chunkSize () {
 		return this.config.chunkSize ?? 65536;
+	}
+
+	/**
+	 * Get server hostname
+	 * @returns {string}
+	 */
+	get hostname () {
+		return this.config.hostname ?? 'localhost';
+	}
+
+	/**
+	 * Get HTTP port
+	 * @returns {number}
+	 */
+	get httpPort () {
+		return this.config.httpPort ?? DEFAULT_HTTP_PORT;
+	}
+
+	/**
+	 * Get HTTPS port
+	 * @returns {number}
+	 */
+	get httpsPort () {
+		return this.config.httpsPort ?? DEFAULT_HTTPS_PORT;
+	}
+
+	/**
+	 * Get SSL private key file path
+	 * @returns {string|undefined}
+	 */
+	get keyFile () {
+		return this.config.keyFile;
+	}
+
+	/**
+	 * Get noSSL flag (HTTP-only mode)
+	 * @returns {boolean}
+	 */
+	get noSSL () {
+		return this.config.noSSL ?? false;
+	}
+
+	/**
+	 * Get SSL certificate check interval in hours
+	 * @returns {number}
+	 */
+	get sslCheckIntervalHours () {
+		return this.config.sslCheckIntervalHours ?? 1;
 	}
 
 	/**
@@ -194,9 +274,8 @@ export class Configuration {
 		// Merge fields from update into existing config
 		Object.assign(this.config, configUpdate);
 
-		// Invalidate all cached values
+		// Invalidate computed caches
 		this._routing = null;
-		this._pools = null;
 		this._logging = null;
 	}
 
@@ -209,14 +288,13 @@ export class Configuration {
 	}
 
 	/**
-	 * Get pools configuration
+	 * Get pools configuration.
+	 * Default pool configuration is applied by updateConfig() when no pools are defined,
+	 * so this getter always returns the effective pools (never null/undefined).
 	 * @returns {Object} Pools configuration (plain object)
 	 */
 	get pools () {
-		if (!this._pools) {
-			this._pools = this.config.pools ?? {};
-		}
-		return this._pools;
+		return this.config.pools;
 	}
 
 	/**
@@ -266,9 +344,8 @@ export class Configuration {
 			this.config[path] = value;
 		}
 
-		// Invalidate caches
+		// Invalidate computed caches
 		this._routing = null;
-		this._pools = null;
 		this._logging = null;
 	}
 
@@ -285,19 +362,26 @@ export class Configuration {
 	}
 
 	/**
-	 * Update configuration (invalidates all caches)
+	 * Update configuration (invalidates all caches).
+	 * Applies default pool configuration when no pools are defined in the config.
+	 * An explicitly empty pools object ({}) is respected as-is (no pools configured).
 	 * @param {NANOS|Object} newConfig New configuration (NANOS or plain object from JSON.parse)
 	 */
 	updateConfig (newConfig) {
 		if (newConfig instanceof NANOS) {
 			this.config = newConfig.toObject({ array: true });
 		} else {
-			this.config = newConfig; // Already a plain object (from JSON.parse)
+			this.config = newConfig ?? {}; // Already a plain object (from JSON.parse or test)
 		}
 
-		// Invalidate all cached values
+		// Apply default pool config if no pools are defined.
+		// An explicitly empty pools object ({}) is respected as-is.
+		if (this.config.pools == null) {
+			this.config.pools = getDefaultPoolsConfig();
+		}
+
+		// Invalidate computed caches
 		this._routing = null;
-		this._pools = null;
 		this._logging = null;
 	}
 }

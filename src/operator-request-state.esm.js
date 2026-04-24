@@ -165,7 +165,7 @@ export class RequestContext {
 		const { requestId, operator } = this;
 
 		// Derive params from configuration (same as responder will use)
-		const bidiParams = operator.configuration.getBidiParams({
+		const bidiParams = operator.config.getBidiParams({
 			routeSpec: this.routeSpec
 		});
 

@@ -93,10 +93,10 @@ export class ServiceProcess {
 
 	/**
 	 * Handle configuration update from operator.
+	 * Called after this.config has been updated by the base class.
 	 * Subclasses must implement this method.
-	 * @param {string} configJson - JSON-encoded configuration
 	 */
-	async handleConfigUpdate (configJson) {
+	async handleConfigUpdate () {
 		throw new Error('Subclass must implement handleConfigUpdate()');
 	}
 
@@ -211,8 +211,9 @@ export class ServiceProcess {
 					try {
 						switch (msg.messageType) {
 						case 'config-update':
-							await this.handleConfigUpdate(msg.text);
-							break;
+									this.config.updateConfig(JSON.parse(msg.text));
+									await this.handleConfigUpdate();
+									break;
 						case 'health-check':
 							await this.handleHealthCheck(msg);
 							break;
@@ -320,6 +321,7 @@ export class ServiceProcess {
 	/**
 	 * Wait for and process initial configuration via the control channel.
 	 * The operator sends a 'config-update' as the first message after transport start.
+	 * Sets this.config and then calls handleConfigUpdate() with no arguments.
 	 */
 	async waitForInitialConfig () {
 		console.debug(`[${this.processId}] Waiting for initial configuration...`);
@@ -330,18 +332,17 @@ export class ServiceProcess {
 			throw new Error('Control channel closed before initial configuration was received');
 		}
 
-		let configJson;
+		let configData;
 		await msg.process(() => {
-			configJson = msg.text;
+			configData = JSON.parse(msg.text);
 		});
 
 		// Parse and create Configuration instance
-		const configData = JSON.parse(configJson);
 		this.config = new Configuration(configData);
 		this.config.processType = this.processType;
 		this.config.processId = this.processId;
 
-		// Let subclass handle the configuration
-		await this.handleConfigUpdate(configJson);
+		// Let subclass react to the configuration (this.config is already set)
+		await this.handleConfigUpdate();
 	}
 }
