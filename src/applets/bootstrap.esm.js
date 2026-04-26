@@ -241,17 +241,10 @@ async function bootstrap () {
 
 	// Set up the JSMAWS communication channel (applet ↔ server)
 	const appletChannel = await transport.requestChannel('applet');
-	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
 
 	// Build the JSMAWS namespace object (frozen before applet import)
 	const jsmawsNamespace = { server: appletChannel };
-
-	// For bidi requests: set up the NestedTransport relay channel
-	if (mode === 'bidi') {
-		const bidiChannel = await transport.requestChannel('bidi');
-		await bidiChannel.addMessageTypes(['bidi-frame']);
-		jsmawsNamespace.bidi = bidiChannel;
-	}
 
 	// Expose frozen namespace to applet
 	globalThis.JSMAWS = Object.freeze(jsmawsNamespace);

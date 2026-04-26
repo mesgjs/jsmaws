@@ -36,7 +36,6 @@ export async function createTestServer (configOverrides = {}) {
 
 	// Set global instance for IPC handlers
 	globalThis.OperatorProcess = OperatorProcess;
-	OperatorProcess.instance = operator;
 
 	return { operator, config };
 }

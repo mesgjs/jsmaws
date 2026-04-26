@@ -15,6 +15,7 @@
  */
 
 import { Channel } from '@poly-transport/channel.esm.js';
+import { Transport } from '@poly-transport/transport/base.esm.js';
 
 /**
  * Message types registered on every req-N channel.
@@ -152,8 +153,10 @@ export class RequestChannelPool {
 	 * @param {string} name - The channel's name (e.g. 'req-0')
 	 */
 	async #reopenChannel (index, name) {
-		const channel = await this.#transport.requestChannel(name);
-		if (channel.state !== Channel.STATE_OPEN) throw new Error('requestChannel returned non-open channel', name);
+		const transport = this.#transport;
+		if (transport.state !== Transport.STATE_ACTIVE) return; // Don't attempt when transport is stopping
+
+		const channel = await transport.requestChannel(name);
 		await channel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
 		// #channelIndex entry is retained (same name → same index); no update needed
 		this.#available.push(channel);

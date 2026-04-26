@@ -46,9 +46,6 @@ function getDefaultPoolsConfig () {
  */
 export class Configuration {
 	constructor (config = {}) {
-		this.processType = null; // 'operator', 'router', 'responder'
-		this.processId = null;
-
 		// Cached/computed values (invalidated on config update)
 		// Note: _pools is not cached since config.pools is always a plain object reference
 		this._routing = null;

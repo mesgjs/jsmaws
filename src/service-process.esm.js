@@ -43,7 +43,7 @@ export class ServiceProcess {
 		this.processType = processType;
 		this.processId = processId || Deno.env.get('JSMAWS_PID') || `${processType}-${Date.now()}`;
 		this.config = null; // Configuration instance (set during initialization)
-		this.transport = null; // PipeTransport instance
+		this.transport = null; // Operator PipeTransport instance
 		this.controlChannel = null; // 'control' channel on the transport
 		this.isShuttingDown = false;
 		this._c2cSymbol = null; // Set in createTransport()
@@ -211,9 +211,9 @@ export class ServiceProcess {
 					try {
 						switch (msg.messageType) {
 						case 'config-update':
-									this.config.updateConfig(JSON.parse(msg.text));
-									await this.handleConfigUpdate();
-									break;
+							this.config.updateConfig(JSON.parse(msg.text));
+							await this.handleConfigUpdate();
+							break;
 						case 'health-check':
 							await this.handleHealthCheck(msg);
 							break;
@@ -237,8 +237,8 @@ export class ServiceProcess {
 	 * Create and run a service process with signal handlers.
 	 * Static factory method for consistent process creation.
 	 */
-	static async run (ProcessClass, ...args) {
-		const process = new ProcessClass(...args);
+	static async run (processClass, ...args) {
+		const process = new processClass(...args);
 
 		// Ignore direct SIGINT and wait for an operator shutdown message
 		Deno.addSignalListener('SIGINT', () => {});
@@ -339,8 +339,6 @@ export class ServiceProcess {
 
 		// Parse and create Configuration instance
 		this.config = new Configuration(configData);
-		this.config.processType = this.processType;
-		this.config.processId = this.processId;
 
 		// Let subclass react to the configuration (this.config is already set)
 		await this.handleConfigUpdate();

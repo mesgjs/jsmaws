@@ -369,6 +369,7 @@ Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 		await operatorReqChannel.write('req', JSON.stringify(requestData));
 
 		// Start handleReqChannel on the service side
+		proc.channelMap.set(serviceReqChannel, 'req-0');
 		proc.handleReqChannel(serviceReqChannel);
 
 		// Read the error response from operator side

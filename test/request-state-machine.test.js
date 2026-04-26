@@ -189,9 +189,11 @@ Deno.test('handleResponseMetadata - bidi mode transitions to BIDI_ACTIVE', async
 	});
 
 	// Inject a test upgradeCallback that uses the pre-created transportA
-	// instead of calling Deno.upgradeWebSocket + creating a new WebSocketTransport
+	// instead of calling Deno.upgradeWebSocket + creating a new WebSocketTransport.
+	// The callback returns only { transport, response } — initializeBidiConnection
+	// is responsible for starting the transport and acquiring the bidi channel.
 	const mockWsResponse = new Response(null, { status: 101 });
-	const testUpgradeCallback = async (_context, _bidiParams) => {
+	const testUpgradeCallback = (_context, _bidiParams) => {
 		// Only accept the 'bidi' channel on the server side (transportA)
 		transportA.addEventListener('newChannel', (event) => {
 			if (event.detail.channelName === 'bidi') {
@@ -201,10 +203,7 @@ Deno.test('handleResponseMetadata - bidi mode transitions to BIDI_ACTIVE', async
 			}
 		});
 
-		const bidiChannel = await transportA.requestChannel('bidi');
-		await bidiChannel.addMessageTypes(['bidi-frame']);
-
-		return { transport: transportA, bidiChannel, response: mockWsResponse };
+		return { transport: transportA, response: mockWsResponse };
 	};
 
 	try {
@@ -224,7 +223,7 @@ Deno.test('handleResponseMetadata - bidi mode transitions to BIDI_ACTIVE', async
 
 		// Verify bidiState was set up
 		assertExists(context.bidiState);
-		assertExists(context.bidiState.wsTransport);
+		assertExists(context.bidiState.transport);
 		assertExists(context.bidiState.bidiChannel);
 
 		// Verify response was resolved
@@ -448,7 +447,7 @@ Deno.test('handleError - stops WS transport in BIDI_ACTIVE', () => {
 	context.state = RequestState.BIDI_ACTIVE;
 	let transportStopped = false;
 	context.bidiState = {
-		wsTransport: {
+		transport: {
 			stop: () => {
 				transportStopped = true;
 			},

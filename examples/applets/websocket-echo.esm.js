@@ -12,11 +12,11 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
+import { Channel } from '@poly-transport/channel.esm.js';
 import { NestedTransport } from '@poly-transport/transport/nested.esm.js';
 
 export default async function (_setupData) {
 	const server = globalThis.JSMAWS.server;
-	const bidiChannel = globalThis.JSMAWS.bidi;
 
 	// Read the incoming request (all data is JSON text — use decode: true)
 	const reqMsg = await server.read({ only: 'req', decode: true });
@@ -50,7 +50,7 @@ export default async function (_setupData) {
 	// Establish NestedTransport over the bidi relay channel
 	// The bidi channel carries NestedTransport byte-stream traffic (bidi-frame message type)
 	const nestedTransport = new NestedTransport({
-		channel: bidiChannel,
+		channel: server,
 		messageType: 'bidi-frame',
 	});
 
@@ -65,11 +65,13 @@ export default async function (_setupData) {
 	const appChannel = await nestedTransport.requestChannel('echo');
 	await appChannel.addMessageTypes(['data']);
 
-	// Send welcome message
-	await appChannel.write('data', JSON.stringify({
-		type: 'welcome',
-		message: 'WebSocket echo server ready',
-	}));
+	// Send welcome message if channel wasn't immediately closed
+	if (appChannel.state === Channel.STATE_OPEN) {
+		await appChannel.write('data', JSON.stringify({
+			type: 'welcome',
+			message: 'WebSocket echo server ready',
+		}));
+	}
 
 	// Echo loop: read messages and echo them back
 	while (true) {

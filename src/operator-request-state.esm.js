@@ -28,16 +28,20 @@ export const RequestState = {
  * This is the default upgrade function used in production. Tests can inject
  * an alternative via the upgradeCallback parameter of initializeBidiConnection.
  *
+ * NOTE: The transport is NOT started here. The caller must send the HTTP 101
+ * upgrade response first (by resolving the response promise), then call
+ * transport.start() to begin the WebSocket handshake.
+ *
  * @param {RequestContext} context - The request context
  * @param {{ maxChunkSize: number }} bidiParams - Bidi parameters from configuration
- * @returns {Promise<{ transport: WebSocketTransport, bidiChannel: object, response: Response }>}
+ * @returns {{ transport: WebSocketTransport, response: Response }}
  */
-export async function webSocketUpgrade (context, bidiParams) {
+export function webSocketUpgrade (context, bidiParams) {
 	// Upgrade to WebSocket
 	const { socket, response } = Deno.upgradeWebSocket(context.originalRequest);
 
 	// Create WebSocketTransport for client connection
-	const wsTransport = new WebSocketTransport({
+	const transport = new WebSocketTransport({
 		ws: socket,
 		maxChunkBytes: bidiParams.maxChunkSize,
 		lowBufferBytes: bidiParams.maxChunkSize,
@@ -46,21 +50,15 @@ export async function webSocketUpgrade (context, bidiParams) {
 	});
 
 	// Only accept the single pre-designated 'bidi' channel
-	wsTransport.addEventListener('newChannel', (event) => {
+	transport.addEventListener('newChannel', (event) => {
 		if (event.detail.channelName === 'bidi') {
 			event.accept();
-		} else {
-			event.reject();
 		}
 	});
 
-	await wsTransport.start();
-
-	// Get the pre-designated bidi channel and register the bidi-frame message type
-	const bidiChannel = await wsTransport.requestChannel('bidi');
-	await bidiChannel.addMessageTypes(['bidi-frame']);
-
-	return { transport: wsTransport, bidiChannel, response };
+	// Transport is NOT started here — must be started after the HTTP 101 response
+	// is sent to the client (i.e. after responsePromise.resolve(response) below).
+	return { transport, response };
 }
 
 /**
@@ -125,10 +123,10 @@ export class RequestContext {
 			}
 		}
 
-		// Close WebSocket transport if active
-		if (this.bidiState?.wsTransport) {
+		// Close bidi transport if active
+		if (this.bidiState?.transport) {
 			try {
-				this.bidiState.wsTransport.stop({ discard: true });
+				this.bidiState.transport.stop({ discard: true });
 			} catch (_) {
 				// Ignore if already closed
 			}
@@ -158,44 +156,33 @@ export class RequestContext {
 	 * Called from handleResponseMetadata() when status 101 is received.
 	 *
 	 * @param {Function} [upgradeCallback] - Optional callback for bidi upgrade (for testing/DI).
-	 *   Signature: async (context, bidiParams) => { transport, bidiChannel, response }
+	 *   Signature: (context, bidiParams) => { transport, response }
+	 *   The callback returns an unstarted transport and the protocol upgrade response.
+	 *   The caller (this method) resolves the response promise first, then starts the
+	 *   transport so the underlying protocol handshake can complete.
 	 *   Defaults to webSocketUpgrade (WebSocket upgrade via Deno.upgradeWebSocket).
 	 */
 	async initializeBidiConnection (upgradeCallback = webSocketUpgrade) {
 		const { requestId, operator } = this;
+
+		const bidiStarting = { promise: null };
+		bidiStarting.promise = new Promise((resolve) => bidiStarting.resolve = resolve);
+		this.bidiState = { bidiStarting };
 
 		// Derive params from configuration (same as responder will use)
 		const bidiParams = operator.config.getBidiParams({
 			routeSpec: this.routeSpec
 		});
 
-		// Perform the bidi upgrade (WebSocket by default, injectable for testing)
-		const { transport: wsTransport, bidiChannel, response } = await upgradeCallback(this, bidiParams);
+		// Perform the bidi upgrade (WebSocket by default, injectable for testing).
+		// The upgrade callback returns the transport (not yet started) and the protocol
+		// upgrade response.  The transport MUST NOT be started until after the response
+		// has been sent to the client.
+		const { transport, response } = await upgradeCallback(this, bidiParams);
 
-		// Store bidi state in context
-		this.bidiState = {
-			wsTransport,
-			bidiChannel,
-		};
-
-		// Relay: forward 'bidi-frame' from WS bidi channel → req-N 'bidi-frame'
-		// dechunk: false — bidi-frame carries NestedTransport byte-stream chunks
-		// eom: false on write — NestedTransport chunks are not application messages
-		(async () => {
-			while (true) {
-				const msg = await bidiChannel.read({ only: 'bidi-frame', dechunk: false });
-				if (!msg) break;
-				await msg.process(async () => {
-					if (this.state !== RequestState.COMPLETED && this.reqChannel) {
-						await this.reqChannel.write('bidi-frame', msg.data, { eom: false });
-					}
-				});
-			}
-		})();
-
-		// Handle transport stop (WebSocket close)
-		wsTransport.addEventListener('stopped', async () => {
-			operator.logger.debug(`Bidi connection ${requestId} WebSocket transport stopped`);
+		// Handle transport stop — register before start so no events are missed.
+		transport.addEventListener('stopped', async () => {
+			operator.logger.debug(`Bidi connection ${requestId} transport stopped`);
 			this.state = RequestState.COMPLETED;
 
 			// Release the req-N channel now that the bidi connection is fully closed
@@ -209,12 +196,47 @@ export class RequestContext {
 			operator.cleanupRequestContext(requestId);
 		});
 
-		// Resolve the response promise with the WebSocket upgrade response
+		// Resolve the response promise with the protocol upgrade response.
+		// This sends the upgrade response (e.g. HTTP 101) to the client, which is
+		// required before the transport handshake can proceed.
 		this.responsePromise.resolve(response);
+
+		// Now that the upgrade response has been queued for delivery, start the
+		// transport so it can complete the protocol handshake and begin I/O.
+		await transport.start();
+
+		// Get the pre-designated bidi channel and register the bidi-frame message type
+		const bidiChannel = await transport.requestChannel('bidi');
+		await bidiChannel.addMessageTypes(['bidi-frame']);
+
+		// Store bidi state in context
+		this.bidiState = {
+			transport,
+			bidiChannel,
+		};
+		bidiStarting.resolve();
+
+		// Relay: forward 'bidi-frame' from bidi channel → req-N 'bidi-frame'
+		// dechunk: false — bidi-frame carries NestedTransport byte-stream chunks
+		// eom: false on write — NestedTransport chunks are not application messages
+		(async () => {
+			// console.log('*** initBidiCon (opr client -> app) bidi-relay ready');
+			while (true) {
+				const msg = await bidiChannel.read({ only: 'bidi-frame', dechunk: false });
+				if (!msg) break;
+				await msg.process(async () => {
+					if (this.state !== RequestState.COMPLETED && this.reqChannel) {
+						// console.log('*** Opr Cli->App bidi relay', msg.dataSize);
+						await this.reqChannel.write('bidi-frame', msg.data, { eom: false });
+					}
+					// else console.log('*** Opr Cli->App discarding message', this.state, this.reqChannel);
+				});
+			}
+		})();
 	}
 
 	/**
-	 * Process incoming messages on a req-N channel for this request.
+	 * Process response-related messages on a req-N channel for this request.
 	 * Handles 'res', 'res-error', 'res-frame', 'bidi-frame', and 'con-*' messages.
 	 *
 	 * @param {object} reqChannel - The req-N channel from the RequestChannelPool
@@ -295,6 +317,7 @@ export class RequestContext {
 		// Loop 3: bidi-frame relay (dechunk: false — forward chunks verbatim)
 		// Only active for bidi requests; runs concurrently with loops 1 and 2.
 		(async () => {
+			// console.log('*** prcReqChMsg (opr app -> client) bidi-relay ready');
 			while (true) {
 				const msg = await reqChannel.read({ only: 'bidi-frame', dechunk: false });
 				if (!msg) break;
@@ -302,6 +325,7 @@ export class RequestContext {
 					if (this.state === RequestState.BIDI_ACTIVE) {
 						await this.relayBidiFrame(msg.data);
 					}
+					// else console.log('*** Opr App->Cli discarding message');
 				});
 			}
 		})();
@@ -406,11 +430,18 @@ export class RequestContext {
 	 * @param {VirtualBuffer|Uint8Array|undefined} data - Frame data
 	 */
 	async relayBidiFrame (data) {
-		// Forward to WebSocket bidi channel
+		// Forward to WebSocket bidi channel (when ready)
+		const starting = this.bidiState?.bidiStarting;
+		if (starting) await starting.promise;
 		if (data && this.state !== RequestState.COMPLETED) {
 			if (this.bidiState?.bidiChannel) {
+				// console.log('*** Opr App->Cli bidi relay', data.length);
 				await this.bidiState.bidiChannel.write('bidi-frame', data, { eom: false });
+			// } else {
+				// console.log('### Opr App->Cli NO BIDI CHANNEL');
 			}
+		// } else {
+			// console.log('### Opr App->Cli BIDI COMPLETED');
 		}
 	}
 }

@@ -37,7 +37,8 @@ class ResponderProcess extends ServiceProcess {
 		this.poolName = poolName;
 
 		// Track active requests and workers
-		this.activeRequests = new Map(); // requestId -> { worker, transport, timeout, isStreaming }
+		this.activeRequests = new Map(); // requestId -> { worker, transport, reqChannel, timeout, isStreaming }
+		this.channelMap = new Map(); // channel -> requestId
 		this.requestCount = 0;
 		this.maxConcurrentRequests = 10; // Will be set from pool config
 
@@ -135,6 +136,7 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleReqChannel (reqChannel) {
 		await reqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
+		let requestId = null; // Unknown until channel is assigned
 
 		// Loop 1: 'req' messages (dechunked by default — full message reassembly)
 		// 'req' payload is JSON text; decode via VirtualBuffer.decode()
@@ -142,8 +144,9 @@ class ResponderProcess extends ServiceProcess {
 			while (true) {
 				const msg = await reqChannel.read({ only: 'req' });
 				if (!msg) break;
+				requestId ??= this.channelMap.get(reqChannel);
 				await msg.process(async () => {
-					await this.#handleWebRequest(reqChannel, msg.data.decode());
+					await this.#onWebRequest(reqChannel, msg.data.decode());
 				});
 			}
 		})();
@@ -152,11 +155,14 @@ class ResponderProcess extends ServiceProcess {
 		// bidi-frame carries NestedTransport byte-stream traffic; chunks must not be
 		// reassembled before forwarding to the applet's bidi channel.
 		(async () => {
+			// console.log('*** hndReqCh (res client -> app) bidi-relay ready');
 			while (true) {
 				const msg = await reqChannel.read({ only: 'bidi-frame', dechunk: false });
 				if (!msg) break;
+				// console.log('*** Res Cli->App bidi relay', msg.dataSize);
+				requestId ??= this.channelMap.get(reqChannel);
 				await msg.process(async () => {
-					await this.#handleOperatorBidiFrame(reqChannel, msg.data);
+					await this.#onOperatorBidiFrame(requestId, msg.data);
 				});
 			}
 		})();
@@ -220,69 +226,24 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Log startup information after configuration is loaded.
-	 */
-	async onStarted () {
-		console.log(`[${this.processId}] Pool: ${this.poolName}, max concurrent: ${this.maxConcurrentRequests}`);
-	}
-
-	/**
-	 * Handle inbound bidi-frame from operator (client → applet).
-	 * Forwards to the applet's bidi channel.
-	 * @param {object} reqChannel - The req-N channel the frame arrived on
-	 * @param {Uint8Array|undefined} frameData - Frame data
-	 */
-	async #handleOperatorBidiFrame (reqChannel, frameData) {
-		// Find the active request associated with this req-N channel
-		// We look up by reqChannel reference
-		let requestInfo = null;
-		for (const info of this.activeRequests.values()) {
-			if (info.reqChannel === reqChannel) {
-				requestInfo = info;
-				break;
-			}
-		}
-
-		if (!requestInfo) {
-			console.debug(`[${this.processId}] Bidi frame for unknown/closed request on ${reqChannel.name}`);
-			return;
-		}
-
-		const { appletBidiChannel } = requestInfo;
-		if (!appletBidiChannel) {
-			console.warn(`[${this.processId}] Bidi frame for non-bidi request on ${reqChannel.name}`);
-			return;
-		}
-
-		// Forward to applet's bidi channel (dechunk: false relay)
-		await appletBidiChannel.write('bidi-frame', frameData, { eom: false });
-	}
-
-	/**
-	 * General worker-termination handler.
-	 * Attached to the applet PostMessageTransport 'stopped' event.
-	 * Sends a 503 error response if no response was started, then removes
-	 * the request from activeRequests.
-	 *
-	 * This is the single, authoritative cleanup path for all cases where an
-	 * applet transport stops (graceful completion, timeout abort, shutdown
-	 * hard-terminate, or unexpected worker exit).
-	 *
+	 * Handle error response ('res-error' message) from applet.
 	 * @param {string|number} id - Request ID
+	 * @param {string} errorJson - JSON-encoded error
+	 * @param {object} requestInfo - Active request info
 	 */
-	#handleAppletTransportStopped (id) {
-		const requestInfo = this.activeRequests.get(id);
-		if (!requestInfo) return; // Already cleaned up
-
-		// Clear all timers (request, idle, connection timeouts)
-		clearTimeout(requestInfo.timeout);
-		clearTimeout(requestInfo.idleTimeout);
-		clearTimeout(requestInfo.connectionTimeout);
-
-		if (!requestInfo.responseStarted) {
-			this.#sendErrorResponse(requestInfo.reqChannel, id, 503, 'Service Unavailable').catch(() => {});
+	async #onAppletResError (id, errorJson, requestInfo) {
+		let errorData;
+		try {
+			errorData = JSON.parse(errorJson);
+		} catch (_) {
+			errorData = { error: errorJson };
 		}
-		this.activeRequests.delete(id);
+		console.error(`[${this.processId}] Applet error for request ${id}:`, errorData.error);
+		if (errorData.stack) console.error(errorData.stack);
+
+		// Send error first (sets responseStarted), then abort the worker.
+		await this.#sendErrorResponse(requestInfo.reqChannel, id, 500, 'Internal Server Error');
+		this.cleanupRequest(id);
 	}
 
 	/**
@@ -292,7 +253,7 @@ class ResponderProcess extends ServiceProcess {
 	 * @param {string} resJson - JSON-encoded response metadata
 	 * @param {object} requestInfo - Active request info
 	 */
-	async #handleAppletResponseMetadata (id, resJson, requestInfo) {
+	async #onAppletResMeta (id, resJson, requestInfo) {
 		const { status, headers, mode, keepAlive } = JSON.parse(resJson);
 
 		console.debug(`[${this.processId}] Response metadata: status=${status}, mode=${mode}, keepAlive=${keepAlive}`);
@@ -313,14 +274,13 @@ class ResponderProcess extends ServiceProcess {
 			return;
 		}
 
-		// Enforce policy: status 101 (bidi upgrade) must not have data
 		if (status === 101) {
 			// Bidi upgrade — initialize bidi connection
 			requestInfo.mode = 'bidi';
 			requestInfo.keepAlive = true;
 		} else {
 			requestInfo.mode = mode || 'response';
-			requestInfo.keepAlive = keepAlive !== undefined ? keepAlive : false;
+			requestInfo.keepAlive = keepAlive ?? false;
 		}
 
 		// Start connection timeout for long-lived connections
@@ -350,24 +310,65 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Handle error response ('res-error' message) from applet.
+	 * General worker-termination handler.
+	 * Attached to the applet PostMessageTransport 'stopped' event.
+	 * Sends a 503 error response if no response was started, then removes
+	 * the request from activeRequests.
+	 *
+	 * This is the single, authoritative cleanup path for all cases where an
+	 * applet transport stops (graceful completion, timeout abort, shutdown
+	 * hard-terminate, or unexpected worker exit).
+	 *
 	 * @param {string|number} id - Request ID
-	 * @param {string} errorJson - JSON-encoded error
-	 * @param {object} requestInfo - Active request info
 	 */
-	async #handleAppletResError (id, errorJson, requestInfo) {
-		let errorData;
-		try {
-			errorData = JSON.parse(errorJson);
-		} catch (_) {
-			errorData = { error: errorJson };
-		}
-		console.error(`[${this.processId}] Applet error for request ${id}:`, errorData.error);
-		if (errorData.stack) console.error(errorData.stack);
+	#onAppletTransportStopped (id) {
+		const requestInfo = this.activeRequests.get(id);
+		if (!requestInfo) return; // Already cleaned up
+		const { timeout, idleTimeout, connectionTimeout, appletChannel, reqChannel, responseStarted } = requestInfo;
 
-		// Send error first (sets responseStarted), then abort the worker.
-		await this.#sendErrorResponse(requestInfo.reqChannel, id, 500, 'Internal Server Error');
-		this.cleanupRequest(id);
+		// Clear all timers (request, idle, connection timeouts)
+		clearTimeout(timeout);
+		clearTimeout(idleTimeout);
+		clearTimeout(connectionTimeout);
+
+		if (!responseStarted) {
+			this.#sendErrorResponse(reqChannel, id, 503, 'Service Unavailable').catch(() => {});
+		}
+
+		this.channelMap.delete(appletChannel);
+		this.channelMap.delete(reqChannel);
+		this.activeRequests.delete(id);
+	}
+
+	/**
+	 * Handle inbound bidi-frame from operator (client → applet).
+	 * Forwards to the applet's bidi channel.
+	 * @param {object} reqChannel - The req-N channel the frame arrived on
+	 * @param {Uint8Array|undefined} frameData - Frame data
+	 */
+	async #onOperatorBidiFrame (requestId, frameData) {
+		const requestInfo = this.activeRequests.get(requestId);
+
+		if (!requestInfo) {
+			console.debug(`[${this.processId}] Bidi frame for unknown/closed request ${requestId}`);
+			return;
+		}
+
+		const { appletChannel, mode } = requestInfo;
+		if (mode !== 'bidi') {
+			console.warn(`[${this.processId}] Bidi frame for non-bidi request ${requestId}`);
+			return;
+		}
+
+		// Forward to applet's bidi channel (dechunk: false relay)
+		await appletChannel.write('bidi-frame', frameData, { eom: false });
+	}
+
+	/**
+	 * Log startup information after configuration is loaded.
+	 */
+	async onStarted () {
+		console.log(`[${this.processId}] Pool: ${this.poolName}, max concurrent: ${this.maxConcurrentRequests}`);
 	}
 
 	/**
@@ -375,7 +376,7 @@ class ResponderProcess extends ServiceProcess {
 	 * @param {object} reqChannel - The req-N channel the request arrived on
 	 * @param {string} requestJson - JSON-encoded request
 	 */
-	async #handleWebRequest (reqChannel, requestJson) {
+	async #onWebRequest (reqChannel, requestJson) {
 		let requestData;
 		try {
 			requestData = JSON.parse(requestJson);
@@ -409,7 +410,7 @@ class ResponderProcess extends ServiceProcess {
 			const mode = (upgradeHeader?.toLowerCase() === 'websocket') ? 'bidi' : 'response';
 
 			// Spawn applet worker and establish PostMessageTransport
-			const { worker, transport, c2cChannel, appletChannel, appletBidiChannel } =
+			const { worker, transport, c2cChannel, appletChannel } =
 				await this.#spawnAppletWorker(app, mode);
 
 			// Set up request timeout: send error first (sets responseStarted), then abort.
@@ -423,23 +424,24 @@ class ResponderProcess extends ServiceProcess {
 
 			// Track active request
 			this.activeRequests.set(id, {
-				reqChannel,
-				worker,
-				transport,
 				appletChannel,
-				appletBidiChannel,
-				timeout,
 				isStreaming: false,
-				responseStarted: false,
-				timeouts: { reqTimeout, idleTimeout, conTimeout },
-				routeSpec,
 				mode,
+				reqChannel,
+				responseStarted: false,
+				timeout,
+				timeouts: { reqTimeout, idleTimeout, conTimeout },
+				transport,
+				routeSpec,
+				worker,
 			});
+			this.channelMap.set(appletChannel, id);
+			this.channelMap.set(reqChannel, id);
 
 			// Register the general worker-termination handler on the applet transport.
 			// This is the single authoritative path for 503 + state cleanup when the
 			// transport stops for any reason (graceful, disconnected, or shutdown).
-			transport.addEventListener('stopped', () => this.#handleAppletTransportStopped(id));
+			transport.addEventListener('stopped', () => this.#onAppletTransportStopped(id));
 
 			// Forward applet C2C console output to operator via the req-N channel
 			// (con-* message types, not the C2C channel — associates output with the request)
@@ -487,8 +489,7 @@ class ResponderProcess extends ServiceProcess {
 			// Send request to applet via the 'applet' channel
 			await appletChannel.write('req', JSON.stringify(requestPayload));
 
-			// Start reading response from applet
-			this.#startAppletResponseReading(id, appletChannel, appletBidiChannel);
+			this.#processAppletResponse(id, appletChannel);
 
 		} catch (error) {
 			console.error(`[${this.processId}] Request handling error:`, error);
@@ -540,7 +541,7 @@ class ResponderProcess extends ServiceProcess {
 	 *
 	 * @param {string} appletPath - Applet path or built-in alias (e.g. '@static')
 	 * @param {string} mode - Request mode ('response', 'stream', 'bidi')
-	 * @returns {Promise<{ worker, transport, bootstrapChannel, appletChannel, appletBidiChannel }>}
+	 * @returns {Promise<{ worker, transport, bootstrapChannel, appletChannel }>}
 	 */
 	async #spawnAppletWorker (appletPath, mode) {
 		// Determine permissions based on applet path
@@ -606,16 +607,9 @@ class ResponderProcess extends ServiceProcess {
 
 		// Set up the applet communication channel
 		const appletChannel = await transport.requestChannel('applet');
-		await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+		await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
 
-		// For bidi requests: set up the bidi relay channel
-		let appletBidiChannel = null;
-		if (mode === 'bidi') {
-			appletBidiChannel = await transport.requestChannel('bidi');
-			await appletBidiChannel.addMessageTypes(['bidi-frame']);
-		}
-
-		return { worker, transport, c2cChannel, appletChannel, appletBidiChannel };
+		return { worker, transport, c2cChannel, appletChannel };
 	}
 
 	/**
@@ -639,27 +633,6 @@ class ResponderProcess extends ServiceProcess {
 					reqChannel.write(`con-${msg.messageType}`, text).catch((err) => {
 						console.warn(`[${this.processId}] Failed to forward con-${msg.messageType}:`, err);
 					});
-				});
-			}
-		})();
-	}
-
-	/**
-	 * Start relaying bidi-frame messages from the applet to the operator.
-	 * Runs concurrently with the response reading loops.
-	 * @param {string|number} id - Request ID
-	 * @param {object} appletBidiChannel - The 'bidi' channel from PostMessageTransport
-	 * @param {object} reqChannel - The req-N channel to forward to
-	 */
-	#startBidiRelayFromApplet (id, appletBidiChannel, reqChannel) {
-		(async () => {
-			while (true) {
-				const msg = await appletBidiChannel.read({ only: 'bidi-frame', dechunk: false });
-				if (!msg) break;
-				await msg.process(async () => {
-					if (!this.activeRequests.has(id)) return;
-					// Forward bidi-frame to operator via req-N channel
-					await reqChannel.write('bidi-frame', msg.data, { eom: false });
 				});
 			}
 		})();
@@ -703,12 +676,11 @@ class ResponderProcess extends ServiceProcess {
 	 * and relay to the operator via req-N channel.
 	 * @param {string|number} id - Request ID
 	 * @param {object} appletChannel - The 'applet' channel from PostMessageTransport
-	 * @param {object|null} appletBidiChannel - The 'bidi' channel (bidi mode only)
 	 */
-	#startAppletResponseReading (id, appletChannel, appletBidiChannel) {
+	#processAppletResponse (id, appletChannel) {
 		const requestInfo = this.activeRequests.get(id);
 		if (!requestInfo) return;
-		const { reqChannel } = requestInfo;
+		const { reqChannel, mode } = requestInfo;
 
 		// Loop 1: response metadata (dechunked — each read() returns one complete message)
 		// 'res' carries HTTP response status + headers (sent once, before any res-frame chunks)
@@ -722,10 +694,10 @@ class ResponderProcess extends ServiceProcess {
 					if (!info) return;
 					switch (msg.messageType) {
 					case 'res':
-						await this.#handleAppletResponseMetadata(id, msg.text, info);
+						await this.#onAppletResMeta(id, msg.text, info);
 						break;
 					case 'res-error':
-						await this.#handleAppletResError(id, msg.text, info);
+						await this.#onAppletResError(id, msg.text, info);
 						break;
 					}
 				});
@@ -759,10 +731,19 @@ class ResponderProcess extends ServiceProcess {
 			}
 		})();
 
-		// Loop 3: bidi relay (bidi mode only, dechunk: false)
-		if (appletBidiChannel) {
-			this.#startBidiRelayFromApplet(id, appletBidiChannel, reqChannel);
-		}
+		// Loop 3: bidi relay
+		(async () => {
+			// if (mode === 'bidi') console.log('*** pAR (res app->cli) bidi relay ready');
+			while (true) {
+				const msg = await appletChannel.read({ only: 'bidi-frame', dechunk: false });
+				if (!msg) break;
+				await msg.process(async () => {
+					// console.log('*** Res App->Cli bidi relay', msg.dataSize);
+					// Forward bidi-frame to operator via req-N channel
+					await reqChannel.write('bidi-frame', msg.data, { eom: false });
+				});
+			}
+		})();
 	}
 }
 
