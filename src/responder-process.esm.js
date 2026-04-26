@@ -136,7 +136,6 @@ class ResponderProcess extends ServiceProcess {
 	 */
 	async handleReqChannel (reqChannel) {
 		await reqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
-		let requestId = null; // Unknown until channel is assigned
 
 		// Loop 1: 'req' messages (dechunked by default — full message reassembly)
 		// 'req' payload is JSON text; decode via VirtualBuffer.decode()
@@ -144,7 +143,6 @@ class ResponderProcess extends ServiceProcess {
 			while (true) {
 				const msg = await reqChannel.read({ only: 'req' });
 				if (!msg) break;
-				requestId ??= this.channelMap.get(reqChannel);
 				await msg.process(async () => {
 					await this.#onWebRequest(reqChannel, msg.data.decode());
 				});
@@ -156,6 +154,7 @@ class ResponderProcess extends ServiceProcess {
 		// reassembled before forwarding to the applet's bidi channel.
 		(async () => {
 			// console.log('*** hndReqCh (res client -> app) bidi-relay ready');
+			let requestId = null; // Unknown until channel is assigned
 			while (true) {
 				const msg = await reqChannel.read({ only: 'bidi-frame', dechunk: false });
 				if (!msg) break;
@@ -335,7 +334,6 @@ class ResponderProcess extends ServiceProcess {
 			this.#sendErrorResponse(reqChannel, id, 503, 'Service Unavailable').catch(() => {});
 		}
 
-		this.channelMap.delete(appletChannel);
 		this.channelMap.delete(reqChannel);
 		this.activeRequests.delete(id);
 	}
@@ -435,7 +433,6 @@ class ResponderProcess extends ServiceProcess {
 				routeSpec,
 				worker,
 			});
-			this.channelMap.set(appletChannel, id);
 			this.channelMap.set(reqChannel, id);
 
 			// Register the general worker-termination handler on the applet transport.
