@@ -409,7 +409,7 @@ export class RequestContext {
 
 		// Check for end-of-stream (null/undefined data + eom:true)
 		if (data == null && eom) {
-			this.streamController?.close();
+			try { this.streamController?.close(); } catch (_) {}
 			this.state = RequestState.COMPLETED;
 			this.operator.logger.debug(`[${this.requestId}] was STREAMING_RESPONSE now COMPLETED`);
 

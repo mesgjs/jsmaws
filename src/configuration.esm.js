@@ -347,18 +347,6 @@ export class Configuration {
 	}
 
 	/**
-	 * Serialize configuration to SLID format
-	 * @returns {string} SLID-formatted configuration string
-	 */
-	toSLID () {
-		// Convert plain object back to NANOS for SLID serialization
-		const nanos = new NANOS();
-		nanos.setOpts({ transform: true });
-		nanos.push(this.config);
-		return nanos.toSLID();
-	}
-
-	/**
 	 * Update configuration (invalidates all caches).
 	 * Applies default pool configuration when no pools are defined in the config.
 	 * An explicitly empty pools object ({}) is respected as-is (no pools configured).
