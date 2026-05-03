@@ -1,7 +1,7 @@
 # JSMAWS Authentication and Authorization API Design
 
-**Status:** [DRAFT]
-**Date:** 2026-04-27
+**Status:** [APPROVED]  
+**Date:** 2026-04-27  
 **Updated:** 2026-04-28
 
 ---
@@ -24,7 +24,7 @@ Without these, every applet must implement its own auth logic, leading to duplic
 2. **Composable**: Multiple providers can be chained (e.g., JWT check → role check → rate limit).
 3. **Transparent to applets**: Applets receive a clean, normalized identity object; they don't need to parse tokens or cookies themselves.
 4. **Operator-side enforcement**: Auth decisions happen in the operator or responder *before* the applet is spawned, so a rejected request never reaches untrusted code.
-5. **Header/cookie filtering**: Inbound and outbound header/cookie filtering is a first-class concern, not an afterthought.
+5. **Header/cookie filtering**: Inbound request and outbound response header/cookie filtering is a first-class concern, not an afterthought.
 6. **Mesgjs-compatible**: The API should be expressible in Mesgjs message-passing style as well as plain JavaScript.
 
 ---
@@ -96,7 +96,7 @@ Auth providers frequently benefit from caching:
 - **API key lookup**: The set of valid keys is loaded from config/environment and cached in memory.
 - **Session store**: Session data may be cached in memory to reduce backend lookups.
 
-**With responder-side auth (current recommendation):**
+**With responder-side auth (original recommendation):**
 
 - Each of the N responder processes maintains its own independent cache.
 - When a responder is recycled (after `maxReqs` requests), its entire cache is discarded. The replacement responder starts cold.
@@ -266,27 +266,27 @@ export default {
      * @param {AuthContext} ctx - Request context (headers, cookies, route, pool)
      * @returns {AuthResult} - { identity, allow, denyStatus, denyMessage, addHeaders }
      */
-    async check (ctx) { ... },
+    async authCheck (ctx) { ... },
 
     /**
-     * Optional: filter inbound headers/cookies before forwarding to applet.
-     * Called after a successful check().
+     * Optional: filter request headers/cookies before forwarding to applet.
+     * Called after a successful authCheck().
      *
-     * @param {object} headers - Raw inbound headers
-     * @param {AuthResult} result - Result from check()
+     * @param {object} headers - Raw request headers
+     * @param {AuthResult} result - Result from authCheck()
      * @returns {object} - Filtered headers to forward to applet
      */
-    filterInbound (headers, result) { ... },
+    filterRequest (headers, result) { ... },
 
     /**
-     * Optional: filter outbound headers/cookies before sending to client.
+     * Optional: filter outbound response headers/cookies before sending to client.
      * Called after the applet produces a response.
      *
      * @param {object} headers - Applet-produced response headers
-     * @param {AuthResult} result - Result from check()
+     * @param {AuthResult} result - Result from authCheck()
      * @returns {object} - Filtered headers to send to client
      */
-    filterOutbound (headers, result) { ... },
+    filterResponse (headers, result) { ... },
 };
 ```
 
@@ -296,7 +296,7 @@ export default {
 {
     method: 'GET',                    // HTTP method
     url: 'https://example.com/api/x', // Full URL
-    headers: { ... },                 // Raw inbound headers (plain object)
+    headers: { ... },                 // Raw request headers (plain object)
     cookies: { name: value, ... },    // Parsed cookies (plain object)
     routeSpec: { ... },               // Matched route specification
     poolName: 'standard',             // Pool name
@@ -343,10 +343,8 @@ Auth providers are configured per-route or per-pool in `jsmaws.slid`. The respon
         [provider=./auth/jwt-provider.esm.js  secret=:env:JWT_SECRET  roles=[user admin]]
         [provider=./auth/rate-limit.esm.js    limit=100  window=60]
       ]
-      headerFilter=[
-        inbound=[allow=[authorization x-request-id content-type]]
-        outbound=[deny=[set-cookie x-internal-token]]
-      ]
+      requestFilter=[allowHeaders=[authorization x-request-id content-type]]
+      responseFilter=[denyHeaders=[set-cookie x-internal-token]]
     ]
     [
       path=/public/:*
@@ -362,17 +360,17 @@ Auth providers are configured per-route or per-pool in `jsmaws.slid`. The respon
 1. Operator routes request to responder (unchanged)
 2. Responder reads `routeSpec.auth` from the request metadata
 3. Responder loads each auth provider module (cached after first load)
-4. Responder calls `provider.check(ctx)` in order; first denial short-circuits
-5. On success: responder applies `filterInbound()` to headers, then spawns applet with filtered headers + identity
+4. Responder calls `provider.authCheck(ctx)` in order; first denial short-circuits
+5. On success: responder applies `filterRequest()` to headers, then spawns applet with filtered headers + identity
 6. On denial: responder returns the configured `denyStatus` response without spawning applet
-7. After applet responds: responder applies `filterOutbound()` to response headers
+7. After applet responds: responder applies `filterResponse()` to response headers
 
 **Applet receives:**
 
 ```javascript
 // In requestData (via JSMAWS.server 'req' message):
 {
-    method, url, headers,   // Filtered inbound headers
+    method, url, headers,   // Filtered request headers
     routeParams, routeTail,
     body,
     identity: {             // NEW: populated by auth provider
@@ -528,49 +526,53 @@ Auth logic runs directly in the operator process for stateless auth methods (JWT
 
 Header/cookie filtering is a first-class concern, independent of auth. It should be configurable at the route level.
 
-### Inbound Filtering (Client → Applet)
+The filter configuration is organized by direction (`requestFilter` / `responseFilter`), with header and cookie rules grouped together within each direction block.
+
+Header filtering is case-*insensitive*. Cookie filtering is case-*sensitive*.
+
+### Inbound Request Filtering (Client → Applet)
 
 Controls which headers/cookies the applet can see:
 
 ```slid
-headerFilter=[
-  inbound=[
-    /* Allowlist: only these headers reach the applet */
-    allow=[authorization content-type content-length accept x-request-id]
-    /* OR denylist: all headers except these reach the applet */
-    /* deny=[cookie set-cookie x-internal-*] */
-  ]
-]
-cookieFilter=[
-  inbound=[
-    allow=[session_id csrf_token]
-    /* OR deny=[internal_*] */
-  ]
+requestFilter=[
+  /* Allowlist: only these headers reach the applet */
+  allowHeaders=[authorization content-type content-length accept x-request-id]
+  /* OR denylist: all headers except these reach the applet */
+  /* denyHeaders=[x-internal-*] */
+
+  /* Cookie allowlist: only these cookies reach the applet */
+  allowCookies=[session_id csrf_token]
+  /* OR cookie denylist */
+  /* denyCookies=[internal_*] */
 ]
 ```
 
-### Outbound Filtering (Applet → Client)
+### Outbound Response Filtering (Applet → Client)
 
 Controls which headers/cookies the applet can set in the response:
 
 ```slid
-headerFilter=[
-  outbound=[
-    /* Deny: applets cannot set these headers */
-    deny=[set-cookie x-internal-* server x-powered-by]
-    /* Operator adds its own server header after filtering */
-  ]
+responseFilter=[
+  /* Deny: applets cannot set these headers */
+  denyHeaders=[set-cookie x-internal-* server x-powered-by]
+  /* Operator adds its own server header after filtering */
+
+  /* Deny: applets cannot set these cookies */
+  denyCookies=[internal_*]
 ]
 ```
 
 ### Filter Modes
 
-| Mode | Behavior |
-|------|----------|
-| `allow=[...]` | Allowlist: only listed headers pass through |
-| `deny=[...]` | Denylist: all headers except listed ones pass through |
-| `allow` + `deny` | Allowlist takes precedence; deny further restricts |
-| (none) | Pass all headers (default, backward compatible) |
+| Field | Behavior |
+|-------|----------|
+| `allowHeaders=[...]` | Allowlist: only listed headers pass through |
+| `denyHeaders=[...]` | Denylist: all headers except listed ones pass through |
+| `allowCookies=[...]` | Allowlist: only listed cookies pass through |
+| `denyCookies=[...]` | Denylist: all cookies except listed ones pass through |
+| `allow*` + `deny*` | Allowlist takes precedence; deny further restricts |
+| (none) | Pass all headers/cookies (default, backward compatible) |
 
 Patterns support simple wildcards: `x-internal-*` matches `x-internal-foo`, `x-internal-bar`, etc.
 
@@ -585,7 +587,7 @@ After successful auth, the identity is injected into the request payload sent to
 {
     method: 'GET',
     url: 'https://example.com/api/users',
-    headers: { /* filtered inbound headers */ },
+    headers: { /* filtered inbound request headers */ },
     routeParams: { ... },
     routeTail: '',
     body: null,
@@ -690,14 +692,15 @@ The implementation plan reflects the revised architecture. Option A (responder-s
    - Handles errors from providers (treat as 500)
 
 3. **Header/cookie filter** in `src/header-filter.esm.js`
-   - Applies inbound/outbound filter rules
-   - Supports allowlist, denylist, and wildcard patterns
+    - Applies `requestFilter` / `responseFilter` rules
+    - Supports `allowHeaders`, `denyHeaders`, `allowCookies`, `denyCookies` fields
+    - Supports allowlist, denylist, and wildcard patterns
 
 4. **Integration in `src/responder-process.esm.js`**
    - Call auth middleware before spawning applet worker
    - Inject identity into request payload
-   - Apply inbound header filter before forwarding to applet
-   - Apply outbound header filter after applet responds
+   - Apply inbound request header filter before forwarding to applet
+   - Apply outbound response header filter after applet responds
 
 ### Phase 2: Built-in Providers
 
@@ -780,16 +783,16 @@ Implement the auth service process for network-dependent auth:
         [check=require-header  header=authorization]
       ]
 
-      /* Header filtering */
-      headerFilter=[
-        inbound=[allow=[authorization content-type content-length accept x-request-id]]
-        outbound=[deny=[x-internal-* server]]
+      /* Request filtering (inbound: client → applet) */
+      requestFilter=[
+        allowHeaders=[authorization content-type content-length accept x-request-id]
+        allowCookies=[session_id csrf_token]
       ]
 
-      /* Cookie filtering */
-      cookieFilter=[
-        inbound=[allow=[session_id csrf_token]]
-        outbound=[deny=[internal_*]]
+      /* Response filtering (outbound: applet → client) */
+      responseFilter=[
+        denyHeaders=[x-internal-* server]
+        denyCookies=[internal_*]
       ]
     ]
   ]
@@ -803,7 +806,7 @@ Implement the auth service process for network-dependent auth:
 - **Auth provider privilege depends on option**: Option A (responder-side) and Option C (auth service process) run auth code unprivileged. Option D (operator-embedded) runs auth code in the privileged operator process — only trusted, audited providers should be used there.
 - **Provider modules must be trusted** — they are loaded from the filesystem and run with the permissions of the process that loads them. Administrators should audit provider code.
 - **Secrets should not appear in config files** — use `:env:VAR_NAME` to load from environment variables.
-- **Header filtering prevents header injection** — applets cannot forge headers that were filtered out inbound, and cannot set headers that are filtered outbound.
+- **Header filtering prevents header injection** — applets cannot forge request headers that were filtered out inbound, and cannot set response headers that are filtered outbound.
 - **Identity is injected by the server** — applets cannot forge identity by sending a crafted `identity` field in the request body (the identity field is added by the operator or responder, not parsed from the request).
 - **Auth failures return minimal information** — denial responses should not leak information about why the request was denied (e.g., "Unauthorized" not "Token expired").
 - **Operator auth cache security**: The operator auth cache (Options C and D) must not be poisonable. Cache keys must be the full credential string (not a truncated or hashed version that could collide). Cache entries must respect TTL strictly.
@@ -812,16 +815,26 @@ Implement the auth service process for network-dependent auth:
 
 ## 12. Open Questions
 
-1. **Should auth providers be allowed to modify the request body?** (e.g., decrypt an encrypted body before forwarding to applet) — Probably yes, but needs careful design.
+1. **Should auth providers be allowed to modify the request body?** (e.g., decrypt an encrypted body before forwarding to applet).
+   - **Resolved** NO. DEFINITELY NOT.
 2. **Should auth results be cached?** (e.g., cache JWT verification results for the token's lifetime) — Yes, but cache invalidation is complex. Propose opt-in caching per provider.
-3. **Should the operator pre-flight be mandatory or optional?** — Optional; most deployments won't need it.
-4. **How should auth errors be logged?** — Auth failures should be logged at `warn` level with request ID and denial reason (but not the token/credential itself).
-5. **Should there be a way for applets to trigger re-authentication?** (e.g., return a 401 that causes the client to re-authenticate) — Applets can already return 401; no special server support needed.
+   - **Resolved** Yes, opt-in caching per provider is likely to be critical for adequate performance.
+3. **Should the operator pre-flight be mandatory or optional?**
+   - **Resolved** Optional; most deployments won't need it.
+4. **How should auth errors be logged?**
+   - **Resolved** Auth failures should be logged at `warn` level with request ID and denial reason (but not the token/credential itself).
+5. **Should there be a way for applets to trigger re-authentication?** (e.g., return a 401 that causes the client to re-authenticate)
+   - **Resolved** Applets can already return 401; no special server support needed.
 6. **Which option(s) should be implemented first?** — Option A (responder-side) is simplest and provides immediate value. Options C and D require more design work but are architecturally superior. Recommend implementing Option A first, then Option D (operator-embedded stateless auth), then Option C (auth service process).
-7. **Should the auth service process (Option C) use the same pool manager as responders?** — Yes, the generic pool manager should be reusable. The auth service pool would be a small, long-lived pool (similar to the router-process pool).
-8. **How should the operator cache auth results for Option C?** — Cache keyed by token/credential string, with TTL from the auth result. LRU eviction for memory management. Cache size configurable. Invalidation on config reload.
+   - **Resolved** Option D, then Option C
+7. **Should the auth service process (Option C) use the same pool manager as responders?**
+   - **Resolved** Yes, use the generic pool manager. The auth service pool would be a small, long-lived pool (similar to the router-process pool).
+8. **How should the operator cache auth results for Option C?**
+   - **Resolved** Cache keyed by token/credential string, with TTL from the auth result. LRU eviction for memory management. Cache size configurable. Invalidation on config reload.
 9. **Should role-based routing use a separate `routeCondition` field, or extend the existing `auth` field?** — A separate `routeCondition` field (evaluated after auth, before pool dispatch) would be cleaner and more composable than embedding role checks in the auth chain.
-10. **Should the auth service process be a single process or a pool?** — A pool is more resilient (one process failure doesn't block all auth). A small static pool (2–4 processes) is likely sufficient for most deployments.
+   - **Resolved** Defer for future development.
+10. **Should the auth service process be a single process or a pool?**
+    - **Resolved** A pool is more resilient (one process failure doesn't block all auth). A small static pool (2–4 processes) is likely sufficient for most deployments.
 
 ---
 

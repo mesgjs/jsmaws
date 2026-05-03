@@ -1,13 +1,13 @@
 # JSMAWS Environment and Secrets Injection Design
 
-**Status:** [DRAFT]  
+**Status:** [APPROVED]  
 **Date:** 2026-04-29  
 
 ---
 
 ## 1. Problem Statement
 
-Both the auth API design ([`arch/auth-api-design.md`](auth-api-design.md)) and the data access API design ([`arch/data-access-api-design.md`](data-access-api-design.md)) require a mechanism for supplying credentials, API keys, and other sensitive values to modules and applets. Previously (since updated), the `env:VAR_NAME` shorthand appeared informally in those documents (e.g., `secret=env:JWT_SECRET`, `password=env:DB_PASSWORD`) without a formal specification.
+Both the auth API design ([`arch/auth-api-design.md`](auth-api-design.md)) and the RPC API design ([`arch/rpc-api-design.md`](rpc-api-design.md)) require a mechanism for supplying credentials, API keys, and other sensitive values to modules and applets. Previously (since updated), the `env:VAR_NAME` shorthand appeared informally in those documents (e.g., `secret=env:JWT_SECRET`, `password=env:DB_PASSWORD`) without a formal specification.
 
 This document formalizes that pattern into a **general-purpose value-resolver system** with:
 
@@ -74,7 +74,7 @@ apiKey=:env:STRIPE_SECRET_KEY
 ```
 
 - Reads the named environment variable from the operator process's environment at startup (or on config reload).
-- If the variable is not set, the server logs a warning and the value is `undefined`.
+- If the variable is not set, the server logs a warning and the value is `undefined`. (Present, but empty, qualifies as "set".)
 - Variable names are case-sensitive on POSIX systems.
 
 ### 3.3 `:kv:` — Deno KV Store
@@ -89,7 +89,7 @@ secret=:kv.production:secrets/jwt-signing-key
 
 - Reads a value from the Deno KV store configured for the operator.
 - The key path uses `/` as a separator, which maps to a KV key array: `:kv:secrets/jwt-signing-key` → `['secrets', 'jwt-signing-key']`.
-- KV values are read at startup and cached. A `kv-reload` signal (or config reload) re-reads all KV-sourced values.
+- KV stores are opened at the start of each resolution pass and closed at the end (see §6.4). Values are re-read on every config reload.
 - Multiple KV stores can be configured using `kvStores` (see §7.1). The selector (`:kv.storeName:`) identifies which store to use; `:kv:` (no selector) uses the `default` store.
 
 ### 3.4 `:file:` — File Contents
@@ -101,7 +101,7 @@ certificate=:file:/etc/ssl/certs/my-cert.pem
 
 - Reads the entire contents of the specified file.
 - Relative paths are resolved relative to the `jsmaws.slid` configuration file's directory.
-- Files are read at startup and cached. A config reload re-reads all file-sourced values.
+- Files are read during each resolution pass. A config reload re-reads all file-sourced values.
 - Useful for Docker secrets (`/run/secrets/...`) and similar patterns.
 
 ### 3.5 `::` — Literal Value (Empty Scheme / Escape)
@@ -137,7 +137,7 @@ appEnv=[
 ```
 
 - The `:delete:` scheme removes a key from the merged `appEnv` result. The reference portion (after the second colon) is ignored and typically omitted.
-- Only meaningful in `appEnv` blocks. Using `:delete:` outside of `appEnv` (e.g., in `dataSources` or `auth`) is an error.
+- Only meaningful in `appEnv` blocks. Using `:delete:` outside of `appEnv` (e.g., in `services` or `auth`) is an error.
 - Allows a more-specific scope (pool or route) to suppress a value defined at a broader scope (global or pool), without injecting any value in its place.
 - Distinct from `::` (which injects an empty string) — `:delete:` causes the key to be absent from `globalThis.JSMAWS.env` entirely unless a more-specific value is provided.
 - **Wildcard reset**: The special key `*=:delete:` deletes **all** keys accumulated so far in the merge. It is always processed first within its scope block, regardless of its visual position. Keys defined in the same `appEnv` block (other than `*=:delete:` itself), or in more-specific scopes, are applied normally after the reset.
@@ -174,8 +174,7 @@ The responder process receives resolved values via IPC from the operator (as par
 | Event | Action |
 |-------|--------|
 | Server startup | All value references in the configuration are resolved |
-| Config file reload (SIGHUP or file change) | All value references are re-resolved |
-| `kv-reload` signal (future) | KV-sourced values are re-read |
+| Config file reload (SIGHUP or file change) | All value references are re-resolved (including KV and file sources) |
 
 ### 4.3 Resolution Errors
 
@@ -310,7 +309,7 @@ At request dispatch time, the responder assembles the `setupData` object sent to
 {
     appPath: '/var/www/apps/payments.esm.js',
     maxChunkSize: 65536,
-    dataSources: ['db', 'paymentApi'],
+    services: ['db', 'paymentApi'],
     appEnv: {
         appVersion: '2.3.1',
         publicApiUrl: 'https://api.example.com/v2',
@@ -365,42 +364,70 @@ The following constraints apply to applet-side injection:
 
 ### 6.1 Component: `ValueResolver`
 
-A new module `src/value-resolver.esm.js` implements the resolution logic:
+A new module `src/value-resolver.esm.js` implements the resolution logic. Scheme handlers are registered via a static method, allowing the set of supported schemes to be extended without modifying the core resolver. The `::`  (literal) and `:delete:` schemes are built directly into the resolver as mandatory core functionality.
 
 ```javascript
 // Conceptual interface
 class ValueResolver {
-    constructor (config) { ... }
-
     /**
-     * Resolve a single value reference.
-     * @param {string} ref - Value reference (e.g., ':env:JWT_SECRET', ':file:/run/secrets/key')
-     * @returns {Promise<string|undefined>} Resolved value, or undefined if not found
+     * Register a scheme handler class for one or more scheme names.
+     * May be called multiple times with the same class and different scheme names
+     * to support scheme aliasing (e.g., for backwards-compatibility).
+     * @param {string} schemeName - Scheme name (e.g., 'env', 'kv', 'file')
+     * @param {Function} SchemeClass - Class implementing async resolve(ref) and async done()
      */
-    async resolve (ref) { ... }
+    static registerScheme (schemeName, SchemeClass) { ... }
 
     /**
      * Resolve all value references in a plain object (recursively).
      * Strings matching ':scheme:reference' are replaced with resolved values.
      * Non-string values are passed through unchanged.
-     * @param {Object} obj - Object to resolve
+     * On the first encounter of a registered scheme during a resolution pass,
+     * a scheme-class instance is created (receiving the raw config) and cached
+     * for the duration of the pass. At the end of the pass, done() is called
+     * on each instantiated scheme handler.
+     * @param {Object|NANOS} rawConfig - Raw (unresolved) configuration object
+     * @param {Object} obj - Object to resolve (may be rawConfig itself or a sub-object)
      * @returns {Promise<Object>} New object with all references resolved
      */
-    async resolveObject (obj) { ... }
+    async resolveObject (rawConfig, obj) { ... }
+}
+```
+
+Scheme handler classes (other than the built-in `::` and `:delete:` handlers) implement:
+
+```javascript
+class ExampleScheme {
+    /**
+     * @param {Object} rawConfig - The entire raw configuration currently being resolved,
+     *   so the handler can extract any portion it needs (e.g., kvStores paths).
+     */
+    constructor (rawConfig) { ... }
 
     /**
-     * Reload all cached values (env vars re-read, files re-read, KV re-fetched).
+     * Resolve a single value reference.
+     * @param {string} ref - The full original value reference string
+     *   (e.g., ':env:JWT_SECRET', ':kv.production:secrets/key')
+     * @returns {Promise<string|undefined>} Resolved value, or undefined if not found
      */
-    async reload () { ... }
+    async resolve (ref) { ... }
+
+    /**
+     * Called at the end of a resolution pass for cleanup
+     * (e.g., close file handles, flush connections).
+     */
+    async done () { ... }
 }
 ```
 
 ### 6.2 Integration Points
 
+Value resolution is **async** (`resolveObject()` returns a `Promise`), while `Configuration.updateConfig()` is synchronous. Therefore, resolution must happen **before** the resolved config is passed to `Configuration`. The operator is responsible for this sequencing.
+
 | Integration Point | How Value Resolver Is Used |
 |---|---|
-| `src/configuration.esm.js` | `Configuration.updateConfig()` calls `valueResolver.resolveObject(rawConfig)` to produce a resolved config object; `getEffectiveAppEnv(routeSpec, poolName)` merges, resolves, and coerces `appEnv` blocks to string values |
-| `src/operator-process.esm.js` | Holds the `ValueResolver` instance; passes resolved config to responders via IPC |
+| `src/operator-process.esm.js` | Holds the `ValueResolver` instance; calls `await valueResolver.resolveObject(rawConfig, rawConfig)` to produce a resolved plain object; passes the resolved object to `config.updateConfig()` and to responders via IPC |
+| `src/configuration.esm.js` | `Configuration.updateConfig()` receives an already-resolved plain object; `getEffectiveAppEnv(routeSpec, poolName)` merges and coerces `appEnv` blocks (values are already resolved strings — no async needed) |
 | `src/responder-process.esm.js` | Receives already-resolved config from operator; calls `config.getEffectiveAppEnv()` when assembling `setupData` |
 | `src/applets/bootstrap.esm.js` | Reads `setupData.appEnv` and exposes as `globalThis.JSMAWS.env` |
 
@@ -414,17 +441,9 @@ Raw (unresolved) configuration is **not retained** after resolution. Config relo
 
 ### 6.4 KV Store Lifecycle
 
-The KV store (for `:kv:` references) is opened once by the operator at startup:
+KV stores (for `:kv:` references) are managed by the `KvScheme` handler class. On each resolution pass, `KvScheme` is instantiated with the raw configuration, which it uses to open the KV stores it needs. At the end of the pass, `KvScheme.done()` closes any KV stores it opened. This means KV stores are opened and closed per resolution pass (i.e., at startup and on each config reload), not held open for the lifetime of the operator process.
 
-```javascript
-// In operator-process.esm.js
-const kvStores = {};
-for (const [name, path] of Object.entries(this.config.kvStores ?? {})) {
-    kvStores[name] = await Deno.openKv(path);
-}
-```
-
-The `ValueResolver` holds references to the open KV stores and uses them for all `:kv:` and `:kv.selector:` resolutions. KV stores are closed when the operator shuts down.
+This approach avoids the lifecycle ambiguity of holding open KV store handles across config reloads (where the set of configured stores may have changed).
 
 ---
 
@@ -463,8 +482,8 @@ The `ValueResolver` holds references to the open KV stores and uses them for all
   /* Auth provider configuration (uses value references) */
   /* auth providers are configured per-route; see auth-api-design.md */
 
-  /* Data source configuration (uses value references) */
-  dataSources=[
+  /* Service configuration (uses value references) */
+  services=[
     db=[
       adapter=@postgres
       host=:env:DB_HOST
@@ -515,7 +534,7 @@ routes=[
   [
     path=/api/payments/:*
     pool=standard
-    dataSources=[db]
+    services=[db]
     auth=[[provider=@jwt  secret=:env:JWT_SECRET]]
     /* Route-level appEnv merges on top of pool and global appEnv */
     appEnv=[
@@ -527,7 +546,7 @@ routes=[
   [
     path=/api/users/:*
     pool=standard
-    dataSources=[db cache]
+    services=[db cache]
     /* Uses merged global + pool appEnv (no route-level override) */
   ]
   [
@@ -593,7 +612,7 @@ Under this proposal:
 The data access API uses value references for connection credentials:
 
 ```slid
-dataSources=[
+services=[
   db=[
     adapter=@postgres
     host=:env:DB_HOST
@@ -603,10 +622,10 @@ dataSources=[
 ```
 
 Under this proposal:
-- All value references in `dataSources` are resolved by the `ValueResolver` at startup.
+- All value references in `services` are resolved by the `ValueResolver` at startup.
 - The resolved configuration is passed to the adapter's `init()` call in the responder process.
 - Database passwords are **never** injected into applet workers.
-- Applets access data via the `JSMAWS.data` channel (IPC), not via direct database connections.
+- Applets access services via the `JSMAWS.rpc` channel (IPC), not via direct connections.
 
 ### 9.3 Separation of Concerns
 
@@ -641,49 +660,56 @@ Under this proposal:
 ### Phase 1: Value Resolver Core
 
 1. **`src/value-resolver.esm.js`** — `ValueResolver` class
-   - `resolve(ref)` — resolves a single value reference
-   - `resolveObject(obj)` — recursively resolves all string values in an object
-   - `reload()` — re-reads all cached values
-   - Support for `:env:`, `:file:`, `::` (literal/empty) schemes
-   - `:kv:` and `:kv.selector:` support (requires KV store references)
+   - `static registerScheme(schemeName, SchemeClass)` — registers a scheme name to a handler class; may be called multiple times with the same class for aliasing
+   - `async resolveObject(rawConfig, obj)` — recursively resolves all string values in `obj`; on first encounter of a scheme in a pass, instantiates the handler class (passing `rawConfig`) and caches it; calls `done()` on all instantiated handlers at end of pass
+   - `::` (literal/empty) and `:delete:` schemes are built directly into the resolver (no external class)
 
-2. **`src/configuration.esm.js`** — Integration
-   - `Configuration` constructor accepts a `ValueResolver` instance (optional; defaults to a no-op resolver for tests)
-   - `updateConfig()` calls `valueResolver.resolveObject()` on the raw config and stores only the resolved result
-   - `getEffectiveAppEnv(routeSpec, poolName)` — merges global, pool, and route `appEnv` blocks and returns the resolved env object for a request
+2. **`src/schemes/env-scheme.esm.js`** — `:env:` handler class
+   - Constructor reads no config (env vars are accessed directly from `Deno.env`)
+   - `async resolve(ref)` — reads the named OS environment variable; logs a warning and returns `undefined` if not set
+   - `async done()` — no-op
 
-3. **`src/operator-process.esm.js`** — Integration
-   - Creates `ValueResolver` at startup with KV store references
-   - Passes resolved config to responders (already the case; no protocol change needed)
+3. **`src/schemes/file-scheme.esm.js`** — `:file:` handler class
+   - Constructor extracts `configDir` from raw config (for relative path resolution)
+   - `async resolve(ref)` — reads and trims file contents; validates path (rejects `..` components); returns `undefined` on error
+   - `async done()` — no-op (files are read on demand, not held open)
+
+4. **`src/schemes/kv-scheme.esm.js`** — `:kv:` and `:kv.selector:` handler class
+   - Constructor opens KV stores from `rawConfig.kvStores` (normalizing `kvStore` alias)
+   - `async resolve(ref)` — reads from the appropriate KV store; returns `undefined` if key not found
+   - `async done()` — closes all KV stores opened by this instance
+
+5. **`src/schemes/index.esm.js`** — Barrel file
+   - Imports `ValueResolver` and all scheme classes
+   - Exports `registerValueSchemes()` function that calls `ValueResolver.registerScheme()` for each scheme class
+   - `registerValueSchemes()` is called once during JSMAWS initialization (in `src/operator.esm.js`)
+
+6. **`src/configuration.esm.js`** — Integration
+   - `Configuration` constructor and `updateConfig()` remain synchronous; they receive an already-resolved plain object
+   - `getEffectiveAppEnv(routeSpec, poolName)` — merges global, pool, and route `appEnv` blocks and coerces values to strings; synchronous (values are already resolved)
+
+7. **`src/operator-process.esm.js`** — Integration
+   - Creates `ValueResolver` at startup
+   - On startup and config reload: calls `await valueResolver.resolveObject(rawConfig, rawConfig)` to produce a resolved plain object, then passes it to `config.updateConfig()` and to responders via IPC
+   - `resolveObject()` handles NANOS input (or the operator converts NANOS to a plain object before passing)
 
 ### Phase 2: Applet Injection
 
-4. **`src/responder-process.esm.js`** — Injection into setupData
+8. **`src/responder-process.esm.js`** — Injection into setupData
    - Call `config.getEffectiveAppEnv(routeSpec, poolName)` when assembling `setupData`
    - Include result as `setupData.appEnv`
 
-5. **`src/applets/bootstrap.esm.js`** — Expose `JSMAWS.env`
+9. **`src/applets/bootstrap.esm.js`** — Expose `JSMAWS.env`
    - `jsmawsNamespace.env = Object.freeze(setupData.appEnv ?? {})`
 
-### Phase 3: KV Store Support
+### Phase 3: Tests and Documentation
 
-6. **`src/operator-process.esm.js`** — KV store lifecycle
-   - Open KV store(s) at startup if `config.kvStores` is set (or `config.kvStore` alias)
-   - Pass KV store references to `ValueResolver`
-   - Close KV stores on shutdown
-
-7. **`src/value-resolver.esm.js`** — `:kv:` and `:kv.selector:` scheme implementation
-   - `resolve(':kv:namespace/key')` → `kvStores.default.get(['namespace', 'key'])`
-   - `resolve(':kv.storeName:namespace/key')` → `kvStores.storeName.get(['namespace', 'key'])`
-
-### Phase 4: Tests and Documentation
-
-8. Unit tests for `ValueResolver` (all schemes)
-9. Unit tests for `Configuration.getEffectiveAppEnv()` (merge hierarchy)
-10. Integration tests for applet injection (bootstrap receives `setupData.appEnv`)
-11. E2E tests for env-injected applets
-12. Administrator guide: configuring value references and applet injection
-13. Applet developer guide: using `globalThis.JSMAWS.env`
+10. Unit tests for `ValueResolver` (all schemes)
+11. Unit tests for `Configuration.getEffectiveAppEnv()` (merge hierarchy)
+12. Integration tests for applet injection (bootstrap receives `setupData.appEnv`)
+13. E2E tests for env-injected applets
+14. Administrator guide: configuring value references and applet injection
+15. Applet developer guide: using `globalThis.JSMAWS.env`
 
 ---
 
@@ -710,8 +736,8 @@ Under this proposal:
 3. **How should `:kv:` references handle missing keys?** — Current proposal: `undefined` (same as missing env var). Should there be a default value syntax? e.g., `:kv:key?default-value`.
   - **Resolved** Default-value handling is (trivial) applet responsibility. No need to complicate the server.
 
-4. **Should there be a `reload` API for applets?** (e.g., to pick up updated env values mid-request) — No. Env values are resolved at request dispatch time and are immutable for the lifetime of the applet worker. Applets that need dynamic config should use the `data` channel to query a KV store directly (if granted access).
-  - **Resolved** Correct - static data only (which might include credentials to access a live data connection, via separate data-access-api-design)
+4. **Should there be a `reload` API for applets?** (e.g., to pick up updated env values mid-request) — No. Env values are resolved at request dispatch time and are immutable for the lifetime of the applet worker. Applets that need dynamic config should use the `rpc` channel to query a KV store directly (if granted access).
+  - **Resolved** Correct - static data only (which might include credentials to access a live data connection, via separate [`arch/rpc-api-design.md`](rpc-api-design.md))
 
 5. **Should the `:secret:` scheme be implemented in Phase 1 as a stub, or deferred entirely?** — Current proposal: stub in Phase 1 (logs error, returns `undefined`). This allows configuration files to use `:secret:` references without breaking, while making it clear the feature is not yet implemented.
   - **Resolved** No; documented proposal only. Zero scheme-specific code implementation for now. Standard error messaging for unimplemented schemes.
@@ -727,60 +753,36 @@ Under this proposal:
 
 ---
 
-## 13. Open Issues
-
-The following issues require resolution in a separate task:
+## 13. Resolved Issues
 
 ### 13.1 ValueResolver Architecture
 
-**Issue**: The current design shows `ValueResolver` as a class with a `reload()` method, but this is fundamentally incompatible with the stated principle that "raw (unresolved) configuration is **not retained** after resolution" (§6.3).
+**Issue**: The original design showed `ValueResolver` as a class with a `reload()` method, which was fundamentally incompatible with the stated principle that "raw (unresolved) configuration is **not retained** after resolution" (§6.3). Additionally, the KV store lifecycle was unclear, and the caching model was contradictory.
 
-**Problems**:
-1. **`reload()` cannot work**: Without retaining the original `:env:VAR_NAME` references, there is nothing to re-resolve. The method would need to re-read the SLID file and re-parse it, which is the responsibility of `config-monitor.esm.js`, not the value resolver.
-
-2. **KV store lifecycle is unclear**: The design states that KV stores are opened at startup and passed to the `ValueResolver` (§6.4). However, KV store paths are themselves part of the configuration. On config reload, the set of KV stores may have changed (new stores added, old ones removed, paths modified). Keeping old KV store instances open after a config reload seems questionable.
-
-3. **Caching model is contradictory**: The design mentions "cached values" in multiple places (§3.3, §3.4, §6.1), but if no original references are retained, there is no mapping to re-resolve from. The cache would be pointless.
-
-**Proposed Resolution**:
-- Remove the `reload()` method from `ValueResolver`. Config reload is handled by `config-monitor.esm.js` detecting file changes and triggering a full re-parse and re-resolution.
-- On config reload, close all existing KV stores and open new ones based on the new configuration's `kvStores` block.
-- `ValueResolver` should be stateless (or nearly so), holding only the KV store references needed for the current resolution pass.
-- Consider whether `ValueResolver` should be a class at all, or just a set of helper functions that accept KV stores as parameters.
+**Resolution**:
+- The `reload()` method has been removed from `ValueResolver`. Config reload is handled by `config-monitor.esm.js` detecting file changes and notifying the operator, which then performs a full re-parse and calls `await valueResolver.resolveObject(rawConfig, rawConfig)` before updating `Configuration` with the resolved result.
+- KV store lifecycle is now managed by the `KvScheme` handler class, which opens stores at the start of a resolution pass (using paths from the raw config) and closes them in `done()`. This eliminates the ambiguity of holding open handles across config reloads.
+- The "caching" language in §3.3 and §3.4 referred to the per-pass instance cache within `resolveObject()`, not a persistent cache. The design has been updated to clarify this.
 
 ### 13.2 Scheme Handler Modularity
 
-**Issue**: The design does not specify how scheme handlers (`:env:`, `:kv:`, `:file:`, `:secret:`) are implemented or organized. For extensibility, these should be modular and separately loadable.
+**Issue**: The original design did not specify how scheme handlers were implemented or organized, and the implementation plan placed all scheme logic directly in `src/value-resolver.esm.js`, limiting extensibility.
 
-**Problems**:
-1. **No separate API for scheme handlers**: The implementation plan (§10) suggests all schemes are implemented directly in `src/value-resolver.esm.js`, which makes adding new schemes (like `:secret:`) require modifying the core resolver.
-
-2. **Extensibility is limited**: The design principle (§2.2) states "Scheme-based extensibility: New value sources can be added without changing the configuration syntax," but the implementation does not support adding new schemes without modifying the resolver code.
-
-**Proposed Resolution**:
-- Define a scheme handler interface/protocol (e.g., `async function resolveScheme(reference, context) { ... }`).
-- Implement each scheme in a separate file:
+**Resolution** (incorporating FEEDBACK):
+- `ValueResolver` is retained as a class with a `static registerScheme(schemeName, SchemeClass)` method. A scheme class may be registered under multiple scheme names to support aliasing (e.g., for backwards-compatibility).
+- A barrel file `src/schemes/index.esm.js` imports `ValueResolver` and all currently-supported scheme classes, and exports a `registerSchemes()` function that calls `ValueResolver.registerScheme()` for each. `registerSchemes()` is called once during JSMAWS initialization.
+- On the first encounter of a registered scheme during a resolution pass, `ValueResolver` instantiates the handler class (passing the entire raw configuration object) and caches the instance for the duration of the pass. At the end of the pass, `done()` is called on each instantiated handler.
+- The `::` (literal) and `:delete:` schemes are built directly into the resolver as mandatory core functionality (including special-case handling such as wildcard-delete). They are not registered as external scheme classes.
+- External scheme classes implement:
+  - `constructor(rawConfig)` — receives the entire raw configuration to extract any needed values (e.g., `kvStores` paths, `configDir`)
+  - `async resolve(ref)` — receives the full original value reference string and returns the resolved value (or `undefined`)
+  - `async done()` — called at end of pass for cleanup (closing file handles, KV stores, etc.)
+- Scheme files:
   - `src/schemes/env-scheme.esm.js` — `:env:` handler
   - `src/schemes/file-scheme.esm.js` — `:file:` handler
   - `src/schemes/kv-scheme.esm.js` — `:kv:` and `:kv.selector:` handler
-  - `src/schemes/literal-scheme.esm.js` — `::` handler
-  - `src/schemes/delete-scheme.esm.js` — `:delete:` handler (appEnv-specific)
+  - `src/schemes/index.esm.js` — barrel file; exports `registerSchemes()`
   - (future) `src/schemes/secret-scheme.esm.js` — `:secret:` handler
-- `ValueResolver` (or the resolver function set) dynamically loads and dispatches to the appropriate scheme handler based on the scheme prefix.
-- ~~Scheme handlers receive a context object with necessary resources (e.g., `{ kvStores, configDir }` for `:kv:` and `:file:` handlers).~~
-
-FEEDBACK:
-- Retain the 'ValueResolver' as a class.
-- Create a barrel file to load the ValueResolver and currently-supported scheme classes.
-- Add a static method on the ValueResolver to register a simple mapping between scheme names and corresponding implementation classes.
-- While not expected in practice (at least initially), it should be valid to register a scheme-class multiple times with different schemes (to allow scheme aliasing for backwards-compatibility, as one possible example use-case).
-- The barrel file should export a function that calls the static method to register each of the scheme-classes it is loading. This function should be called once during JSMAWS initialization.
-- The first time a registered scheme is encountered in a resolution pass (per config (re)load), the ValueResolver can create and save a scheme-class instance which it will use to resolve instances of that scheme-type.
-- The scheme-class constructor should be passed the (entire) raw configuration currently being resolved in order to extract any portion it needs.
-- Literal and delete schemes provide mandatory, core functionality, require no external resolution, and should therefore be built directly into the resolver.
-- Other scheme classes should implement:
-  - `async .resolve(valueReference)`, passing the entire original value reference (full scheme, along with optional reference if presence) and returning the resolved value
-  - `async .done()`, for end-of-pass cleanup (file or other resource closure, etc)
 
 ---
 
