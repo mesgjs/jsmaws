@@ -29,6 +29,7 @@ const ACME_CHALLENGE_PREFIX = '/.well-known/acme-challenge/';
  */
 export class OperatorProcess {
 	static instance = null; // Singleton instance
+	#nextRequestId = 0;
 
 	constructor (config, configPath) {
 		this.constructor.instance = this;
@@ -126,21 +127,18 @@ export class OperatorProcess {
 
 		// Create context before the try block so the catch block can always call
 		// context.releaseReqChannel() without a null check.
-		const requestId = `${process.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-		const context = new RequestContext(
+		const requestId = `req-${++this.#nextRequestId}`;
+		const context = new RequestContext({
 			requestId,
 			process,
 			poolName,
 			routeSpec,
-			req,
+			request: req,
 			appletPath,
-			this,  // operator
-		);
-		context.poolManager = poolManager;
-		context.poolItemId = poolItem.id;
-		// Store reqChannel now so releaseReqChannel() works even if an error occurs
-		// before processReqChannelMessages() is called.
-		context.reqChannel = reqChannel;
+			poolManager,
+			poolItemId: poolItem.id,
+			reqChannel,
+		});
 
 		try {
 			if (appletPath) {

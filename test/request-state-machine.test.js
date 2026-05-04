@@ -75,15 +75,15 @@ function createMockProcess () {
 function makeContext (requestId, mockOperator, opts = {}) {
 	const mockProcess = opts.process ?? createMockProcess();
 	const req = opts.req ?? new Request('https://example.com/test');
-	return new RequestContext(
+	return new RequestContext({
 		requestId,
-		mockProcess,
-		opts.poolName ?? 'standard',
-		opts.routeSpec ?? null,
-		req,
-		opts.app ?? null,
-		mockOperator,
-	);
+		process: mockProcess,
+		poolName: opts.poolName ?? 'standard',
+		routeSpec: opts.routeSpec ?? null,
+		request: req,
+		appletPath: opts.app ?? null,
+		operator: mockOperator,
+	});
 }
 
 // ============================================================================
@@ -94,13 +94,12 @@ Deno.test('RequestContext - initializes with correct defaults', () => {
 	const mockProcess = createMockProcess();
 	const mockRequest = new Request('https://example.com/test');
 
-	const context = new RequestContext(
-		'test-req-123',
-		mockProcess,
-		'standard',
-		null,
-		mockRequest
-	);
+	const context = new RequestContext({
+		requestId: 'test-req-123',
+		process: mockProcess,
+		poolName: 'standard',
+		request: mockRequest,
+	});
 
 	assertEquals(context.requestId, 'test-req-123');
 	assertEquals(context.process, mockProcess);
@@ -568,14 +567,13 @@ Deno.test('State transitions - WAITING_FIRST_FRAME to COMPLETED via error', asyn
 
 Deno.test('RequestContext - stores app field', () => {
 	const mockProcess = createMockProcess();
-	const context = new RequestContext(
-		'test-req-20',
-		mockProcess,
-		'standard',
-		null,
-		new Request('https://example.com/test'),
-		'/path/to/applet.esm.js'
-	);
+	const context = new RequestContext({
+		requestId: 'test-req-20',
+		process: mockProcess,
+		poolName: 'standard',
+		request: new Request('https://example.com/test'),
+		appletPath: '/path/to/applet.esm.js',
+	});
 
 	assertEquals(context.app, '/path/to/applet.esm.js');
 });
@@ -583,13 +581,13 @@ Deno.test('RequestContext - stores app field', () => {
 Deno.test('RequestContext - stores routeSpec', () => {
 	const mockProcess = createMockProcess();
 	const routeSpec = { pool: 'fast', path: '/api/test' };
-	const context = new RequestContext(
-		'test-req-21',
-		mockProcess,
-		'fast',
+	const context = new RequestContext({
+		requestId: 'test-req-21',
+		process: mockProcess,
+		poolName: 'fast',
 		routeSpec,
-		new Request('https://example.com/api/test')
-	);
+		request: new Request('https://example.com/api/test')
+	});
 
 	assertEquals(context.routeSpec, routeSpec);
 	assertEquals(context.poolName, 'fast');

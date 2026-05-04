@@ -9,6 +9,7 @@
  */
 
 import { WebSocketTransport } from '@poly-transport/transport/websocket.esm.js';
+import { OperatorProcess } from './operator-process.esm.js';
 
 /**
  * Request state machine states
@@ -67,14 +68,17 @@ export function webSocketUpgrade (context, bidiParams) {
  * transition logic as methods.
  */
 export class RequestContext {
-	constructor (requestId, process, poolName, routeSpec, req, app, operator) {
+	constructor ({requestId, process, poolName, routeSpec, request, appletPath, operator, reqChannel, poolManager, poolItemId}) {
 		this.requestId = requestId;
 		this.process = process;
 		this.poolName = poolName;
-		this.routeSpec = routeSpec;
-		this.originalRequest = req;  // For WebSocket upgrade
-		this.app = app;
-		this.operator = operator ?? null; // OperatorProcess instance (may be set later)
+		this.routeSpec = routeSpec ?? null;
+		this.originalRequest = request;  // For WebSocket upgrade
+		this.app = appletPath;
+		this.operator = operator ?? OperatorProcess.instance; // Allows mocking for tests
+		this.reqChannel = reqChannel ?? null; // req-N channel for this request
+		this.poolManager = poolManager ?? null;
+		this.poolItemId = poolItemId ?? null;
 
 		// State machine
 		this.state = RequestState.WAITING_FIRST_FRAME;
@@ -93,13 +97,6 @@ export class RequestContext {
 
 		// Bidi connection state
 		this.bidiState = null;
-
-		// req-N channel for this request (set in processReqChannelMessages)
-		this.reqChannel = null;
-
-		// Pool manager and item ID for cleanup
-		this.poolManager = null;
-		this.poolItemId = null;
 	}
 
 	/**
@@ -137,18 +134,95 @@ export class RequestContext {
 	}
 
 	/**
-	 * Release the req-N channel back to the process's channel pool.
-	 * Idempotent: clears this.reqChannel after the first call so subsequent
-	 * calls are no-ops.  Must only be called once the state machine has
-	 * reached COMPLETED (i.e. all data has been sent / received).
+	 * Handle a res-frame body chunk from the responder.
+	 * Called when a 'res-frame' chunk arrives on the req-N channel.
+	 *
+	 * @param {VirtualBuffer|string|Uint8Array|undefined} data - Frame data
+	 * @param {boolean} eom - End-of-message flag
 	 */
-	releaseReqChannel () {
-		const channel = this.reqChannel;
-		if (!channel) return; // Already released
-		this.reqChannel = null;
-		this.process.reqChannelPool.release(channel).catch((err) => {
-			this.operator?.logger.warn(`[${this.requestId}] Failed to release req-N channel: ${err.message}`);
-		});
+	async handleResFrame (data, eom) {
+		// Enqueue data into the ReadableStream.
+		// data may be a VirtualBuffer (binary write), a string (text write), or null/undefined (EOS).
+		// ReadableStream requires Uint8Array chunks; convert lazily at the terminal enqueue point.
+		if (data != null) {
+			let chunk;
+			if (typeof data === 'string') {
+				chunk = new TextEncoder().encode(data);
+			} else if (data.toUint8Array) {
+				chunk = data.toUint8Array();
+			} else {
+				chunk = data; // Already Uint8Array or compatible
+			}
+			if (chunk.length > 0) {
+				this.streamController?.enqueue(chunk);
+			}
+		}
+
+		// Check for end-of-stream (null/undefined data + eom:true)
+		if (data == null && eom) {
+			try { this.streamController?.close(); } catch (_) {}
+			this.state = RequestState.COMPLETED;
+			this.operator.logger.debug(`[${this.requestId}] was STREAMING_RESPONSE now COMPLETED`);
+
+			// Release the req-N channel now that the stream is fully consumed
+			this.releaseReqChannel();
+
+			// Mark pool item idle now that stream is closed
+			if (this.poolManager && this.poolItemId) {
+				await this.poolManager.decrementItemUsage(this.poolItemId);
+			}
+		}
+	}
+
+	/**
+	 * Handle response metadata from the responder.
+	 * Called when a 'res' message arrives on the req-N channel.
+	 *
+	 * @param {string} resData - JSON-encoded response metadata
+	 * @param {Function} [upgradeCallback] - Optional bidi upgrade callback (for testing/DI).
+	 *   Passed through to initializeBidiConnection. Defaults to webSocketUpgrade.
+	 */
+	async handleResponseMetadata (resData, upgradeCallback) {
+		// Extract connection data from message
+		const { mode, status, headers: rawHeaders, keepAlive } = JSON.parse(resData);
+
+		const headers = this.operator.convertHeaders(rawHeaders);
+
+		// Save in context
+		this.mode = mode;
+		this.status = status;
+		this.headers = headers;
+		this.keepAlive = keepAlive ?? false;
+
+		// Transition based on mode
+		if (mode === 'bidi' && status === 101) {
+			// Bidi upgrade: immediately initialize connection
+			// The first frame (status 101) should have no data (policy enforced by responder)
+			this.state = RequestState.BIDI_ACTIVE;
+			this.operator.logger.debug(`[${this.requestId}] was WAITING_FIRST_FRAME now BIDI_ACTIVE`);
+
+			// Initialize bidi connection immediately (sets up WebSocket by default)
+			await this.initializeBidiConnection(upgradeCallback);
+
+		} else if (mode === 'response' || mode === 'stream') {
+			// Transition: body will arrive as res-frame chunks, EOS signaled by null res-frame
+			this.state = RequestState.STREAMING_RESPONSE;
+			this.operator.logger.debug(`[${this.requestId}] was WAITING_FIRST_FRAME now STREAMING_RESPONSE`);
+
+			// Create ReadableStream; body chunks arrive via handleResFrame()
+			const stream = new ReadableStream({
+				start: (controller) => {
+					this.streamController = controller;
+				}
+			});
+
+			// Create Response and resolve promise
+			const response = new Response(stream, { status, headers });
+			this.responsePromise.resolve(response);
+
+		} else {
+			throw new Error(`Unknown mode: ${mode}`);
+		}
 	}
 
 	/**
@@ -332,98 +406,6 @@ export class RequestContext {
 	}
 
 	/**
-	 * Handle response metadata from the responder.
-	 * Called when a 'res' message arrives on the req-N channel.
-	 *
-	 * @param {string} resData - JSON-encoded response metadata
-	 * @param {Function} [upgradeCallback] - Optional bidi upgrade callback (for testing/DI).
-	 *   Passed through to initializeBidiConnection. Defaults to webSocketUpgrade.
-	 */
-	async handleResponseMetadata (resData, upgradeCallback) {
-		// Extract connection data from message
-		const { mode, status, headers: rawHeaders, keepAlive } = JSON.parse(resData);
-
-		const headers = this.operator.convertHeaders(rawHeaders);
-
-		// Save in context
-		this.mode = mode;
-		this.status = status;
-		this.headers = headers;
-		this.keepAlive = keepAlive ?? false;
-
-		// Transition based on mode
-		if (mode === 'bidi' && status === 101) {
-			// Bidi upgrade: immediately initialize connection
-			// The first frame (status 101) should have no data (policy enforced by responder)
-			this.state = RequestState.BIDI_ACTIVE;
-			this.operator.logger.debug(`[${this.requestId}] was WAITING_FIRST_FRAME now BIDI_ACTIVE`);
-
-			// Initialize bidi connection immediately (sets up WebSocket by default)
-			await this.initializeBidiConnection(upgradeCallback);
-
-		} else if (mode === 'response' || mode === 'stream') {
-			// Transition: body will arrive as res-frame chunks, EOS signaled by null res-frame
-			this.state = RequestState.STREAMING_RESPONSE;
-			this.operator.logger.debug(`[${this.requestId}] was WAITING_FIRST_FRAME now STREAMING_RESPONSE`);
-
-			// Create ReadableStream; body chunks arrive via handleResFrame()
-			const stream = new ReadableStream({
-				start: (controller) => {
-					this.streamController = controller;
-				}
-			});
-
-			// Create Response and resolve promise
-			const response = new Response(stream, { status, headers });
-			this.responsePromise.resolve(response);
-
-		} else {
-			throw new Error(`Unknown mode: ${mode}`);
-		}
-	}
-
-	/**
-	 * Handle a res-frame body chunk from the responder.
-	 * Called when a 'res-frame' chunk arrives on the req-N channel.
-	 *
-	 * @param {VirtualBuffer|string|Uint8Array|undefined} data - Frame data
-	 * @param {boolean} eom - End-of-message flag
-	 */
-	async handleResFrame (data, eom) {
-		// Enqueue data into the ReadableStream.
-		// data may be a VirtualBuffer (binary write), a string (text write), or null/undefined (EOS).
-		// ReadableStream requires Uint8Array chunks; convert lazily at the terminal enqueue point.
-		if (data != null) {
-			let chunk;
-			if (typeof data === 'string') {
-				chunk = new TextEncoder().encode(data);
-			} else if (data.toUint8Array) {
-				chunk = data.toUint8Array();
-			} else {
-				chunk = data; // Already Uint8Array or compatible
-			}
-			if (chunk.length > 0) {
-				this.streamController?.enqueue(chunk);
-			}
-		}
-
-		// Check for end-of-stream (null/undefined data + eom:true)
-		if (data == null && eom) {
-			try { this.streamController?.close(); } catch (_) {}
-			this.state = RequestState.COMPLETED;
-			this.operator.logger.debug(`[${this.requestId}] was STREAMING_RESPONSE now COMPLETED`);
-
-			// Release the req-N channel now that the stream is fully consumed
-			this.releaseReqChannel();
-
-			// Mark pool item idle now that stream is closed
-			if (this.poolManager && this.poolItemId) {
-				await this.poolManager.decrementItemUsage(this.poolItemId);
-			}
-		}
-	}
-
-	/**
 	 * Relay a bidi-frame chunk from the responder to the client WebSocket bidi channel.
 	 * Called when a 'bidi-frame' message arrives on the req-N channel from the responder.
 	 *
@@ -443,5 +425,20 @@ export class RequestContext {
 		// } else {
 			// console.log('### Opr App->Cli BIDI COMPLETED');
 		}
+	}
+
+	/**
+	 * Release the req-N channel back to the process's channel pool.
+	 * Idempotent: clears this.reqChannel after the first call so subsequent
+	 * calls are no-ops.  Must only be called once the state machine has
+	 * reached COMPLETED (i.e. all data has been sent / received).
+	 */
+	releaseReqChannel () {
+		const channel = this.reqChannel;
+		if (!channel) return; // Already released
+		this.reqChannel = null;
+		this.process.reqChannelPool.release(channel).catch((err) => {
+			this.operator?.logger.warn(`[${this.requestId}] Failed to release req-N channel: ${err.message}`);
+		});
 	}
 }
