@@ -12,7 +12,7 @@
 import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { Configuration } from '../src/configuration.esm.js';
 
-// ─── Global defaults ──────────────────────────────────────────────────────────
+// --- Global defaults ----------------------------------------------------------
 
 Deno.test('getBidiParams - returns global chunkSize as maxChunkSize', () => {
 	const config = new Configuration({ chunkSize: 65536 });
@@ -38,7 +38,7 @@ Deno.test('getBidiParams - returns only maxChunkSize (no credit-based params)', 
 	assertEquals('maxBufferSize' in params, false);
 });
 
-// ─── Pool override ────────────────────────────────────────────────────────────
+// --- Pool override ------------------------------------------------------------
 
 Deno.test('getBidiParams - pool maxChunkSize overrides global', () => {
 	const config = new Configuration({
@@ -76,7 +76,7 @@ Deno.test('getBidiParams - pool without maxChunkSize uses global chunkSize', () 
 	assertEquals(params.maxChunkSize, 65536);
 });
 
-// ─── Route override ───────────────────────────────────────────────────────────
+// --- Route override -----------------------------------------------------------
 
 Deno.test('getBidiParams - route maxChunkSize overrides pool and global', () => {
 	const config = new Configuration({
@@ -113,7 +113,7 @@ Deno.test('getBidiParams - route without maxChunkSize and no pool uses global', 
 	assertEquals(params.maxChunkSize, 65536);
 });
 
-// ─── poolName extraction from routeSpec ──────────────────────────────────────
+// --- poolName extraction from routeSpec --------------------------------------
 
 Deno.test('getBidiParams - extracts poolName from routeSpec.pool', () => {
 	const config = new Configuration({
@@ -146,7 +146,7 @@ Deno.test('getBidiParams - explicit poolName takes precedence over routeSpec.poo
 	assertEquals(params.maxChunkSize, 32768);
 });
 
-// ─── Default pool fallback ────────────────────────────────────────────────────
+// --- Default pool fallback ----------------------------------------------------
 
 Deno.test('getBidiParams - defaults to standard pool when no poolName or routeSpec', () => {
 	const config = new Configuration({
@@ -175,7 +175,7 @@ Deno.test('getBidiParams - null routeSpec uses pool config', () => {
 	assertEquals(params.maxChunkSize, 131072);
 });
 
-// ─── fromSLID factory ─────────────────────────────────────────────────────────
+// --- fromSLID factory ---------------------------------------------------------
 
 Deno.test('getBidiParams - works with fromSLID factory', () => {
 	const config = Configuration.fromSLID(`[(
@@ -198,7 +198,7 @@ Deno.test('getBidiParams - fromSLID global chunkSize', () => {
 	assertEquals(params.maxChunkSize, 32768);
 });
 
-// ─── Hierarchy summary ────────────────────────────────────────────────────────
+// --- Hierarchy summary --------------------------------------------------------
 
 Deno.test('getBidiParams - full hierarchy: route > pool > global', () => {
 	const config = new Configuration({

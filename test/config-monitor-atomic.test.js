@@ -9,7 +9,7 @@
  */
 
 import { assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";
-import { createConfigMonitor } from "../src/config-monitor.esm.js";
+import { ConfigMonitor } from "../src/config-monitor.esm.js";
 
 Deno.test("Config Monitor - detects changes with atomic writes", async () => {
 	// Create a temporary config file
@@ -31,7 +31,7 @@ Deno.test("Config Monitor - detects changes with atomic writes", async () => {
 	};
 
 	// Create and start monitor
-	const monitor = createConfigMonitor(configPath, onChange);
+	const monitor = new ConfigMonitor(configPath, onChange);
 	await monitor.startMonitoring();
 
 	// Wait for initial setup

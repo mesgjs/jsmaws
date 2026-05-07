@@ -3,7 +3,7 @@
  */
 
 import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";
-import { ConfigMonitor, createConfigMonitor } from "../src/config-monitor.esm.js";
+import { ConfigMonitor } from "../src/config-monitor.esm.js";
 import { NANOS } from '@nanos';
 
 Deno.test("ConfigMonitor - creates instance", () => {
@@ -24,19 +24,6 @@ Deno.test("ConfigMonitor - sets callback", () => {
 	const monitor = new ConfigMonitor('test.slid', callback);
 
 	try {
-		assertEquals(monitor.onChange, callback);
-	} finally {
-		monitor.stopMonitoring();
-	}
-});
-
-Deno.test("ConfigMonitor - factory function creates instance", () => {
-	const callback = () => {};
-	const monitor = createConfigMonitor('test.slid', callback);
-
-	try {
-		assertExists(monitor);
-		assertEquals(monitor.configPath, 'test.slid');
 		assertEquals(monitor.onChange, callback);
 	} finally {
 		monitor.stopMonitoring();

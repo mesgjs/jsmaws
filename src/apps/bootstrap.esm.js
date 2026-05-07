@@ -12,6 +12,7 @@
  * - Exposes globalThis.JSMAWS (frozen namespace) to the mod-app:
  *     .server — the main PolyTransport channel (mod-app ↔ JSMAWS server)
  *     .bidi   — the NestedTransport relay channel (bidi requests only)
+ *     .env    — frozen plain object of injected environment values (strings only)
  * - Dynamically imports the mod-app after environment is secured
  *
  * Security Model:
@@ -244,7 +245,10 @@ async function bootstrap () {
 	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
 
 	// Build the JSMAWS namespace object (frozen before mod-app import)
-	const jsmawsNamespace = { server: appChannel };
+	const jsmawsNamespace = {
+		server: appChannel,
+		env: Object.freeze(setupData.appEnv ?? {}),
+	};
 
 	// Expose frozen namespace to mod-app
 	globalThis.JSMAWS = Object.freeze(jsmawsNamespace);

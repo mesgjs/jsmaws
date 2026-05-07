@@ -7,6 +7,7 @@
  *
  * Configuration pipeline:
  *   SLID file → NANOS.parseSLID() → nanos.toObject({ array: true }) → plain JS object
+ *   → ValueResolver.resolveObject() → resolved plain JS object → Configuration.updateConfig()
  *
  * Plain JS objects are used internally (not NANOS) for:
  * - Standard property access (no .at() calls)
@@ -17,6 +18,7 @@
  */
 
 import { NANOS } from '@nanos';
+import { DELETE_SENTINEL } from './value-resolver.esm.js';
 
 // Default network port values
 const DEFAULT_HTTP_PORT = 80;
@@ -91,54 +93,6 @@ export class Configuration {
 	}
 
 	/**
-	 * Get server hostname
-	 * @returns {string}
-	 */
-	get hostname () {
-		return this.config.hostname ?? 'localhost';
-	}
-
-	/**
-	 * Get HTTP port
-	 * @returns {number}
-	 */
-	get httpPort () {
-		return this.config.httpPort ?? DEFAULT_HTTP_PORT;
-	}
-
-	/**
-	 * Get HTTPS port
-	 * @returns {number}
-	 */
-	get httpsPort () {
-		return this.config.httpsPort ?? DEFAULT_HTTPS_PORT;
-	}
-
-	/**
-	 * Get SSL private key file path
-	 * @returns {string|undefined}
-	 */
-	get keyFile () {
-		return this.config.keyFile;
-	}
-
-	/**
-	 * Get noSSL flag (HTTP-only mode)
-	 * @returns {boolean}
-	 */
-	get noSSL () {
-		return this.config.noSSL ?? false;
-	}
-
-	/**
-	 * Get SSL certificate check interval in hours
-	 * @returns {number}
-	 */
-	get sslCheckIntervalHours () {
-		return this.config.sslCheckIntervalHours ?? 1;
-	}
-
-	/**
 	 * Get raw configuration value
 	 * @param {string|Array} path Path to configuration value
 	 * @param {*} defaultValue Default value if not found
@@ -206,6 +160,42 @@ export class Configuration {
 	}
 
 	/**
+	 * Get the effective appEnv for a request by merging global, pool, and route
+	 * appEnv blocks. More-specific scopes override less-specific ones (route > pool > global).
+	 *
+	 * Merge rules (applied at each scope level):
+	 *   - '*=:delete:' (DELETE_SENTINEL under key '*') clears all accumulated keys first
+	 *   - Other DELETE_SENTINEL values remove the named key
+	 *   - All other values override or add keys (coerced to strings)
+	 *
+	 * Values are already resolved strings (or DELETE_SENTINEL) at this point —
+	 * no async resolution is needed here.
+	 *
+	 * @param {Object|null} routeSpec - Route specification (plain object, or null)
+	 * @param {string} [poolName] - Pool name (falls back to routeSpec.pool, then 'standard')
+	 * @returns {Object} Merged appEnv as a plain object with string values only
+	 */
+	getEffectiveAppEnv (routeSpec, poolName) {
+		// Resolve pool name
+		const resolvedPoolName = poolName ?? routeSpec?.pool ?? 'standard';
+		const poolConfig = this.getPoolConfig(resolvedPoolName);
+
+		// Collect the three appEnv blocks (may be undefined/null)
+		const globalAppEnv = this.config.appEnv ?? null;
+		const poolAppEnv = poolConfig?.appEnv ?? null;
+		const routeAppEnv = routeSpec?.appEnv ?? null;
+
+		// Merge in order: global → pool → route
+		let merged = {};
+		for (const block of [globalAppEnv, poolAppEnv, routeAppEnv]) {
+			if (!block || typeof block !== 'object') continue;
+			merged = this.#mergeAppEnvBlock(merged, block);
+		}
+
+		return merged;
+	}
+
+	/**
 	 * Get specific pool configuration
 	 * @param {string} poolName Pool name (e.g., '@router', 'standard', 'fast')
 	 * @returns {Object|null} Pool configuration or null if not found
@@ -249,6 +239,38 @@ export class Configuration {
 	}
 
 	/**
+	 * Get server hostname
+	 * @returns {string}
+	 */
+	get hostname () {
+		return this.config.hostname ?? 'localhost';
+	}
+
+	/**
+	 * Get HTTP port
+	 * @returns {number}
+	 */
+	get httpPort () {
+		return this.config.httpPort ?? DEFAULT_HTTP_PORT;
+	}
+
+	/**
+	 * Get HTTPS port
+	 * @returns {number}
+	 */
+	get httpsPort () {
+		return this.config.httpsPort ?? DEFAULT_HTTPS_PORT;
+	}
+
+	/**
+	 * Get SSL private key file path
+	 * @returns {string|undefined}
+	 */
+	get keyFile () {
+		return this.config.keyFile;
+	}
+
+	/**
 	 * Get logging configuration
 	 * @returns {Object} Logging context with level, destination, format
 	 */
@@ -261,6 +283,35 @@ export class Configuration {
 			};
 		}
 		return this._logging;
+	}
+
+	/**
+	 * Merge one appEnv block into an accumulated result object.
+	 * Applies wildcard-delete ('*') first, then per-key deletes and overrides.
+	 * Values are coerced to strings; DELETE_SENTINEL values remove the key.
+	 *
+	 * @param {Object} accumulated - Current merged result (will not be mutated)
+	 * @param {Object} block - appEnv block to merge in (already-resolved values)
+	 * @returns {Object} New merged object
+	 * @private
+	 */
+	#mergeAppEnvBlock (accumulated, block) {
+		// Start empty on wildcard-delete; copy accumulated otherwise
+		const result = (block['*'] === DELETE_SENTINEL) ? {} : { ...accumulated };
+
+		// Process all other entries
+		for (const [key, value] of Object.entries(block)) {
+			if (key === '*') continue; // Already handled above
+
+			if (value === DELETE_SENTINEL) {
+				delete result[key];
+			} else {
+				// Coerce to string (SLID values may be numbers, booleans, etc.)
+				result[key] = String(value);
+			}
+		}
+
+		return result;
 	}
 
 	/**
@@ -282,6 +333,14 @@ export class Configuration {
 	 */
 	get mimeTypes () {
 		return this.config.mimeTypes ?? {};
+	}
+
+	/**
+	 * Get noSSL flag (HTTP-only mode)
+	 * @returns {boolean}
+	 */
+	get noSSL () {
+		return this.config.noSSL ?? false;
 	}
 
 	/**
@@ -344,6 +403,14 @@ export class Configuration {
 		// Invalidate computed caches
 		this._routing = null;
 		this._logging = null;
+	}
+
+	/**
+	 * Get SSL certificate check interval in hours
+	 * @returns {number}
+	 */
+	get sslCheckIntervalHours () {
+		return this.config.sslCheckIntervalHours ?? 1;
 	}
 
 	/**

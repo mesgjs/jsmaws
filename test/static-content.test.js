@@ -175,7 +175,7 @@ async function sendStaticRequest (appChannel, requestData) {
 	return { status, headers, body, bodyText };
 }
 
-// ─── Basic file serving ───────────────────────────────────────────────────────
+// --- Basic file serving -------------------------------------------------------
 
 Deno.test('Static Content - serves small text file', async () => {
 	const { appChannel, cleanup } = await setupStaticWorker();
@@ -304,7 +304,7 @@ Deno.test('Static Content - default MIME type for unknown extension', async () =
 	}
 });
 
-// ─── Security ─────────────────────────────────────────────────────────────────
+// --- Security -----------------------------------------------------------------
 
 Deno.test('Static Content - prevents path traversal attack', async () => {
 	const { appChannel, cleanup } = await setupStaticWorker();
@@ -377,7 +377,7 @@ Deno.test('Static Content - returns 404 when root not configured', async () => {
 	}
 });
 
-// ─── Subdirectory and binary ──────────────────────────────────────────────────
+// --- Subdirectory and binary --------------------------------------------------
 
 Deno.test('Static Content - serves file from subdirectory', async () => {
 	const { appChannel, cleanup } = await setupStaticWorker();
@@ -430,7 +430,7 @@ Deno.test('Static Content - serves binary file correctly', async () => {
 	}
 });
 
-// ─── Chunking ─────────────────────────────────────────────────────────────────
+// --- Chunking -----------------------------------------------------------------
 
 Deno.test('Static Content - chunks large file', async () => {
 	const { appChannel, cleanup } = await setupStaticWorker();
@@ -489,7 +489,7 @@ Deno.test('Static Content - chunks large file', async () => {
 	}
 });
 
-// ─── Range requests ───────────────────────────────────────────────────────────
+// --- Range requests -----------------------------------------------------------
 
 Deno.test('Static Content - handles Range request', async () => {
 	const { appChannel, cleanup } = await setupStaticWorker();
@@ -668,7 +668,7 @@ Deno.test('Static Content - chunks large Range request', async () => {
 	}
 });
 
-// ─── Permission errors ────────────────────────────────────────────────────────
+// --- Permission errors --------------------------------------------------------
 
 Deno.test('Static Content - returns 404 for unreadable file', async () => {
 	const { appChannel, cleanup } = await setupStaticWorker();

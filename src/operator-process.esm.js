@@ -13,14 +13,16 @@
  */
 
 import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
+import { NANOS } from '@nanos';
 import { createSSLManager } from './ssl-manager.esm.js';
 import { Router } from './router-worker.esm.js';
 import { Configuration } from './configuration.esm.js';
-import { createConfigMonitor } from './config-monitor.esm.js';
+import { ConfigMonitor } from './config-monitor.esm.js';
 import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
 import { RequestContext, RequestState } from './operator-request-state.esm.js';
+import { ValueResolver } from './value-resolver.esm.js';
 
 const ACME_CHALLENGE_PREFIX = '/.well-known/acme-challenge/';
 
@@ -33,7 +35,8 @@ export class OperatorProcess {
 
 	constructor (config, configPath) {
 		this.constructor.instance = this;
-		// Accept NANOS (from parseSLID), plain object (from JSON.parse), or Configuration instance
+		// Accept NANOS (from parseSLID), plain object (from JSON.parse), Configuration instance,
+		// or null/undefined (config will be set via handleConfigUpdate() before start()).
 		this.config = (config instanceof Configuration) ? config : new Configuration(config ?? {});
 		this.configPath = configPath;
 		this.httpServer = null;
@@ -55,6 +58,8 @@ export class OperatorProcess {
 			lowWaterMark: 2,
 			highWaterMark: 10,
 		});
+		// Value resolver for :scheme: references in configuration
+		this.valueResolver = new ValueResolver();
 	}
 
 	/**
@@ -247,28 +252,64 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Handle configuration update from config monitor
+	 * Handle configuration update from config monitor (or initial load).
+	 * Resolves value references, updates Configuration, and propagates changes
+	 * to the router, process pools, and service processes (if initialized).
+	 *
+	 * Safe to call before the logger is initialized (uses console fallback).
+	 * Accepts NANOS objects (converted internally by resolveConfig).
+	 *
+	 * @param {NANOS|Object} newConfig - New configuration (NANOS or plain object)
 	 */
 	async handleConfigUpdate (newConfig) {
-		this.logger.info('Configuration updated; reloading...');
+		(this.logger ?? console).info('Configuration updated; reloading...');
 
-		// Update Configuration instance (converts NANOS to plain objects)
+		// Resolve value references before updating Configuration.
+		// resolveConfig() injects configDir and calls valueResolver.resolveObject().
+		const resolvedConfig = await this.resolveConfig(newConfig);
+
+		// Update Configuration instance with the already-resolved plain object.
 		// The pools getter handles the default-pool fallback automatically.
-		this.config.updateConfig(newConfig);
+		this.config.updateConfig(resolvedConfig);
 
-		// Update router configuration
+		// Update router configuration (no-op if router not yet initialized)
 		if (this.router) {
 			this.router.updateConfig();
 			this.logger.debug(`Router updated with ${this.router.routes.length} route(s)`);
 		}
 
-		// Update process pools
-		await this.updateProcessPools();
+		// Update process pools (no-op if pools not yet initialized)
+		if (this.poolManagers.size > 0) {
+			await this.updateProcessPools();
+		}
 
 		// Broadcast config update to all service processes via their control channels
 		if (this.processManager) {
 			await this.processManager.broadcastConfigUpdate();
 		}
+	}
+
+	/**
+	 * Resolve value references in a raw configuration object.
+	 * Injects configDir for the :file: scheme and calls valueResolver.resolveObject().
+	 * The caller is responsible for converting NANOS to a plain object before calling.
+	 *
+	 * @param {Object} rawConfig - Raw plain-object configuration
+	 * @returns {Promise<Object>} Resolved plain-object configuration
+	 */
+	async resolveConfig (rawConfig) {
+		if (rawConfig instanceof NANOS) {
+			// Support NANOS for backward compatibility/testing
+			rawConfig = rawConfig.toObject({ array: true });
+		}
+		// Derive configDir from configPath for :file: relative path resolution.
+		// Use URL to handle both absolute and relative configPath values consistently.
+		const configDir = this.configPath
+			? new URL('.', new URL(this.configPath, `file://${Deno.cwd()}/`)).pathname.replace(/\/$/, '')
+			: Deno.cwd();
+
+		const rawWithDir = { ...(rawConfig ?? {}), configDir };
+		return await this.valueResolver.resolveObject(rawWithDir, rawWithDir);
 	}
 
 	/**
@@ -567,9 +608,10 @@ export class OperatorProcess {
 		}
 
 		if (this.configPath) {
-			this.configMonitor = createConfigMonitor(
+			this.configMonitor = new ConfigMonitor(
 				this.configPath,
-				(newConfig) => this.handleConfigUpdate(newConfig)
+				(newConfig) => this.handleConfigUpdate(newConfig),
+				{ nativeConfig: true }
 			);
 			await this.configMonitor.startMonitoring();
 		}

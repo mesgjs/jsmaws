@@ -97,7 +97,7 @@ async function setupServiceProcess (processId) {
 	return { proc, operatorTransport, serviceTransport, operatorControlChannel, cleanup };
 }
 
-// ─── Constructor Tests ────────────────────────────────────────────────────────
+// --- Constructor Tests --------------------------------------------------------
 
 Deno.test('ServiceProcess - constructor sets process type and ID', () => {
 	const proc = new TestServiceProcess('test-123');
@@ -117,7 +117,7 @@ Deno.test('ServiceProcess - constructor generates ID if not provided', () => {
 	assertEquals(proc.processId.startsWith('test-'), true);
 });
 
-// ─── Abstract Method Tests ────────────────────────────────────────────────────
+// --- Abstract Method Tests ----------------------------------------------------
 
 Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async () => {
 	class IncompleteProcess extends ServiceProcess {
@@ -183,7 +183,7 @@ Deno.test('ServiceProcess - subclass must implement handleReqChannel', async () 
 	);
 });
 
-// ─── onStarted Hook ───────────────────────────────────────────────────────────
+// --- onStarted Hook -----------------------------------------------------------
 
 Deno.test('ServiceProcess - onStarted hook is called', async () => {
 	const proc = new TestServiceProcess('test-123');
@@ -191,7 +191,7 @@ Deno.test('ServiceProcess - onStarted hook is called', async () => {
 	assertEquals(proc.onStartedCalled, true);
 });
 
-// ─── Control Channel Message Handling ────────────────────────────────────────
+// --- Control Channel Message Handling ----------------------------------------
 
 Deno.test('ServiceProcess - handles config-update message', async () => {
 	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('cfg-test');
@@ -310,7 +310,7 @@ Deno.test('ServiceProcess - handles shutdown message', async () => {
 	}
 });
 
-// ─── sendCapacityUpdate ───────────────────────────────────────────────────────
+// --- sendCapacityUpdate -------------------------------------------------------
 
 Deno.test('ServiceProcess - sendCapacityUpdate sends capacity-update message', async () => {
 	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('cap-test');
@@ -340,7 +340,7 @@ Deno.test('ServiceProcess - sendCapacityUpdate is no-op when no controlChannel',
 	// No assertion needed — just verifying no error is thrown
 });
 
-// ─── CONTROL_MESSAGE_TYPES export ────────────────────────────────────────────
+// --- CONTROL_MESSAGE_TYPES export --------------------------------------------
 
 Deno.test('ServiceProcess - CONTROL_MESSAGE_TYPES includes expected types', () => {
 	assertEquals(CONTROL_MESSAGE_TYPES.includes('config-update'), true);

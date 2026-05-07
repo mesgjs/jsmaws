@@ -88,7 +88,7 @@ async function setupResponderProcess (processId = 'test-responder-1', poolName =
 	return { proc, operatorTransport, serviceTransport, operatorControlChannel, cleanup };
 }
 
-// ─── Constructor Tests ────────────────────────────────────────────────────────
+// --- Constructor Tests --------------------------------------------------------
 
 Deno.test('ResponderProcess - constructor sets processId and poolName', () => {
 	const proc = new ResponderProcess('test-proc-1', 'standard');
@@ -120,7 +120,7 @@ Deno.test('ResponderProcess - constructor throws with empty poolName', () => {
 	assertEquals(threw, true);
 });
 
-// ─── availWorkers getter ──────────────────────────────────────────────────────
+// --- availWorkers getter ------------------------------------------------------
 
 Deno.test('ResponderProcess - availWorkers reflects capacity', () => {
 	const proc = new ResponderProcess('test-proc-4', 'standard');
@@ -136,7 +136,7 @@ Deno.test('ResponderProcess - availWorkers reflects capacity', () => {
 	assertEquals(proc.availWorkers, 10);
 });
 
-// ─── handleConfigUpdate ───────────────────────────────────────────────────────
+// --- handleConfigUpdate -------------------------------------------------------
 
 Deno.test('ResponderProcess - handleConfigUpdate updates chunkingConfig', async () => {
 	const proc = new ResponderProcess('test-proc-5', 'standard');
@@ -170,7 +170,7 @@ Deno.test('ResponderProcess - handleConfigUpdate updates maxConcurrentRequests f
 	assertEquals(proc.maxConcurrentRequests, 20);
 });
 
-// ─── handleHealthCheck ────────────────────────────────────────────────────────
+// --- handleHealthCheck --------------------------------------------------------
 
 Deno.test('ResponderProcess - handleHealthCheck sends health-response', async () => {
 	const { proc, operatorControlChannel, cleanup } = await setupResponderProcess('hc-test');
@@ -201,7 +201,7 @@ Deno.test('ResponderProcess - handleHealthCheck sends health-response', async ()
 	}
 });
 
-// ─── cleanupRequest ───────────────────────────────────────────────────────────
+// --- cleanupRequest -----------------------------------------------------------
 
 Deno.test('ResponderProcess - cleanupRequest clears timers and initiates transport stop', async () => {
 	const proc = new ResponderProcess('test-proc-7', 'standard');
@@ -241,7 +241,7 @@ Deno.test('ResponderProcess - cleanupRequest is no-op for unknown request', () =
 	assertEquals(proc.activeRequests.size, 0);
 });
 
-// ─── handleReqChannel ─────────────────────────────────────────────────────────
+// --- handleReqChannel ---------------------------------------------------------
 
 Deno.test('ResponderProcess - handleReqChannel registers message types', async () => {
 	const { proc, operatorTransport, serviceTransport, cleanup } = await setupResponderProcess('req-channel-test');
@@ -267,7 +267,7 @@ Deno.test('ResponderProcess - handleReqChannel registers message types', async (
 	}
 });
 
-// ─── handleShutdown ───────────────────────────────────────────────────────────
+// --- handleShutdown -----------------------------------------------------------
 
 Deno.test('ResponderProcess - handleShutdown sets isShuttingDown', async () => {
 	const proc = new ResponderProcess('shutdown-test', 'standard');
@@ -305,7 +305,7 @@ Deno.test('ResponderProcess - handleShutdown sets isShuttingDown', async () => {
 	}
 });
 
-// ─── sendCapacityUpdate ───────────────────────────────────────────────────────
+// --- sendCapacityUpdate -------------------------------------------------------
 
 Deno.test('ResponderProcess - sendCapacityUpdate sends capacity-update message', async () => {
 	const { proc, operatorControlChannel, cleanup } = await setupResponderProcess('cap-test');
@@ -332,7 +332,7 @@ Deno.test('ResponderProcess - sendCapacityUpdate sends capacity-update message',
 	}
 });
 
-// ─── Request handling via req-N channel ──────────────────────────────────────
+// --- Request handling via req-N channel --------------------------------------
 
 Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 	const { proc, operatorTransport, serviceTransport, cleanup } = await setupResponderProcess('capacity-test');
@@ -388,7 +388,7 @@ Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 	}
 });
 
-// ─── onStarted hook ───────────────────────────────────────────────────────────
+// --- onStarted hook -----------------------------------------------------------
 
 Deno.test('ResponderProcess - onStarted logs pool info', async () => {
 	const proc = new ResponderProcess('started-test', 'standard');

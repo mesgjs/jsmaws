@@ -407,9 +407,12 @@ class ResponderProcess extends ServiceProcess {
 			const upgradeHeader = headers?.['upgrade'];
 			const mode = (upgradeHeader?.toLowerCase() === 'websocket') ? 'bidi' : 'response';
 
+			// Compute effective appEnv for this request (global → pool → route merge)
+			const appEnv = this.config.getEffectiveAppEnv(routeSpec, this.poolName);
+
 			// Spawn mod-app worker and establish PostMessageTransport
 			const { worker, transport, c2cChannel, appChannel } =
-				await this.#spawnAppWorker(app, mode);
+				await this.#spawnAppWorker(app, mode, appEnv);
 
 			// Set up request timeout: send error first (sets responseStarted), then abort.
 			const timeout = reqTimeout ? setTimeout(() => {
@@ -538,9 +541,10 @@ class ResponderProcess extends ServiceProcess {
 	 *
 	 * @param {string} appPath - Mod-app path or built-in alias (e.g. '@static')
 	 * @param {string} mode - Request mode ('response', 'stream', 'bidi')
+	 * @param {Object} [appEnv] - Resolved appEnv to inject into the mod-app worker
 	 * @returns {Promise<{ worker, transport, bootstrapChannel, appChannel }>}
 	 */
-	async #spawnAppWorker (appPath, mode) {
+	async #spawnAppWorker (appPath, mode, appEnv) {
 		// Determine permissions based on mod-app path
 		let readAny = false, keepDeno = false;
 		switch (appPath) {
@@ -596,11 +600,11 @@ class ResponderProcess extends ServiceProcess {
 		// Send setup instructions to bootstrap via the private 'bootstrap' channel
 		const bootstrapChannel = await transport.requestChannel('bootstrap');
 		await bootstrapChannel.addMessageTypes(['setup']);
-		await bootstrapChannel.write('setup', JSON.stringify({
-			appPath: appHref,
-			mode,
-			keepDeno,
-		}));
+		const setupData = { appPath: appHref, mode, keepDeno };
+		if (appEnv && Object.keys(appEnv).length > 0) {
+			setupData.appEnv = appEnv;
+		}
+		await bootstrapChannel.write('setup', JSON.stringify(setupData));
 
 		// Set up the mod-app communication channel
 		const appChannel = await transport.requestChannel('app');

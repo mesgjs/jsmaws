@@ -15,10 +15,11 @@ import { parseSLID } from '@nanos';
 /**
  * Configuration monitor for watching SLID files
  */
-class ConfigMonitor {
-	constructor (configPath, onChange, { debounceDelay = 500 } = {}) {
+export class ConfigMonitor {
+	constructor (configPath, onChange, { debounceDelay = 500, nativeConfig = false } = {}) {
 		this.configPath = configPath;
 		this.onChange = onChange;
+		this.nativeConfig = nativeConfig;
 		this.watcher = null;
 		this.isMonitoring = false;
 		this.lastRead = Date.now(); // When the configuration was last read
@@ -135,7 +136,7 @@ class ConfigMonitor {
 			// Notify listener of configuration change
 			if (this.onChange) {
 				try {
-					await this.onChange(newConfig);
+					await this.onChange(this.nativeConfig ? newConfig.toObject({ array: true }) : newConfig);
 				} catch (callbackError) {
 					console.error('[console] Error in configuration change callback:', callbackError.message);
 				}
@@ -182,15 +183,3 @@ class ConfigMonitor {
 		}
 	}
 }
-
-/**
- * Factory function to create a configuration monitor
- * @param {string} configPath Path to SLID configuration file
- * @param {Function} onChange Callback when configuration changes
- * @returns {ConfigMonitor} Configuration monitor instance
- */
-function createConfigMonitor (configPath, onChange) {
-	return new ConfigMonitor(configPath, onChange);
-}
-
-export { ConfigMonitor, createConfigMonitor };

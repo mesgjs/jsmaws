@@ -9,6 +9,7 @@
 
 import { parseSLID } from '@nanos';
 import { OperatorProcess } from './operator-process.esm.js';
+import { registerValueSchemes } from './schemes/index.esm.js';
 
 const DEFAULT_CONFIG_FILE = 'jsmaws.slid';
 
@@ -27,6 +28,9 @@ export async function loadConfig (configPath) {
  * Main entry point
  */
 async function main () {
+	// Register value scheme handlers before any config resolution
+	registerValueSchemes();
+
 	// Parse command line arguments
 	const args = Deno.args;
 	const configFile = args[0] || DEFAULT_CONFIG_FILE;
@@ -34,10 +38,15 @@ async function main () {
 	// Load configuration from SLID file
 	console.log(`Loading configuration from: ${configFile}`);
 	const configNANOS = await loadConfig(configFile);
+	const nativeConfig = configNANOS.toObject({ array: true });
 
-	// Create and start operator (Configuration is created internally from NANOS)
-	const operator = new OperatorProcess(configNANOS, configFile);
+	// Create operator with null config; initial config is set via handleConfigUpdate()
+	// so that value references (:env:, :file:, :kv:) are resolved before use.
+	const operator = new OperatorProcess(null, configFile);
 	globalThis.OperatorProcess = OperatorProcess;
+
+	// Resolve and apply initial configuration (same path as config reloads)
+	await operator.handleConfigUpdate(nativeConfig);
 
 	console.log('Operator configuration:');
 	console.log(`  HTTP Port: ${operator.config.httpPort}`);

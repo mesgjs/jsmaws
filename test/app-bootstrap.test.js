@@ -100,7 +100,7 @@ async function setupBootstrapWorker (appCode, setupOverrides = {}) {
 	return { worker, transport, c2cChannel, bootstrapChannel, appChannel, cleanup };
 }
 
-// ─── Deno namespace lockdown ──────────────────────────────────────────────────
+// --- Deno namespace lockdown --------------------------------------------------
 
 Deno.test('Bootstrap - Deno APIs are filtered (approved APIs exist)', async () => {
 	const appCode = `
@@ -210,7 +210,7 @@ Deno.test('Bootstrap - Deno is frozen', async () => {
 	}
 });
 
-// ─── JSMAWS namespace ─────────────────────────────────────────────────────────
+// --- JSMAWS namespace ---------------------------------------------------------
 
 Deno.test('Bootstrap - JSMAWS.server channel is available', async () => {
 	const appCode = `
@@ -284,7 +284,7 @@ Deno.test('Bootstrap - JSMAWS is frozen', async () => {
 	}
 });
 
-// ─── Mod-App execution ────────────────────────────────────────────────────────
+// --- Mod-App execution --------------------------------------------------------
 
 Deno.test('Bootstrap - mod-app default export is called with setupData', async () => {
 	const appCode = `
@@ -390,7 +390,7 @@ Deno.test('Bootstrap - mod-app error sends res-error', async () => {
 	}
 });
 
-// ─── Console interception via C2C ─────────────────────────────────────────────
+// --- Console interception via C2C ---------------------------------------------
 
 Deno.test('Bootstrap - console.log is forwarded via C2C channel', async () => {
 	const appCode = `
@@ -454,7 +454,7 @@ Deno.test('Bootstrap - console.error is forwarded via C2C channel', async () => 
 	}
 });
 
-// ─── Deno.inspect availability ────────────────────────────────────────────────
+// --- Deno.inspect availability ------------------------------------------------
 
 Deno.test('Bootstrap - Deno.inspect is available for formatting', async () => {
 	const appCode = `
