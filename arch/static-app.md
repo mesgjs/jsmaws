@@ -1,17 +1,17 @@
-# @static Built-in Applet Design
+# @static Built-in Mod-App Design
 
 **Status**: [DRAFT]
 
 ## Overview
 
-The `@static` built-in applet provides standard static file serving functionality for JSMAWS. It handles serving files from the configured root directory with security, performance optimizations, and HTTP Range request support.
+The `@static` built-in mod-app provides standard static file serving functionality for JSMAWS. It handles serving files from the configured root directory with security, performance optimizations, and HTTP Range request support.
 
 ## Key Finding: No New Route Token Type Needed
 
 The existing routing architecture already supports `@static` through **virtual routes** with the `app` property. No new routing token type is required.
 
 From [`arch/requirements.md`](requirements.md:64):
-> Create a built-in applet `app=@static` for standard static file service (serving file at root + tail)
+> Create a built-in mod-app `app=@static` for standard static file service (serving file at root + tail)
 
 The router already handles this in [`src/router-worker.esm.js`](../src/router-worker.esm.js:103-106).
 
@@ -43,14 +43,14 @@ FEEDBACK:
 - Do not choose default assets to fully or partially potentially expose to the Internet anywhere in the server, ever - they're just CVEs waiting to be filed
   - In particular, do not offer default roots
 
-## Applet Location
+## Mod-App Location
 
-The built-in applet will be located at:
+The built-in mod-app will be located at:
 ```
-src/applets/static-content.esm.js
+src/apps/static-content.esm.js
 ```
 
-This creates a new `src/applets/` directory for built-in applets.
+This creates a new `src/apps/` directory for built-in mod-apps.
 
 ## Implementation Design
 
@@ -78,11 +78,11 @@ This creates a new `src/applets/` directory for built-in applets.
    - 416 Range Not Satisfiable: Invalid range requests
    - 500 Internal Server Error: Unexpected errors
 
-### Applet Implementation
+### Mod-App Implementation
 
 ```javascript
 /**
- * JSMAWS Built-in Static File Applet
+ * JSMAWS Built-in Static File Mod-App
  * Serves static files from the configured root directory
  * 
  * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
@@ -328,20 +328,20 @@ The responder process needs to handle `@static` as a special case in [`src/respo
 ### Detection and Loading
 
 FEEDBACK:
- - This is a *terrible* design. You're replacing the special token too early, and then trying to determine later if there was previously a special token. Leave handleWebRequest as-is and check for @static in spawnApplet.
+ - This is a *terrible* design. You're replacing the special token too early, and then trying to determine later if there was previously a special token. Leave handleWebRequest as-is and check for @static in spawnApp.
 
 ```javascript
 async handleWebRequest(id, fields, binaryData) {
-  const appletPath = fields.at('app');
+  const appPath = fields.at('app');
   
-  // Handle built-in @static applet
-  if (appletPath === '@static') {
-    const builtinPath = new URL('./applets/static-content.esm.js', import.meta.url).pathname;
-    return await this.spawnApplet(id, builtinPath, fields, binaryData);
+  // Handle built-in @static mod-app
+  if (appPath === '@static') {
+    const builtinPath = new URL('./apps/static-content.esm.js', import.meta.url).pathname;
+    return await this.spawnApp(id, builtinPath, fields, binaryData);
   }
   
-  // Handle regular applets
-  return await this.spawnApplet(id, appletPath, fields, binaryData);
+  // Handle regular mod-apps
+  return await this.spawnApp(id, appPath, fields, binaryData);
 }
 ```
 
@@ -349,19 +349,19 @@ async handleWebRequest(id, fields, binaryData) {
 
 FEEDBACK:
 - The isBuiltin test is rejected.
-- Per above, the appletPath should still be @static upon entry.
-- switch on the appletPath to handle built-ins between initial permissions calculation and new Worker.
-  - For special applets, patch the applet path and permissions.
+- Per above, the appPath should still be @static upon entry.
+- switch on the appPath to handle built-ins between initial permissions calculation and new Worker.
+  - For special mod-apps, patch the mod-app path and permissions.
   - Maybe set a configuration callback/hook/flag here for sharing configuration with built-ins.
 
 ```javascript
-async spawnApplet(id, appletPath, fields, binaryData) {
-  // Determine permissions based on applet type
-  const isBuiltin = appletPath.includes('/applets/');
-  const isFileApplet = !appletPath.startsWith('http');
+async spawnApp(id, appPath, fields, binaryData) {
+  // Determine permissions based on mod-app type
+  const isBuiltin = appPath.includes('/apps/');
+  const isFileApp = !appPath.startsWith('http');
   
   const permissions = {
-    read: isFileApplet ? [appletPath] : false,
+    read: isFileApp ? [appPath] : false,
     net: true, // Always allow for module loading
     write: false,
     run: false,
@@ -369,12 +369,12 @@ async spawnApplet(id, appletPath, fields, binaryData) {
   };
   
   // For @static, also grant read access to root directory
-  if (appletPath.includes('static-content.esm.js')) {
+  if (appPath.includes('static-content.esm.js')) {
     const root = this.config.routing.root;
-    permissions.read = [appletPath, root];
+    permissions.read = [appPath, root];
   }
   
-  const appletWorker = new Worker(appletPath, {
+  const appWorker = new Worker(appPath, {
     type: 'module',
     deno: { permissions }
   });
@@ -385,11 +385,11 @@ async spawnApplet(id, appletPath, fields, binaryData) {
 
 ### Configuration Passing
 
-The responder must pass relevant configuration to the applet:
+The responder must pass relevant configuration to the mod-app:
 
 ```javascript
-// Send request to applet
-appletWorker.postMessage({
+// Send request to mod-app
+appWorker.postMessage({
   type: 'request',
   id,
   method,
@@ -399,7 +399,7 @@ appletWorker.postMessage({
   query,
   tail,
   body: binaryData,
-  config: {  // NEW: Pass relevant config to applet
+  config: {  // NEW: Pass relevant config to mod-app
     root: this.config.routing.root,
     mimeTypes: this.config.mimeTypes
   }
@@ -476,16 +476,16 @@ Responder Process (fast pool)
     ↓
 Detects app=@static
     ↓
-Resolves to: src/applets/static-content.esm.js
+Resolves to: src/apps/static-content.esm.js
     ↓
 Spawns Worker with permissions:
-    read=[applet, /var/www/html]
+    read=[app, /var/www/html]
     net=true
     ↓
 Sends request with config:
     { tail: '/images/logo.png', config: { root: '/var/www/html', mimeTypes: {...} } }
     ↓
-Applet processes:
+Mod-app processes:
     1. Constructs path: /var/www/html/images/logo.png
     2. Validates security (no traversal)
     3. Checks file exists and is readable
@@ -493,14 +493,14 @@ Applet processes:
     5. Reads file (chunked if large)
     6. Sends response
     ↓
-Response flows back: Applet → Responder → Operator → Client
+Response flows back: Mod-App → Responder → Operator → Client
 ```
 
 ## Security Considerations
 
 ### Path Traversal Prevention
 
-The applet uses `Deno.realPath()` to resolve the full canonical path and verifies it starts with the configured root:
+The mod-app uses `Deno.realPath()` to resolve the full canonical path and verifies it starts with the configured root:
 
 ```javascript
 const resolvedPath = await Deno.realPath(filePath).catch(() => null);
@@ -516,16 +516,16 @@ This prevents attacks like:
 
 ### Permission Model
 
-The applet worker has minimal permissions:
-- **Read**: Only applet file and root directory
-- **Net**: Only for module loading (standard for all applets)
+The mod-app worker has minimal permissions:
+- **Read**: Only mod-app file and root directory
+- **Net**: Only for module loading (standard for all mod-apps)
 - **Write**: Denied
 - **Run**: Denied
 - **Env**: Denied
 
 ### File Type Validation
 
-The applet verifies the resolved path is a file (not a directory):
+The mod-app verifies the resolved path is a file (not a directory):
 
 ```javascript
 const stat = await Deno.stat(resolvedPath);
@@ -578,14 +578,14 @@ if (!stat.isFile) {
 
 ## Implementation Steps
 
-1. Create `src/applets/` directory
-2. Implement `src/applets/static-content.esm.js`
+1. Create `src/apps/` directory
+2. Implement `src/apps/static-content.esm.js`
 3. Update `src/responder-process.esm.js`:
    - Add `@static` detection
-   - Add configuration passing to applet requests
-   - Add permission configuration for built-in applets
+   - Add configuration passing to mod-app requests
+   - Add permission configuration for built-in mod-apps
 4. Update `jsmaws.slid` with example `@static` routes
-5. Create test suite for `@static` applet
+5. Create test suite for `@static` mod-app
 6. Integration testing with end-to-end flow
 7. Performance benchmarking
 
@@ -613,7 +613,7 @@ staticOptions=[
 ## References
 
 - [`arch/requirements.md`](requirements.md) - Configuration and requirements
-- [`arch/applet-protocol.md`](applet-protocol.md) - Applet communication protocol
+- [`arch/app-protocol.md`](app-protocol.md) - Mod-app communication protocol
 - [`src/router-worker.esm.js`](../src/router-worker.esm.js) - Router implementation
 - [`src/responder-process.esm.js`](../src/responder-process.esm.js) - Responder implementation
 - [`arch/jsmaws-config-example.md`](jsmaws-config-example.md) - Configuration examples

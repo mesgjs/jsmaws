@@ -27,15 +27,15 @@ export const REQ_CHANNEL_MESSAGE_TYPES = [
 	'res-frame',    // responder → operator: response body chunk (binary relay, dechunk:false)
 	                //   zero-data (undefined) + eom:true = end-of-stream signal
 	'res-error',    // responder → operator: error response (JSON text)
-	'bidi-frame',   // bidirectional relay: NestedTransport traffic between client and applet (bidi mode)
-	// con-* message types for forwarded applet console output.
+	'bidi-frame',   // bidirectional relay: NestedTransport traffic between client and mod-app (bidi mode)
+	// con-* message types for forwarded mod-app console output.
 	// The 'con-' prefix avoids collision with the C2C channel's native bare names
 	// (trace/debug/info/warn/error) and with res-error on this same channel.
-	'con-trace',    // responder → operator: applet console output (trace level)
-	'con-debug',    // responder → operator: applet console output (debug level)
-	'con-info',     // responder → operator: applet console output (info level)
-	'con-warn',     // responder → operator: applet console output (warn level)
-	'con-error',    // responder → operator: applet console output (error level)
+	'con-trace',    // responder → operator: mod-app console output (trace level)
+	'con-debug',    // responder → operator: mod-app console output (debug level)
+	'con-info',     // responder → operator: mod-app console output (info level)
+	'con-warn',     // responder → operator: mod-app console output (warn level)
+	'con-error',    // responder → operator: mod-app console output (error level)
 ];
 
 /**

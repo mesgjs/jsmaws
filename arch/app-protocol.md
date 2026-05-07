@@ -1,42 +1,42 @@
-# Applet Communication Protocol
+# Mod-App Communication Protocol
 
 **Status**: [DRAFT]
 
 ## Overview
 
-Applets are JavaScript modules that handle HTTP requests, similar to PHP scripts or Java servlets. Each applet runs as a Web Worker within a responder process and communicates via `postMessage`.
+Mod-apps (modular applications) are JavaScript modules that handle HTTP requests, similar to PHP scripts or Java servlets. Each mod-app (or just "app" for even more brevity) runs as a Web Worker within a responder process and communicates via `postMessage`.
 
-## Applet Architecture
+## Mod-App Architecture
 
-### What is an Applet?
+### What is a Mod-App?
 
-An **applet** is a JavaScript module that:
+A **mod-app** is a JavaScript module that:
 - Runs as a Web Worker (isolated execution context)
 - Receives HTTP-like request messages via `postMessage`
 - Returns HTTP-like response messages via `postMessage`
-- Has restricted permissions (read-only for file-based applets, and network (always) for possible additional module loading)
+- Has restricted permissions (read-only for file-based mod-apps, and network (always) for possible additional module loading)
 - Is loaded fresh for each request (one-shot execution for security)
 
-### Applet Lifecycle
+### Mod-App Lifecycle
 
 ```
 1. Responder process receives request from operator
-2. Responder process spawns applet as Web Worker (new Worker(appletPath))
-3. Applet module loads (benefits from process-level module cache)
-4. Responder sends request message to applet via postMessage
-5. Applet processes request and sends response via postMessage
+2. Responder process spawns mod-app as Web Worker (new Worker(appPath))
+3. App module loads (benefits from process-level module cache)
+4. Responder sends request message to mod-app via postMessage
+5. Mod-app processes request and sends response via postMessage
 6. Responder forwards response to operator
-7. Applet worker terminates (one-shot execution via self.close())
+7. Mod-app worker terminates (one-shot execution via self.close())
 ```
 
-**Important**: There is NO intermediate "responder-worker" wrapper. The responder process directly spawns applet workers.
+**Important**: There is NO intermediate "responder-worker" wrapper. The responder process directly spawns mod-app workers.
 
 ### Security Model
 
 - **One-shot execution**: Each request gets a fresh worker (prevents state leakage)
 - **Restricted permissions**: 
-  - File-based applets: read-only access to applet file
-  - All applets: network access for (additional) module loading
+  - File-based mod-apps: read-only access to mod-app file
+  - All mod-apps: network access for (additional) module loading
   - No write access (except via IPC to responder)
   - No process spawning
   - No environment variable access
@@ -47,9 +47,9 @@ An **applet** is a JavaScript module that:
 
 ## Message Protocol
 
-### Request Message (Responder → Applet)
+### Request Message (Responder → Mod-App)
 
-The responder (process) sends an HTTP-like request to the applet (worker):
+The responder (process) sends an HTTP-like request to the mod-app (worker):
 
 ```javascript
 {
@@ -79,11 +79,11 @@ The responder (process) sends an HTTP-like request to the applet (worker):
 }
 ```
 
-**Note**: The `timeouts` object is provided for informational purposes. Applets do not need to enforce these timeouts themselves - the responder process handles all timeout enforcement.
+**Note**: The `timeouts` object is provided for informational purposes. Mod-apps do not need to enforce these timeouts themselves - the responder process handles all timeout enforcement.
 
-### Response Message (Applet → Responder)
+### Response Message (Mod-App → Responder)
 
-The applet sends an HTTP-like response back:
+The mod-app sends an HTTP-like response back:
 
 ```javascript
 {
@@ -99,9 +99,9 @@ The applet sends an HTTP-like response back:
 }
 ```
 
-### Error Response (Applet → Responder)
+### Error Response (Mod-App → Responder)
 
-If the applet encounters an error:
+If the mod-app encounters an error:
 
 ```javascript
 {
@@ -184,7 +184,7 @@ Route Configuration > Pool Configuration > Global Configuration
 - **Bidirectional requests**: Timeout applies to each frame in both directions
 
 ```javascript
-// Request timeout starts when applet begins processing
+// Request timeout starts when mod-app begins processing
 self.onmessage = async (event) => {
   const { type, id, timeouts } = event.data;
   
@@ -287,15 +287,15 @@ self.onmessage = async (event) => {
 
 **Responder Process Responsibilities**:
 - Resolves timeout configuration using hierarchy (route > pool > global)
-- Passes timeout values to applets in request message
+- Passes timeout values to mod-apps in request message
 - Enforces all three timeout types
-- Terminates applet workers on timeout
+- Terminates mod-app workers on timeout
 - Sends appropriate error responses to clients
 
-**Applet Responsibilities**:
-- Applets receive timeout values for informational purposes only
-- Applets do NOT need to enforce timeouts themselves
-- Applets should design for graceful termination
+**Mod-App Responsibilities**:
+- Mod-apps receive timeout values for informational purposes only
+- Mod-apps do NOT need to enforce timeouts themselves
+- Mod-apps should design for graceful termination
 
 ### Timeout Error Responses
 
@@ -340,13 +340,13 @@ stream=[
 ]
 ```
 
-## Applet Implementation
+## Mod-App Implementation
 
-### Minimal Applet Example
+### Minimal Mod-App Example
 
 ```javascript
 // hello-world.esm.js
-// Simple applet that returns "Hello, World!"
+// Simple mod-app that returns "Hello, World!"
 
 self.onmessage = async (event) => {
   const { type, id, method, path, headers, params, query, tail, body } = event.data;
@@ -389,11 +389,11 @@ self.onmessage = async (event) => {
 };
 ```
 
-### Echo Applet Example
+### Echo Mod-App Example
 
 ```javascript
 // echo.esm.js
-// Applet that echoes request details back as JSON
+// Mod-app that echoes request details back as JSON
 
 self.onmessage = async (event) => {
   const { type, id, method, path, headers, params, query, tail, body } = event.data;
@@ -438,11 +438,11 @@ self.onmessage = async (event) => {
 };
 ```
 
-### API Applet Example
+### API Mod-App Example
 
 ```javascript
 // api-users.esm.js
-// RESTful API applet for user management
+// RESTful API mod-app for user management
 
 self.onmessage = async (event) => {
   const { type, id, method, path, headers, params, query, body } = event.data;
@@ -543,13 +543,13 @@ async function deleteUser(userId) {
 
 ## Responder Process Implementation
 
-The responder process directly spawns applet workers (no intermediate wrapper):
+The responder process directly spawns mod-app workers (no intermediate wrapper):
 
 ```javascript
 // responder-process.esm.js (simplified)
 class ResponderProcess {
   async handleWebRequest(id, fields, binaryData) {
-    const appletPath = fields.at('app');
+    const appPath = fields.at('app');
     const method = fields.at('method');
     const path = fields.at('path');
     const headers = fields.at('headers') || {};
@@ -557,12 +557,12 @@ class ResponderProcess {
     const query = fields.at('query') || {};
     const tail = fields.at('tail', '');
     
-    // Spawn applet as Web Worker
-    const appletWorker = new Worker(appletPath, {
+    // Spawn mod-app as Web Worker
+    const appWorker = new Worker(appPath, {
       type: 'module',
       deno: {
         permissions: {
-          read: appletPath.startsWith('http') ? false : [appletPath],
+          read: appPath.startsWith('http') ? false : [appPath],
           net: true,  // Always allow network for module loading
           write: false,
           run: false,
@@ -571,15 +571,15 @@ class ResponderProcess {
       }
     });
     
-    // Handle applet response
+    // Handle mod-app response
     const response = await new Promise((resolve, reject) => {
       const reqTimeout = this.config.at(['pools', this.poolName, 'reqTimeout'], 30);
       const timeout = setTimeout(() => {
-        appletWorker.terminate();
+        appWorker.terminate();
         reject(new Error('Request timeout'));
       }, reqTimeout * 1000);
       
-      appletWorker.onmessage = (event) => {
+      appWorker.onmessage = (event) => {
         clearTimeout(timeout);
         const { type, status, headers, body, chunked, keepAlive } = event.data;
         
@@ -591,13 +591,13 @@ class ResponderProcess {
         // Handle 'chunk', 'stream-data', 'ws-upgrade', etc.
       };
       
-      appletWorker.onerror = (error) => {
+      appWorker.onerror = (error) => {
         clearTimeout(timeout);
         reject(error);
       };
       
-      // Send request to applet
-      appletWorker.postMessage({
+      // Send request to mod-app
+      appWorker.postMessage({
         type: 'request',
         id,
         method,
@@ -618,17 +618,17 @@ class ResponderProcess {
 
 **Key Points:**
 - No `responder-worker.esm.js` file needed
-- Responder process directly uses `new Worker(appletPath)`
-- Applets are self-contained Web Workers
-- Built-in `@static` applet handles static file serving
+- Responder process directly uses `new Worker(appPath)`
+- Mod-apps are self-contained Web Workers
+- Built-in `@static` mod-app handles static file serving
 
 ## Design Rationale
 
 ### Why Web Workers?
 
-1. **Isolation**: Each applet runs in isolated context (no shared state)
+1. **Isolation**: Each mod-app runs in isolated context (no shared state)
 2. **Security**: Restricted permissions per worker
-3. **Parallelism**: Multiple applets can run concurrently
+3. **Parallelism**: Multiple mod-apps can run concurrently
 4. **Standard API**: Web Worker API is well-defined and portable
 
 ### Why One-Shot Execution?
@@ -650,14 +650,14 @@ class ResponderProcess {
 ### PHP (Apache mod_php)
 
 - **PHP**: Script loaded per request, executed in Apache process
-- **JSMAWS**: Applet loaded per request, executed in Web Worker
+- **JSMAWS**: Mod-app loaded per request, executed in Web Worker
 - **Similarity**: Both load fresh code per request
 - **Difference**: JSMAWS uses process-level module cache for performance
 
 ### Java Servlets (Tomcat)
 
 - **Tomcat**: Servlet instance reused across requests
-- **JSMAWS**: Applet worker created fresh per request
+- **JSMAWS**: Mod-app worker created fresh per request
 - **Similarity**: Both use HTTP-like request/response model
 - **Difference**: JSMAWS prioritizes security over instance reuse
 
@@ -805,7 +805,7 @@ self.close();  // Now worker can terminate
 
 ```javascript
 // large-file.esm.js
-// Applet that serves a large file in chunks
+// Mod-app that serves a large file in chunks
 
 self.onmessage = async (event) => {
   const { type, id, path } = event.data;
@@ -868,7 +868,7 @@ self.onmessage = async (event) => {
 
 ```javascript
 // live-logs.esm.js
-// Applet that streams log updates in real-time
+// Mod-app that streams log updates in real-time
 
 self.onmessage = async (event) => {
   const { type, id, params } = event.data;
@@ -938,7 +938,7 @@ WebSocket connections require bidirectional communication and long-lived workers
 #### WebSocket Upgrade Request
 
 ```javascript
-// Applet receives upgrade request
+// Mod-app receives upgrade request
 self.onmessage = async (event) => {
   const { type, id, method, path, headers } = event.data;
   
@@ -1032,7 +1032,7 @@ self.onmessage = (event) => {
 
 ```javascript
 // chat.esm.js
-// WebSocket chat applet
+// WebSocket chat mod-app
 
 const clients = new Set();
 
@@ -1124,26 +1124,26 @@ The responder process must handle WebSocket upgrade and message forwarding:
 ```javascript
 class ResponderProcess {
   async handleWebRequest(id, fields, binaryData) {
-    const appletPath = fields.at('app');
-    const appletWorker = new Worker(appletPath, { /* permissions */ });
+    const appPath = fields.at('app');
+    const appWorker = new Worker(appPath, { /* permissions */ });
     
     return new Promise((resolve, reject) => {
       let isWebSocket = false;
       let activeWorker = null;
       
-      appletWorker.onmessage = (event) => {
+      appWorker.onmessage = (event) => {
         const { type, status, headers, protocol, opcode, data, code, reason } = event.data;
         
         if (type === 'ws-upgrade') {
           // WebSocket upgrade accepted
           isWebSocket = true;
-          activeWorker = appletWorker;  // Keep worker alive
+          activeWorker = appWorker;  // Keep worker alive
           
           // Send upgrade response to operator
           this.sendWebSocketUpgrade(id, protocol);
           
           // Store worker for future WebSocket messages
-          this.activeWebSockets.set(id, appletWorker);
+          this.activeWebSockets.set(id, appWorker);
         } else if (type === 'ws-send') {
           // Forward WebSocket message to operator/client
           this.sendWebSocketData(id, opcode, data);
@@ -1151,7 +1151,7 @@ class ResponderProcess {
           // Close WebSocket connection
           this.sendWebSocketClose(id, code, reason);
           this.activeWebSockets.delete(id);
-          appletWorker.terminate();
+          appWorker.terminate();
         } else if (type === 'response') {
           // Regular HTTP response
           resolve({ status, headers, body: event.data.body });
@@ -1160,8 +1160,8 @@ class ResponderProcess {
         }
       };
       
-      // Send request to applet
-      appletWorker.postMessage({
+      // Send request to mod-app
+      appWorker.postMessage({
         type: 'request',
         id,
         ...Object.fromEntries(fields.namedEntries()),
@@ -1170,7 +1170,7 @@ class ResponderProcess {
     });
   }
   
-  // Forward WebSocket message from operator to applet
+  // Forward WebSocket message from operator to mod-app
   handleWebSocketMessage(id, opcode, data) {
     const worker = this.activeWebSockets.get(id);
     if (worker) {

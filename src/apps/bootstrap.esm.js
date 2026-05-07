@@ -1,18 +1,18 @@
 /**
- * JSMAWS Applet Bootstrap Module
- * Environment lockdown and controlled initialization for applet workers.
+ * JSMAWS Mod-App Bootstrap Module
+ * Environment lockdown and controlled initialization for mod-app workers.
  *
  * This module:
  * - Establishes a PostMessageTransport with the responder process
- * - Locks down the worker environment before applet code executes
+ * - Locks down the worker environment before mod-app code executes
  * - Filters Deno namespace to approved APIs
  * - Captures console output and forwards via the C2C channel
- * - Prevents applets from forging IPC messages
+ * - Prevents mod-apps from forging IPC messages
  * - Reads setup instructions from the private 'bootstrap' channel
- * - Exposes globalThis.JSMAWS (frozen namespace) to the applet:
- *     .server — the main PolyTransport channel (applet ↔ JSMAWS server)
+ * - Exposes globalThis.JSMAWS (frozen namespace) to the mod-app:
+ *     .server — the main PolyTransport channel (mod-app ↔ JSMAWS server)
  *     .bidi   — the NestedTransport relay channel (bidi requests only)
- * - Dynamically imports the applet after environment is secured
+ * - Dynamically imports the mod-app after environment is secured
  *
  * Security Model:
  * - Console output captured via C2C channel (prevents stdout IPC forgery)
@@ -30,7 +30,7 @@ import { Channel } from '@poly-transport/channel.esm.js';
 
 /**
  * Approved Deno APIs
- * These are the only Deno APIs applets can access
+ * These are the only Deno APIs mod-apps can access
  */
 const APPROVED_DENO_APIS = [
 	// Info
@@ -63,7 +63,7 @@ const APPROVED_DENO_APIS = [
 ];
 
 /**
- * Disable web workers inside applet workers
+ * Disable web workers inside mod-app workers
  */
 function disableWorkers () {
 	const disabledWorker = Object.freeze(class Worker {
@@ -188,10 +188,10 @@ function setupConsole (c2c) {
 /**
  * Main bootstrap entry point.
  * Establishes PostMessageTransport, reads setup from the private 'bootstrap' channel,
- * locks down the environment, exposes globalThis.JSMAWS, and imports the applet.
+ * locks down the environment, exposes globalThis.JSMAWS, and imports the mod-app.
  */
 async function bootstrap () {
-	// Create buffer pool for this applet worker
+	// Create buffer pool for this mod-app worker
 	const bufferPool = new BufferPool({
 		sizeClasses: [1024, 4096, 16384, 65536],
 		lowWaterMark: 2,
@@ -216,7 +216,7 @@ async function bootstrap () {
 	await transport.start();
 
 	// Get the C2C channel and set up console interception immediately
-	// (before any applet code runs, so all console output goes through C2C)
+	// (before any mod-app code runs, so all console output goes through C2C)
 	const c2c = transport.getChannel(c2cSymbol);
 	if (c2c) setupConsole(c2c);
 
@@ -229,9 +229,9 @@ async function bootstrap () {
 		setupData = JSON.parse(setupMsg.text);
 	});
 
-	const { appletPath, mode, keepDeno = false, keepWorkers = false } = setupData;
+	const { appPath, mode, keepDeno = false, keepWorkers = false } = setupData;
 
-	// Lock down the environment before importing the applet
+	// Lock down the environment before importing the mod-app
 	if (!keepDeno) {
 		setupDeno();
 	}
@@ -239,30 +239,30 @@ async function bootstrap () {
 		disableWorkers();
 	}
 
-	// Set up the JSMAWS communication channel (applet ↔ server)
-	const appletChannel = await transport.requestChannel('applet');
-	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
+	// Set up the JSMAWS communication channel (mod-app ↔ server)
+	const appChannel = await transport.requestChannel('app');
+	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
 
-	// Build the JSMAWS namespace object (frozen before applet import)
-	const jsmawsNamespace = { server: appletChannel };
+	// Build the JSMAWS namespace object (frozen before mod-app import)
+	const jsmawsNamespace = { server: appChannel };
 
-	// Expose frozen namespace to applet
+	// Expose frozen namespace to mod-app
 	globalThis.JSMAWS = Object.freeze(jsmawsNamespace);
 
-	// Dynamically import and run the applet
+	// Dynamically import and run the mod-app
 	try {
-		const appletModule = await import(appletPath);
-		// Call the default export if it is a function (standard applet entry point)
-		if (typeof appletModule.default === 'function') {
-			await appletModule.default(setupData);
+		const appModule = await import(appPath);
+		// Call the default export if it is a function (standard mod-app entry point)
+		if (typeof appModule.default === 'function') {
+			await appModule.default(setupData);
 		}
 	} catch (error) {
 		// Report error via console (which now goes through C2C)
-		console.error('Applet error:', error.message);
+		console.error('Mod-app error:', error.message);
 		if (error.stack) console.error(error.stack);
 		// Also write a res-error so the responder can return a 500 to the client
 		try {
-			await appletChannel.write('res-error', JSON.stringify({
+			await appChannel.write('res-error', JSON.stringify({
 				error: error.message,
 				stack: error.stack,
 			}));

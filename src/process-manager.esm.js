@@ -80,16 +80,16 @@ class ManagedProcess {
 		this.lastHealthCheck = null;
 		this.availableWorkers = 0;
 		this.totalWorkers = 0;
-		this.affinity = new Set(); // Applet paths this process has loaded
+		this.affinity = new Set(); // App paths this process has loaded
 		this.processManager = processManager;
 		this._shutdownCallbacks = [];
 	}
 
 	/**
-	 * Add applet to affinity set
+	 * Add mod-app to affinity set
 	 */
-	addAffinity (appletPath) {
-		this.affinity.add(appletPath);
+	addAffinity (appPath) {
+		this.affinity.add(appPath);
 	}
 
 	/**
@@ -100,10 +100,10 @@ class ManagedProcess {
 	}
 
 	/**
-	 * Check if process has affinity for applet
+	 * Check if process has affinity for mod-app
 	 */
-	hasAffinity (appletPath) {
-		return this.affinity.has(appletPath);
+	hasAffinity (appPath) {
+		return this.affinity.has(appPath);
 	}
 
 	/**

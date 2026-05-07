@@ -1,9 +1,9 @@
 /**
  * Security Validation Tests
- * Tests for hostile applet scenarios and security boundary enforcement
+ * Tests for hostile mod-app scenarios and security boundary enforcement
  *
  * These tests verify that the bootstrap module properly defends against
- * malicious applet behavior using the PolyTransport-based architecture:
+ * malicious mod-app behavior using the PolyTransport-based architecture:
  * - Environment tampering prevention
  * - Resource exhaustion (DoS) prevention
  * - Privilege escalation prevention
@@ -17,14 +17,14 @@ import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
 import { PromiseTracer } from '@poly-transport/promise-tracer.esm.js';
 
-const bootstrapPath = new URL('../src/applets/bootstrap.esm.js', import.meta.url).href;
+const bootstrapPath = new URL('../src/apps/bootstrap.esm.js', import.meta.url).href;
 
 /**
- * Create a test applet data URL from JavaScript source code.
- * Applets must be ES modules with an optional default export function.
+ * Create a test mod-app data URL from JavaScript source code.
+ * Mod-apps must be ES modules with an optional default export function.
  */
-function makeAppletUrl (appletCode) {
-	return `data:application/javascript;base64,${btoa(appletCode)}`;
+function makeAppUrl (appCode) {
+	return `data:application/javascript;base64,${btoa(appCode)}`;
 }
 
 /**
@@ -40,13 +40,13 @@ async function readToEOS (channel) {
 
 /**
  * Set up a bootstrap worker with PostMessageTransport.
- * Returns { worker, transport, c2cChannel, bootstrapChannel, appletChannel, cleanup }
+ * Returns { worker, transport, c2cChannel, bootstrapChannel, appChannel, cleanup }
  *
- * @param {string} appletCode - JavaScript source for the test applet (ES module)
+ * @param {string} appCode - JavaScript source for the test mod-app (ES module)
  * @param {object} setupOverrides - Overrides for the setup message
  */
-async function setupBootstrapWorker (appletCode, setupOverrides = {}) {
-	const appletUrl = makeAppletUrl(appletCode);
+async function setupBootstrapWorker (appCode, setupOverrides = {}) {
+	const appUrl = makeAppUrl(appCode);
 
 	const worker = new Worker(bootstrapPath, {
 		type: 'module',
@@ -85,16 +85,16 @@ async function setupBootstrapWorker (appletCode, setupOverrides = {}) {
 	const bootstrapChannel = await transport.requestChannel('bootstrap');
 	await bootstrapChannel.addMessageTypes(['setup']);
 	await bootstrapChannel.write('setup', JSON.stringify({
-		appletPath: appletUrl,
+		appPath: appUrl,
 		mode: 'response',
 		keepDeno: false,
 		keepWorkers: false,
 		...setupOverrides,
 	}));
 
-	// Set up the applet communication channel
-	const appletChannel = await transport.requestChannel('applet');
-	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+	// Set up the mod-app communication channel
+	const appChannel = await transport.requestChannel('app');
+	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
 
 	const cleanup = async () => {
 		await transport.stop({ discard: true }).catch((err) => {
@@ -103,24 +103,24 @@ async function setupBootstrapWorker (appletCode, setupOverrides = {}) {
 		worker.terminate();
 	};
 
-	return { worker, transport, c2cChannel, bootstrapChannel, appletChannel, cleanup };
+	return { worker, transport, c2cChannel, bootstrapChannel, appChannel, cleanup };
 }
 
 /**
- * Read a single result frame from the applet channel.
+ * Read a single result frame from the mod-app channel.
  * Expects: res (metadata), res-frame (JSON data), res-frame (null/EOS).
  */
-async function readAppletResult (appletChannel) {
-	const resMeta = await appletChannel.read({ only: 'res', decode: true });
+async function readAppResult (appChannel) {
+	const resMeta = await appChannel.read({ only: 'res', decode: true });
 	await resMeta.done();
 
-	const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+	const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 	let data;
 	await resFrame.process(() => {
 		data = JSON.parse(resFrame.text);
 	});
 
-	await readToEOS(appletChannel);
+	await readToEOS(appChannel);
 	return data;
 }
 
@@ -129,7 +129,7 @@ async function readAppletResult (appletChannel) {
 // ============================================================================
 
 Deno.test('Security - cannot access Deno.stdin/stdout/stderr', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasStdin = 'stdin' in Deno;
 			const hasStdout = 'stdout' in Deno;
@@ -142,10 +142,10 @@ Deno.test('Security - cannot access Deno.stdin/stdout/stderr', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasStdin, false, 'Deno.stdin should not be accessible');
 		assertEquals(data.hasStdout, false, 'Deno.stdout should not be accessible');
 		assertEquals(data.hasStderr, false, 'Deno.stderr should not be accessible');
@@ -155,7 +155,7 @@ Deno.test('Security - cannot access Deno.stdin/stdout/stderr', async () => {
 });
 
 Deno.test('Security - console is frozen (cannot restore original)', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			let canRestore = false;
 			try {
@@ -174,10 +174,10 @@ Deno.test('Security - console is frozen (cannot restore original)', async () => 
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.canRestore, false, 'Console should not be restorable');
 	} finally {
 		await cleanup();
@@ -185,7 +185,7 @@ Deno.test('Security - console is frozen (cannot restore original)', async () => 
 });
 
 Deno.test('Security - Deno is frozen (cannot restore original)', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			let canRestore = false;
 			try {
@@ -204,10 +204,10 @@ Deno.test('Security - Deno is frozen (cannot restore original)', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.canRestore, false, 'Deno should not be restorable');
 	} finally {
 		await cleanup();
@@ -215,7 +215,7 @@ Deno.test('Security - Deno is frozen (cannot restore original)', async () => {
 });
 
 Deno.test('Security - cannot add new console methods', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			let canAdd = false;
 			try {
@@ -232,10 +232,10 @@ Deno.test('Security - cannot add new console methods', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.canAdd, false, 'Should not be able to add console methods');
 	} finally {
 		await cleanup();
@@ -243,7 +243,7 @@ Deno.test('Security - cannot add new console methods', async () => {
 });
 
 Deno.test('Security - cannot add new Deno APIs', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			let canAdd = false;
 			try {
@@ -260,10 +260,10 @@ Deno.test('Security - cannot add new Deno APIs', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.canAdd, false, 'Should not be able to add Deno APIs');
 	} finally {
 		await cleanup();
@@ -275,7 +275,7 @@ Deno.test('Security - cannot add new Deno APIs', async () => {
 // ============================================================================
 
 Deno.test('Security - excessive console output is captured via C2C', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			// Generate large amount of console output
 			for (let i = 0; i < 20; i++) {
@@ -289,10 +289,10 @@ Deno.test('Security - excessive console output is captured via C2C', async () =>
 		}
 	`;
 
-	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		// Collect C2C messages concurrently while reading the applet response
+		// Collect C2C messages concurrently while reading the mod-app response
 		const c2cMessages = [];
 		const c2cDone = (async () => {
 			let msg;
@@ -303,8 +303,8 @@ Deno.test('Security - excessive console output is captured via C2C', async () =>
 			}
 		})();
 
-		const data = await readAppletResult(appletChannel);
-		assertEquals(data.done, true, 'Applet should complete');
+		const data = await readAppResult(appChannel);
+		assertEquals(data.done, true, 'App should complete');
 
 		// Give C2C a moment to flush, then stop transport
 		await cleanup();
@@ -319,7 +319,7 @@ Deno.test('Security - excessive console output is captured via C2C', async () =>
 });
 
 Deno.test('Security - cannot spawn workers (Worker constructor disabled)', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			let workerCount = 0;
 			let errorMessage = null;
@@ -339,10 +339,10 @@ Deno.test('Security - cannot spawn workers (Worker constructor disabled)', async
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.workerCount, 0, 'Should not be able to spawn workers');
 		assertExists(data.errorMessage, 'Should get an error when spawning workers');
 		assert(
@@ -355,7 +355,7 @@ Deno.test('Security - cannot spawn workers (Worker constructor disabled)', async
 });
 
 Deno.test('Security - cannot access file system', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasReadFile = 'readFile' in Deno;
 			let canRead = false;
@@ -377,10 +377,10 @@ Deno.test('Security - cannot access file system', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasReadFile, false, 'Deno.readFile should not exist in filtered namespace');
 		assertEquals(data.canRead, false, 'Should not be able to read files');
 	} finally {
@@ -393,7 +393,7 @@ Deno.test('Security - cannot access file system', async () => {
 // ============================================================================
 
 Deno.test('Security - cannot access Deno.run', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasRun = 'run' in Deno;
 
@@ -404,10 +404,10 @@ Deno.test('Security - cannot access Deno.run', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasRun, false, 'Deno.run should not be accessible');
 	} finally {
 		await cleanup();
@@ -415,7 +415,7 @@ Deno.test('Security - cannot access Deno.run', async () => {
 });
 
 Deno.test('Security - cannot access Deno.exit', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasExit = 'exit' in Deno;
 
@@ -426,10 +426,10 @@ Deno.test('Security - cannot access Deno.exit', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasExit, false, 'Deno.exit should not be accessible');
 	} finally {
 		await cleanup();
@@ -437,7 +437,7 @@ Deno.test('Security - cannot access Deno.exit', async () => {
 });
 
 Deno.test('Security - cannot access environment variables', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasEnv = 'env' in Deno;
 
@@ -448,10 +448,10 @@ Deno.test('Security - cannot access environment variables', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasEnv, false, 'Deno.env should not be accessible');
 	} finally {
 		await cleanup();
@@ -463,10 +463,10 @@ Deno.test('Security - cannot access environment variables', async () => {
 // ============================================================================
 
 Deno.test('Security - console output with IPC-like content is isolated via C2C', async () => {
-	// Applet tries to inject IPC-like content via console.
+	// Mod-App tries to inject IPC-like content via console.
 	// In the PolyTransport architecture, console output goes through the C2C channel,
-	// completely separate from the applet channel — no injection is possible.
-	const appletCode = `
+	// completely separate from the mod-app channel — no injection is possible.
+	const appCode = `
 		export default async function () {
 			// Try to inject IPC-like content via console
 			console.log('res\\nstatus: 200\\nheaders: {}\\n---');
@@ -480,7 +480,7 @@ Deno.test('Security - console output with IPC-like content is isolated via C2C',
 		}
 	`;
 
-	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
 		// Collect C2C messages concurrently
@@ -494,23 +494,23 @@ Deno.test('Security - console output with IPC-like content is isolated via C2C',
 			}
 		})();
 
-		// The applet channel should only receive proper res/res-frame messages
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		// The mod-app channel should only receive proper res/res-frame messages
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
-		assertEquals(data.done, true, 'Applet should complete normally');
+		await readToEOS(appChannel);
+		assertEquals(data.done, true, 'App should complete normally');
 
 		await cleanup();
 		await c2cDone.catch(() => {});
 
-		// Console output should have gone to C2C, not the applet channel
+		// Console output should have gone to C2C, not the mod-app channel
 		assert(c2cMessages.length >= 3, 'Console output should be captured via C2C');
 		// All C2C messages should be log-level messages, not IPC message types
 		for (const msg of c2cMessages) {
@@ -526,7 +526,7 @@ Deno.test('Security - console output with IPC-like content is isolated via C2C',
 });
 
 Deno.test('Security - console output with special characters is safely captured', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			// Try various special characters that might break parsing
 			console.log('\\x00\\x01\\x02'); // Null bytes and SOH
@@ -541,7 +541,7 @@ Deno.test('Security - console output with special characters is safely captured'
 		}
 	`;
 
-	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
 		// Collect C2C messages concurrently
@@ -555,8 +555,8 @@ Deno.test('Security - console output with special characters is safely captured'
 			}
 		})();
 
-		const data = await readAppletResult(appletChannel);
-		assertEquals(data.done, true, 'Applet should complete normally');
+		const data = await readAppResult(appChannel);
+		assertEquals(data.done, true, 'App should complete normally');
 
 		await cleanup();
 		await c2cDone.catch(() => {});
@@ -583,20 +583,20 @@ Deno.test('Security - oversized frame chunk detection (logic test)', () => {
 	assertEquals(isOversized, true, 'Should detect oversized chunks');
 });
 
-Deno.test('Security - applet error is reported via res-error (not crash)', async () => {
-	// Applet throws an error; bootstrap should catch it and send res-error,
+Deno.test('Security - mod-app error is reported via res-error (not crash)', async () => {
+	// Mod-app throws an error; bootstrap should catch it and send res-error,
 	// not crash the worker or leave the channel hanging.
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			throw new Error('Intentional security test error');
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
 		// Should receive res-error, not hang or crash
-		const errMsg = await appletChannel.read({ only: 'res-error', decode: true });
+		const errMsg = await appChannel.read({ only: 'res-error', decode: true });
 		let errorData;
 		await errMsg.process(() => {
 			errorData = JSON.parse(errMsg.text);
@@ -618,9 +618,9 @@ Deno.test('Security - applet error is reported via res-error (not crash)', async
 
 Deno.test('Security - bootstrap channel is one-shot (setup only read once)', async () => {
 	// The bootstrap channel is used exactly once to read setup instructions.
-	// After that, the applet runs and the channel is no longer active.
-	// This test verifies the applet runs correctly after a single setup read.
-	const appletCode = `
+	// After that, the Mod-app runs and the channel is no longer active.
+	// This test verifies the mod-app runs correctly after a single setup read.
+	const appCode = `
 		export default async function () {
 			// Verify JSMAWS namespace is set up correctly after bootstrap
 			const hasServer = typeof globalThis.JSMAWS?.server === 'object';
@@ -633,10 +633,10 @@ Deno.test('Security - bootstrap channel is one-shot (setup only read once)', asy
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasServer, true, 'JSMAWS.server should be available after bootstrap');
 		assertEquals(data.jsmawsFrozen, true, 'JSMAWS namespace should be frozen after bootstrap');
 	} finally {
@@ -644,8 +644,8 @@ Deno.test('Security - bootstrap channel is one-shot (setup only read once)', asy
 	}
 });
 
-Deno.test('Security - JSMAWS namespace is frozen (cannot be modified by applet)', async () => {
-	const appletCode = `
+Deno.test('Security - JSMAWS namespace is frozen (cannot be modified by mod-app)', async () => {
+	const appCode = `
 		export default async function () {
 			let canModifyServer = false;
 			let canAddProperty = false;
@@ -671,10 +671,10 @@ Deno.test('Security - JSMAWS namespace is frozen (cannot be modified by applet)'
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.canModifyServer, false, 'Should not be able to replace JSMAWS.server');
 		assertEquals(data.canAddProperty, false, 'Should not be able to add properties to JSMAWS');
 	} finally {
@@ -687,7 +687,7 @@ Deno.test('Security - JSMAWS namespace is frozen (cannot be modified by applet)'
 // ============================================================================
 
 Deno.test('Security - network APIs are available (approved)', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasConnect = 'connect' in Deno;
 			const hasListen = 'listen' in Deno;
@@ -700,10 +700,10 @@ Deno.test('Security - network APIs are available (approved)', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasConnect, true, 'Deno.connect should be available');
 		assertEquals(data.hasListen, true, 'Deno.listen should be available');
 		assertEquals(data.hasResolveDns, true, 'Deno.resolveDns should be available');
@@ -713,7 +713,7 @@ Deno.test('Security - network APIs are available (approved)', async () => {
 });
 
 Deno.test('Security - system info APIs are available (approved)', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasBuild = 'build' in Deno;
 			const hasVersion = 'version' in Deno;
@@ -726,10 +726,10 @@ Deno.test('Security - system info APIs are available (approved)', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(data.hasBuild, true, 'Deno.build should be available');
 		assertEquals(data.hasVersion, true, 'Deno.version should be available');
 		assertEquals(data.hasHostname, true, 'Deno.hostname should be available');
@@ -739,7 +739,7 @@ Deno.test('Security - system info APIs are available (approved)', async () => {
 });
 
 Deno.test('Security - unapproved Deno APIs are blocked', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const unapproved = ['readFile', 'writeFile', 'remove', 'mkdir', 'run', 'exit', 'env'];
 			const blocked = unapproved.map(api => !(api in Deno));
@@ -753,10 +753,10 @@ Deno.test('Security - unapproved Deno APIs are blocked', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const data = await readAppletResult(appletChannel);
+		const data = await readAppResult(appChannel);
 		assertEquals(
 			data.allBlocked,
 			true,

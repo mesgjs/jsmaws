@@ -68,13 +68,13 @@ export function webSocketUpgrade (context, bidiParams) {
  * transition logic as methods.
  */
 export class RequestContext {
-	constructor ({requestId, process, poolName, routeSpec, request, appletPath, operator, reqChannel, poolManager, poolItemId}) {
+	constructor ({requestId, process, poolName, routeSpec, request, appPath, operator, reqChannel, poolManager, poolItemId}) {
 		this.requestId = requestId;
 		this.process = process;
 		this.poolName = poolName;
 		this.routeSpec = routeSpec ?? null;
 		this.originalRequest = request;  // For WebSocket upgrade
-		this.app = appletPath;
+		this.app = appPath;
 		this.operator = operator ?? OperatorProcess.instance; // Allows mocking for tests
 		this.reqChannel = reqChannel ?? null; // req-N channel for this request
 		this.poolManager = poolManager ?? null;
@@ -323,7 +323,7 @@ export class RequestContext {
 		// Loop 1: metadata and console output (dechunked)
 		// 'res' carries HTTP response status + headers (sent once, before any res-frame chunks)
 		// 'res-error' carries error response (sent instead of res + res-frame)
-		// con-* carry forwarded applet console output
+		// con-* carry forwarded mod-app console output
 		(async () => {
 			while (true) {
 				const msg = await reqChannel.read({ only: ['res', 'res-error', ...CON_TYPES] });
@@ -358,13 +358,13 @@ export class RequestContext {
 						break;
 					}
 					default:
-						// con-* messages: applet console output
+						// con-* messages: mod-app console output
 						if (msg.messageType.startsWith('con-')) {
 							const text = msg.data?.decode() ?? '';
 							const level = msg.messageType.slice(4); // strip 'con-' prefix
 							const appFile = this.app?.split('/').pop();
 							operator.logger.asComponent(this.process.id, () =>
-								operator.logger.log(level, `[Applet:${appFile || this.requestId}] ${text}`)
+								operator.logger.log(level, `[App:${appFile || this.requestId}] ${text}`)
 							);
 						}
 						break;

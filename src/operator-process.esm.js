@@ -43,7 +43,7 @@ export class OperatorProcess {
 		this.configMonitor = null;
 		this.processManager = null;
 		this.poolManagers = new Map(); // poolName -> PoolManager
-		this.affinityMap = new Map(); // appletPath -> Set<processIds>
+		this.affinityMap = new Map(); // appPath -> Set<processIds>
 		this.logger = null;
 		this.isShuttingDown = false;
 		this.isReloading = false;
@@ -92,7 +92,7 @@ export class OperatorProcess {
 	 */
 	async forwardToServiceProcess (req, route, match, remote) {
 		const poolName = route.spec?.pool ?? 'standard';
-		const appletPath = match.app || route.app;
+		const appPath = match.app || route.app;
 		const root = match.root;
 
 		// Get pool manager
@@ -106,7 +106,7 @@ export class OperatorProcess {
 		}
 
 		// Get available (reserved) process from pool
-		const poolItem = await poolManager.serialize(async () => await this.getProcessWithAffinity(poolManager, appletPath)).catch((error) => {
+		const poolItem = await poolManager.serialize(async () => await this.getProcessWithAffinity(poolManager, appPath)).catch((error) => {
 			this.logger.error(`Service process selection error: ${error.message}`);
 			return null;
 		});
@@ -134,15 +134,15 @@ export class OperatorProcess {
 			poolName,
 			routeSpec,
 			request: req,
-			appletPath,
+			appPath,
 			poolManager,
 			poolItemId: poolItem.id,
 			reqChannel,
 		});
 
 		try {
-			if (appletPath) {
-				this.updateAffinity(poolItem, appletPath);
+			if (appPath) {
+				this.updateAffinity(poolItem, appPath);
 			}
 
 			// Read request body — skip for WebSocket upgrade requests.
@@ -171,7 +171,7 @@ export class OperatorProcess {
 				id: requestId,
 				method: req.method,
 				url: req.url,
-				app: appletPath,
+				app: appPath,
 				root,
 				pool: poolName,
 				headers: headersObj,
@@ -217,8 +217,8 @@ export class OperatorProcess {
 	/**
 	 * Get process with affinity preference
 	 */
-	async getProcessWithAffinity (poolManager, appletPath) {
-		const affinitySet = appletPath && this.affinityMap.get(appletPath);
+	async getProcessWithAffinity (poolManager, appPath) {
+		const affinitySet = appPath && this.affinityMap.get(appPath);
 		const item = await poolManager.getAvailableItem(affinitySet);
 		if (item) this.logger.debug(`available: ${item.id} (usage ${item.usageCount})`);
 		else this.logger.debug('nothing available');
@@ -652,19 +652,19 @@ export class OperatorProcess {
 	/**
 	 * Update affinity tracking
 	 */
-	updateAffinity (item, appletPath) {
-		if (!appletPath) return;
+	updateAffinity (item, appPath) {
+		if (!appPath) return;
 
-		if (!this.affinityMap.has(appletPath)) {
-			this.affinityMap.set(appletPath, new Set());
+		if (!this.affinityMap.has(appPath)) {
+			this.affinityMap.set(appPath, new Set());
 		}
-		const appletMap = this.affinityMap.get(appletPath);
-		if (!appletMap.has(item.id)) {
-			appletMap.add(item.id);
-			//console.debug(`Adding affinity ${item.id} for ${appletPath}`);
+		const appMap = this.affinityMap.get(appPath);
+		if (!appMap.has(item.id)) {
+			appMap.add(item.id);
+			//console.debug(`Adding affinity ${item.id} for ${appPath}`);
 			item.onShutdown(() => {
-				//console.debug(`Removing affinity ${item.id} for ${appletPath}`);
-				appletMap.delete(item.id);
+				//console.debug(`Removing affinity ${item.id} for ${appPath}`);
+				appMap.delete(item.id);
 			});
 		}
 	}

@@ -46,7 +46,7 @@ export function parseCliArgs (args = Deno.args) {
  */
 export function showHelp () {
     const help = `
-JavaScript Multi-Applet Web Server (JSMAWS)
+JavaScript Modular Application Web Server (JSMAWS)
 
 Usage:
   deno run --allow-all src/server.esm.js [options] [config-file]

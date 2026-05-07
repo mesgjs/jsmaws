@@ -1,7 +1,7 @@
 /**
  * E2E Tests for Basic HTTP Request/Response
  * 
- * Tests the complete request flow through the actual server with real applets.
+ * Tests the complete request flow through the actual server with real mod-apps.
  * No mocks - this tests the entire system end-to-end.
  */
 
@@ -13,11 +13,11 @@ import {
 	fetchWithTimeout
 } from './e2e-utils.esm.js';
 
-Deno.test("E2E - Simple GET request to hello-world applet", async () => {
+Deno.test("E2E - Simple GET request to hello-world mod-app", async () => {
 	// Create test configuration with hello-world route
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/hello', method: ['get'], app: '../examples/applets/hello-world.esm.js', pool: 'fast' }
+			{ path: '/hello', method: ['get'], app: '../examples/apps/hello-world.esm.js', pool: 'fast' }
 		],
 		pools: {
 			fast: {
@@ -33,7 +33,7 @@ Deno.test("E2E - Simple GET request to hello-world applet", async () => {
 		// Start the server
 		const baseUrl = await startTestServer(operator);
 
-		// Make request to hello-world applet
+		// Make request to hello-world mod-app
 		const response = await fetchWithTimeout(`${baseUrl}/hello`);
 
 		// Verify response
@@ -55,7 +55,7 @@ Deno.test("E2E - Simple GET request to hello-world applet", async () => {
 Deno.test("E2E - GET request with query parameters", async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/hello', app: '../examples/applets/hello-world.esm.js', pool: 'fast' }
+			{ path: '/hello', app: '../examples/apps/hello-world.esm.js', pool: 'fast' }
 		],
 		pools: {
 			fast: { minProcs: 2, maxProcs: 2 }
@@ -81,7 +81,7 @@ Deno.test("E2E - GET request with query parameters", async () => {
 Deno.test("E2E - POST request with JSON body", async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/hello', method: ['post'], app: '../examples/applets/hello-world.esm.js', pool: 'fast' }
+			{ path: '/hello', method: ['post'], app: '../examples/apps/hello-world.esm.js', pool: 'fast' }
 		],
 		pools: {
 			fast: { minProcs: 1, maxProcs: 1 }
@@ -117,7 +117,7 @@ Deno.test("E2E - POST request with JSON body", async () => {
 Deno.test("E2E - POST request with form-encoded body", async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/hello', method: ['post'], app: '../examples/applets/hello-world.esm.js', pool: 'fast' }
+			{ path: '/hello', method: ['post'], app: '../examples/apps/hello-world.esm.js', pool: 'fast' }
 		],
 		pools: {
 			fast: { minProcs: 1, maxProcs: 1 }
@@ -153,7 +153,7 @@ Deno.test("E2E - POST request with form-encoded body", async () => {
 Deno.test("E2E - 404 for non-existent route", async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/hello', app: '../examples/applets/hello-world.esm.js', pool: 'fast' }
+			{ path: '/hello', app: '../examples/apps/hello-world.esm.js', pool: 'fast' }
 		],
 		pools: {
 			fast: { minProcs: 1, maxProcs: 1 }
@@ -181,7 +181,7 @@ Deno.test("E2E - 404 for non-existent route", async () => {
 Deno.test("E2E - Multiple concurrent requests", async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/hello', app: '../examples/applets/hello-world.esm.js', pool: 'fast' }
+			{ path: '/hello', app: '../examples/apps/hello-world.esm.js', pool: 'fast' }
 		],
 		pools: {
 			fast: {
@@ -220,7 +220,7 @@ Deno.test("E2E - Multiple concurrent requests", async () => {
 Deno.test("E2E - Request with custom headers", async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/hello', app: '../examples/applets/hello-world.esm.js', pool: 'fast' }
+			{ path: '/hello', app: '../examples/apps/hello-world.esm.js', pool: 'fast' }
 		],
 		pools: {
 			fast: { minProcs: 1, maxProcs: 1 }

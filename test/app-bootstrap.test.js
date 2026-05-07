@@ -1,10 +1,10 @@
 /**
- * Applet Bootstrap Module Tests
+ * Mod-App Bootstrap Module Tests
  * Tests for environment lockdown and controlled initialization
  *
  * The bootstrap module uses PostMessageTransport for communication:
- * - Reads setup from the 'bootstrap' channel (appletPath, mode, keepDeno, keepWorkers)
- * - Exposes globalThis.JSMAWS.server (applet channel) and .bidi (bidi mode only)
+ * - Reads setup from the 'bootstrap' channel (appPath, mode, keepDeno, keepWorkers)
+ * - Exposes globalThis.JSMAWS.server (app channel) and .bidi (bidi mode only)
  * - Intercepts console output via C2C channel
  * - Locks down Deno namespace and disables Worker constructor
  *
@@ -15,13 +15,13 @@ import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
 import { PromiseTracer } from '@poly-transport/promise-tracer.esm.js';
 
-const bootstrapPath = new URL('../src/applets/bootstrap.esm.js', import.meta.url).href;
+const bootstrapPath = new URL('../src/apps/bootstrap.esm.js', import.meta.url).href;
 
 /**
- * Create a test applet data URL from JavaScript source code
+ * Create a test mod-app data URL from JavaScript source code
  */
-function makeAppletUrl (appletCode) {
-	return `data:application/javascript;base64,${btoa(appletCode)}`;
+function makeAppUrl (appCode) {
+	return `data:application/javascript;base64,${btoa(appCode)}`;
 }
 
 async function readToEOS (channel) {
@@ -34,13 +34,13 @@ async function readToEOS (channel) {
 
 /**
  * Set up a bootstrap worker with PostMessageTransport.
- * Returns { worker, transport, c2cChannel, bootstrapChannel, appletChannel, cleanup }
+ * Returns { worker, transport, c2cChannel, bootstrapChannel, appChannel, cleanup }
  *
- * @param {string} appletCode - JavaScript source for the test applet
+ * @param {string} appCode - JavaScript source for the test mod-app
  * @param {object} setupOverrides - Overrides for the setup message
  */
-async function setupBootstrapWorker (appletCode, setupOverrides = {}) {
-	const appletUrl = makeAppletUrl(appletCode);
+async function setupBootstrapWorker (appCode, setupOverrides = {}) {
+	const appUrl = makeAppUrl(appCode);
 
 	const worker = new Worker(bootstrapPath, {
 		type: 'module',
@@ -79,16 +79,16 @@ async function setupBootstrapWorker (appletCode, setupOverrides = {}) {
 	const bootstrapChannel = await transport.requestChannel('bootstrap');
 	await bootstrapChannel.addMessageTypes(['setup']);
 	await bootstrapChannel.write('setup', JSON.stringify({
-		appletPath: appletUrl,
+		appPath: appUrl,
 		mode: 'response',
 		keepDeno: false,
 		keepWorkers: false,
 		...setupOverrides,
 	}));
 
-	// Set up the applet communication channel
-	const appletChannel = await transport.requestChannel('applet');
-	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+	// Set up the mod-app communication channel
+	const appChannel = await transport.requestChannel('app');
+	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
 
 	const cleanup = async () => {
 		await transport.stop({ discard: true }).catch((err) => {
@@ -97,13 +97,13 @@ async function setupBootstrapWorker (appletCode, setupOverrides = {}) {
 		worker.terminate();
 	};
 
-	return { worker, transport, c2cChannel, bootstrapChannel, appletChannel, cleanup };
+	return { worker, transport, c2cChannel, bootstrapChannel, appChannel, cleanup };
 }
 
 // ─── Deno namespace lockdown ──────────────────────────────────────────────────
 
 Deno.test('Bootstrap - Deno APIs are filtered (approved APIs exist)', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const approved = ['build', 'version', 'inspect', 'errors'];
 			const results = approved.map(api => api in Deno);
@@ -116,21 +116,21 @@ Deno.test('Bootstrap - Deno APIs are filtered (approved APIs exist)', async () =
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
 		// Read response metadata
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
 		// Read response body
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertEquals(data.allApproved, true, 'All approved Deno APIs should exist');
 	} finally {
@@ -139,7 +139,7 @@ Deno.test('Bootstrap - Deno APIs are filtered (approved APIs exist)', async () =
 });
 
 Deno.test('Bootstrap - Deno APIs are filtered (unapproved APIs blocked)', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const unapproved = ['readFile', 'writeFile', 'remove', 'mkdir', 'run', 'exit'];
 			const blocked = unapproved.map(api => !(api in Deno));
@@ -152,19 +152,19 @@ Deno.test('Bootstrap - Deno APIs are filtered (unapproved APIs blocked)', async 
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertEquals(data.allBlocked, true, 'Unapproved Deno APIs should not exist');
 	} finally {
@@ -173,7 +173,7 @@ Deno.test('Bootstrap - Deno APIs are filtered (unapproved APIs blocked)', async 
 });
 
 Deno.test('Bootstrap - Deno is frozen', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			let canModify = false;
 			try {
@@ -190,19 +190,19 @@ Deno.test('Bootstrap - Deno is frozen', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertEquals(data.frozen, true, 'Deno should be frozen');
 	} finally {
@@ -213,7 +213,7 @@ Deno.test('Bootstrap - Deno is frozen', async () => {
 // ─── JSMAWS namespace ─────────────────────────────────────────────────────────
 
 Deno.test('Bootstrap - JSMAWS.server channel is available', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasServer = typeof globalThis.JSMAWS?.server === 'object';
 			const hasBidi = 'bidi' in globalThis.JSMAWS;
@@ -225,19 +225,19 @@ Deno.test('Bootstrap - JSMAWS.server channel is available', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertEquals(data.hasServer, true, 'JSMAWS.server should be available');
 		assertEquals(data.hasBidi, false, 'JSMAWS.bidi should not be present in response mode');
@@ -247,7 +247,7 @@ Deno.test('Bootstrap - JSMAWS.server channel is available', async () => {
 });
 
 Deno.test('Bootstrap - JSMAWS is frozen', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			let canModify = false;
 			try {
@@ -264,19 +264,19 @@ Deno.test('Bootstrap - JSMAWS is frozen', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertEquals(data.frozen, true, 'JSMAWS namespace should be frozen');
 	} finally {
@@ -284,44 +284,44 @@ Deno.test('Bootstrap - JSMAWS is frozen', async () => {
 	}
 });
 
-// ─── Applet execution ─────────────────────────────────────────────────────────
+// ─── Mod-App execution ────────────────────────────────────────────────────────
 
-Deno.test('Bootstrap - applet default export is called with setupData', async () => {
-	const appletCode = `
+Deno.test('Bootstrap - mod-app default export is called with setupData', async () => {
+	const appCode = `
 		export default async function (setupData) {
 			const hasSetupData = typeof setupData === 'object' && setupData !== null;
-			const hasAppletPath = typeof setupData?.appletPath === 'string';
+			const hasAppPath = typeof setupData?.appPath === 'string';
 
 			const server = globalThis.JSMAWS.server;
 			await server.write('res', JSON.stringify({ status: 200, headers: {} }));
-			await server.write('res-frame', JSON.stringify({ hasSetupData, hasAppletPath }));
+			await server.write('res-frame', JSON.stringify({ hasSetupData, hasAppPath }));
 			await server.write('res-frame', null);
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
-		assertEquals(data.hasSetupData, true, 'setupData should be passed to applet');
-		assertEquals(data.hasAppletPath, true, 'setupData.appletPath should be a string');
+		assertEquals(data.hasSetupData, true, 'setupData should be passed to mod-app');
+		assertEquals(data.hasAppPath, true, 'setupData.appPath should be a string');
 	} finally {
 		await cleanup();
 	}
 });
 
-Deno.test('Bootstrap - applet can read request via JSMAWS.server', async () => {
-	const appletCode = `
+Deno.test('Bootstrap - mod-app can read request via JSMAWS.server', async () => {
+	const appCode = `
 		export default async function () {
 			const server = globalThis.JSMAWS.server;
 			const reqMsg = await server.read({ only: 'req' });
@@ -339,25 +339,25 @@ Deno.test('Bootstrap - applet can read request via JSMAWS.server', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		await appletChannel.write('req', JSON.stringify({
+		await appChannel.write('req', JSON.stringify({
 			method: 'GET',
 			url: 'https://example.com/test',
 			headers: {},
 		}));
 
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertEquals(data.method, 'GET');
 		assertEquals(data.url, 'https://example.com/test');
@@ -366,18 +366,18 @@ Deno.test('Bootstrap - applet can read request via JSMAWS.server', async () => {
 	}
 });
 
-Deno.test('Bootstrap - applet error sends res-error', async () => {
-	const appletCode = `
+Deno.test('Bootstrap - mod-app error sends res-error', async () => {
+	const appCode = `
 		export default async function () {
 			throw new Error('Intentional test error');
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
 		// Should receive res-error
-		const errMsg = await appletChannel.read({ only: 'res-error', decode: true });
+		const errMsg = await appChannel.read({ only: 'res-error', decode: true });
 		let errorData;
 		await errMsg.process(() => {
 			errorData = JSON.parse(errMsg.text);
@@ -393,7 +393,7 @@ Deno.test('Bootstrap - applet error sends res-error', async () => {
 // ─── Console interception via C2C ─────────────────────────────────────────────
 
 Deno.test('Bootstrap - console.log is forwarded via C2C channel', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			console.log('test log message');
 
@@ -404,7 +404,7 @@ Deno.test('Bootstrap - console.log is forwarded via C2C channel', async () => {
 		}
 	`;
 
-	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
 		// Read C2C message (console output)
@@ -414,7 +414,7 @@ Deno.test('Bootstrap - console.log is forwarded via C2C channel', async () => {
 			consoleText = c2cMsg.text;
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertExists(consoleText);
 		assert(consoleText.includes('test log message'), `Expected 'test log message' in: ${consoleText}`);
@@ -424,7 +424,7 @@ Deno.test('Bootstrap - console.log is forwarded via C2C channel', async () => {
 });
 
 Deno.test('Bootstrap - console.error is forwarded via C2C channel', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			console.error('test error message');
 
@@ -435,7 +435,7 @@ Deno.test('Bootstrap - console.error is forwarded via C2C channel', async () => 
 		}
 	`;
 
-	const { appletChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, c2cChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
 		// Read C2C message (console output)
@@ -445,7 +445,7 @@ Deno.test('Bootstrap - console.error is forwarded via C2C channel', async () => 
 			consoleText = c2cMsg.text;
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertExists(consoleText);
 		assert(consoleText.includes('test error message'), `Expected 'test error message' in: ${consoleText}`);
@@ -457,7 +457,7 @@ Deno.test('Bootstrap - console.error is forwarded via C2C channel', async () => 
 // ─── Deno.inspect availability ────────────────────────────────────────────────
 
 Deno.test('Bootstrap - Deno.inspect is available for formatting', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const obj = { a: 1, b: 2 };
 			const formatted = Deno.inspect(obj);
@@ -469,19 +469,19 @@ Deno.test('Bootstrap - Deno.inspect is available for formatting', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
 		let data;
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assert(data.formatted.includes('a'), 'Deno.inspect should format object');
 		assert(data.formatted.includes('1'), 'Deno.inspect should include values');
@@ -491,7 +491,7 @@ Deno.test('Bootstrap - Deno.inspect is available for formatting', async () => {
 });
 
 Deno.test('Bootstrap - Deno.errors namespace is available', async () => {
-	const appletCode = `
+	const appCode = `
 		export default async function () {
 			const hasErrors = typeof Deno.errors === 'object';
 			const hasNotFound = typeof Deno.errors?.NotFound === 'function';
@@ -503,19 +503,19 @@ Deno.test('Bootstrap - Deno.errors namespace is available', async () => {
 		}
 	`;
 
-	const { appletChannel, cleanup } = await setupBootstrapWorker(appletCode);
+	const { appChannel, cleanup } = await setupBootstrapWorker(appCode);
 
 	try {
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		await resMeta.done();
 
-		const resFrame = await appletChannel.read({ only: 'res-frame', decode: true });
+		const resFrame = await appChannel.read({ only: 'res-frame', decode: true });
 		let data;
 		await resFrame.process(() => {
 			data = JSON.parse(resFrame.text);
 		});
 
-		await readToEOS(appletChannel);
+		await readToEOS(appChannel);
 
 		assertEquals(data.hasErrors, true);
 		assertEquals(data.hasNotFound, true);

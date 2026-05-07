@@ -8,13 +8,13 @@
 
 ## 1. Problem Statement
 
-JSMAWS currently routes requests to applets and provides them with raw HTTP headers, URL parameters, and body data. There is no server-level mechanism for:
+JSMAWS currently routes requests to mod-apps and provides them with raw HTTP headers, URL parameters, and body data. There is no server-level mechanism for:
 
 - **Authentication**: Verifying the identity of the caller (who are you?)
 - **Authorization**: Deciding whether the caller may access a resource (are you allowed?)
-- **Header/cookie filtering**: Controlling which headers and cookies flow into and out of applets (security hygiene)
+- **Header/cookie filtering**: Controlling which headers and cookies flow into and out of mod-apps (security hygiene)
 
-Without these, every applet must implement its own auth logic, leading to duplication, inconsistency, and security gaps. The goal is a **modular, pluggable** system that can be composed at the route or pool level, while remaining transparent to applets that don't need it.
+Without these, every mod-app must implement its own auth logic, leading to duplication, inconsistency, and security gaps. The goal is a **modular, pluggable** system that can be composed at the route or pool level, while remaining transparent to mod-apps that don't need it.
 
 ---
 
@@ -22,8 +22,8 @@ Without these, every applet must implement its own auth logic, leading to duplic
 
 1. **Modular / pluggable**: Auth providers are independent modules, loaded by configuration.
 2. **Composable**: Multiple providers can be chained (e.g., JWT check → role check → rate limit).
-3. **Transparent to applets**: Applets receive a clean, normalized identity object; they don't need to parse tokens or cookies themselves.
-4. **Operator-side enforcement**: Auth decisions happen in the operator or responder *before* the applet is spawned, so a rejected request never reaches untrusted code.
+3. **Transparent to mod-apps**: Mod-apps receive a clean, normalized identity object; they don't need to parse tokens or cookies themselves.
+4. **Operator-side enforcement**: Auth decisions happen in the operator or responder *before* the mod-app is spawned, so a rejected request never reaches untrusted code.
 5. **Header/cookie filtering**: Inbound request and outbound response header/cookie filtering is a first-class concern, not an afterthought.
 6. **Mesgjs-compatible**: The API should be expressible in Mesgjs message-passing style as well as plain JavaScript.
 
@@ -50,14 +50,14 @@ Operator Process (privileged)
 Routing Decision (pool selection, possibly role-based)
   ▼
 Responder Process (unprivileged)
-  │  [OPTION A] Auth middleware runs here — before spawning applet worker
+  │  [OPTION A] Auth middleware runs here — before spawning mod-app worker
   │  Advantages: auth logic runs unprivileged; can use network
   │  Disadvantages: routing already decided; cannot influence pool selection;
   │                 N independent caches cleared on each responder restart
   ▼
-Applet Worker (sandboxed)
-  │  [OPTION B] Auth logic runs in applet — current state
-  │  Disadvantages: every applet must implement auth; no server-level enforcement
+Mod-App Worker (sandboxed)
+  │  [OPTION B] Auth logic runs in mod-app — current state
+  │  Disadvantages: every mod-app must implement auth; no server-level enforcement
 ```
 
 **Original recommendation: Option A (responder-side auth middleware)**
@@ -144,7 +144,7 @@ In JSMAWS, routing happens in the operator (or router worker) *before* the reque
 
    With responder-side auth, all three routes would dispatch to their respective pools *before* knowing the user's role — the role check happens after pool selection, making role-based pool routing impossible.
 
-2. **Tenant-based routing**: Route requests to tenant-specific pools or applets based on the authenticated tenant identity.
+2. **Tenant-based routing**: Route requests to tenant-specific pools or mod-apps based on the authenticated tenant identity.
 
 3. **Unauthenticated fast-path rejection at the routing layer**: Reject unauthenticated requests before they consume a pool slot, rather than after.
 
@@ -194,7 +194,7 @@ Operator Process (privileged)
   ▼
 Responder Pool (selected based on identity)
   ▼
-Applet Worker
+Mod-App Worker
 ```
 
 **Why this is architecturally consistent:**
@@ -261,7 +261,7 @@ An auth provider is a JavaScript module with a well-defined interface:
 export default {
     /**
      * Authenticate and/or authorize a request.
-     * Called before the applet worker is spawned.
+     * Called before the mod-app worker is spawned.
      *
      * @param {AuthContext} ctx - Request context (headers, cookies, route, pool)
      * @returns {AuthResult} - { identity, allow, denyStatus, denyMessage, addHeaders }
@@ -269,20 +269,20 @@ export default {
     async authCheck (ctx) { ... },
 
     /**
-     * Optional: filter request headers/cookies before forwarding to applet.
+     * Optional: filter request headers/cookies before forwarding to mod-app.
      * Called after a successful authCheck().
      *
      * @param {object} headers - Raw request headers
      * @param {AuthResult} result - Result from authCheck()
-     * @returns {object} - Filtered headers to forward to applet
+     * @returns {object} - Filtered headers to forward to mod-app
      */
     filterRequest (headers, result) { ... },
 
     /**
      * Optional: filter outbound response headers/cookies before sending to client.
-     * Called after the applet produces a response.
+     * Called after the mod-app produces a response.
      *
-     * @param {object} headers - Applet-produced response headers
+     * @param {object} headers - Mod-app-produced response headers
      * @param {AuthResult} result - Result from authCheck()
      * @returns {object} - Filtered headers to send to client
      */
@@ -318,7 +318,7 @@ export default {
     denyStatus: 401,                  // HTTP status for denial (default: 401)
     denyMessage: 'Unauthorized',      // Human-readable denial message
     addHeaders: {                     // Headers to add to the forwarded request
-        'x-user-id': 'user-123',      // (e.g., inject identity for applet)
+        'x-user-id': 'user-123',      // (e.g., inject identity for mod-app)
     },
 }
 ```
@@ -329,7 +329,7 @@ export default {
 
 ### Option A: Responder-Side Auth Middleware
 
-Auth providers are configured per-route or per-pool in `jsmaws.slid`. The responder loads and runs the configured providers before spawning the applet. This is the simplest option and the recommended starting point, but see Section 3a for its performance and capability limitations compared to Options C and D.
+Auth providers are configured per-route or per-pool in `jsmaws.slid`. The responder loads and runs the configured providers before spawning the mod-app. This is the simplest option and the recommended starting point, but see Section 3a for its performance and capability limitations compared to Options C and D.
 
 **Configuration example:**
 
@@ -361,11 +361,11 @@ Auth providers are configured per-route or per-pool in `jsmaws.slid`. The respon
 2. Responder reads `routeSpec.auth` from the request metadata
 3. Responder loads each auth provider module (cached after first load)
 4. Responder calls `provider.authCheck(ctx)` in order; first denial short-circuits
-5. On success: responder applies `filterRequest()` to headers, then spawns applet with filtered headers + identity
-6. On denial: responder returns the configured `denyStatus` response without spawning applet
-7. After applet responds: responder applies `filterResponse()` to response headers
+5. On success: responder applies `filterRequest()` to headers, then spawns mod-app with filtered headers + identity
+6. On denial: responder returns the configured `denyStatus` response without spawning mod-app
+7. After mod-app responds: responder applies `filterResponse()` to response headers
 
-**Applet receives:**
+**Mod-app receives:**
 
 ```javascript
 // In requestData (via JSMAWS.server 'req' message):
@@ -384,9 +384,9 @@ Auth providers are configured per-route or per-pool in `jsmaws.slid`. The respon
 ```
 
 **Advantages:**
-- Declarative configuration; no applet code changes needed
+- Declarative configuration; no mod-app code changes needed
 - Auth logic is centralized and reusable across routes
-- Applets receive a clean identity object; no token parsing needed
+- Mod-apps receive a clean identity object; no token parsing needed
 - Header filtering is co-located with auth configuration
 
 **Disadvantages:**
@@ -395,9 +395,9 @@ Auth providers are configured per-route or per-pool in `jsmaws.slid`. The respon
 
 ---
 
-### Option B: Auth as a Built-in Applet Wrapper
+### Option B: Auth as a Built-in Mod-App Wrapper
 
-Auth is implemented as a special "wrapper applet" that runs before the real applet. The wrapper handles auth, then either rejects the request or forwards it to the real applet.
+Auth is implemented as a special "wrapper mod-app" that runs before the real mod-app. The wrapper handles auth, then either rejects the request or forwards it to the real mod-app.
 
 **Configuration example:**
 
@@ -408,7 +408,7 @@ Auth is implemented as a special "wrapper applet" that runs before the real appl
       path=/api/:*
       pool=standard
       app=./auth/jwt-wrapper.esm.js
-      wrappedApp=./applets/api.esm.js
+      wrappedApp=./apps/api.esm.js
     ]
   ]
 )]
@@ -416,13 +416,13 @@ Auth is implemented as a special "wrapper applet" that runs before the real appl
 
 **How it works:**
 
-1. Responder spawns the wrapper applet (not the real applet)
-2. Wrapper applet performs auth, then either:
+1. Responder spawns the wrapper mod-app (not the real mod-app)
+2. Wrapper mod-app performs auth, then either:
    - Rejects: sends `res-error` or a 401/403 response
-   - Accepts: somehow invokes the real applet (but applets can't spawn workers — this is a problem)
+   - Accepts: somehow invokes the real mod-app (but mod-apps can't spawn workers — this is a problem)
 
 **Problems:**
-- Applets cannot spawn sub-workers (workers are disabled in the bootstrap)
+- Mod-apps cannot spawn sub-workers (workers are disabled in the bootstrap)
 - The wrapper would need to re-implement the full request/response relay
 - This approach fights the architecture rather than working with it
 
@@ -437,7 +437,7 @@ A separate auth service process (unprivileged, external) handles auth decisions.
 **Architecture:**
 
 ```
-Operator → [IPC] → Auth Service Process → [AuthResult] → Operator cache → routing → Responder → Applet
+Operator → [IPC] → Auth Service Process → [AuthResult] → Operator cache → routing → Responder → Mod-app
 ```
 
 **How it works:**
@@ -530,35 +530,35 @@ The filter configuration is organized by direction (`requestFilter` / `responseF
 
 Header filtering is case-*insensitive*. Cookie filtering is case-*sensitive*.
 
-### Inbound Request Filtering (Client → Applet)
+### Inbound Request Filtering (Client → Mod-App)
 
-Controls which headers/cookies the applet can see:
+Controls which headers/cookies the mod-app can see:
 
 ```slid
 requestFilter=[
-  /* Allowlist: only these headers reach the applet */
+  /* Allowlist: only these headers reach the mod-app */
   allowHeaders=[authorization content-type content-length accept x-request-id]
-  /* OR denylist: all headers except these reach the applet */
+  /* OR denylist: all headers except these reach the mod-app */
   /* denyHeaders=[x-internal-*] */
 
-  /* Cookie allowlist: only these cookies reach the applet */
+  /* Cookie allowlist: only these cookies reach the mod-app */
   allowCookies=[session_id csrf_token]
   /* OR cookie denylist */
   /* denyCookies=[internal_*] */
 ]
 ```
 
-### Outbound Response Filtering (Applet → Client)
+### Outbound Response Filtering (Mod-App → Client)
 
-Controls which headers/cookies the applet can set in the response:
+Controls which headers/cookies the mod-app can set in the response:
 
 ```slid
 responseFilter=[
-  /* Deny: applets cannot set these headers */
+  /* Deny: mod-apps cannot set these headers */
   denyHeaders=[set-cookie x-internal-* server x-powered-by]
   /* Operator adds its own server header after filtering */
 
-  /* Deny: applets cannot set these cookies */
+  /* Deny: mod-apps cannot set these cookies */
   denyCookies=[internal_*]
 ]
 ```
@@ -578,12 +578,12 @@ Patterns support simple wildcards: `x-internal-*` matches `x-internal-foo`, `x-i
 
 ---
 
-## 7. Identity Propagation to Applets
+## 7. Identity Propagation to Mod-Apps
 
-After successful auth, the identity is injected into the request payload sent to the applet:
+After successful auth, the identity is injected into the request payload sent to the mod-app:
 
 ```javascript
-// requestData received by applet via JSMAWS.server 'req' message
+// requestData received by mod-app via JSMAWS.server 'req' message
 {
     method: 'GET',
     url: 'https://example.com/api/users',
@@ -604,7 +604,7 @@ After successful auth, the identity is injected into the request payload sent to
 }
 ```
 
-Applets that don't need auth simply ignore the `identity` field. Applets that do need it can use it directly without parsing tokens.
+Mod-apps that don't need auth simply ignore the `identity` field. Mod-apps that do need it can use it directly without parsing tokens.
 
 ---
 
@@ -697,10 +697,10 @@ The implementation plan reflects the revised architecture. Option A (responder-s
     - Supports allowlist, denylist, and wildcard patterns
 
 4. **Integration in `src/responder-process.esm.js`**
-   - Call auth middleware before spawning applet worker
+   - Call auth middleware before spawning mod-app worker
    - Inject identity into request payload
-   - Apply inbound request header filter before forwarding to applet
-   - Apply outbound response header filter after applet responds
+   - Apply inbound request header filter before forwarding to mod-app
+   - Apply outbound response header filter after mod-app responds
 
 ### Phase 2: Built-in Providers
 
@@ -758,7 +758,7 @@ Implement the auth service process for network-dependent auth:
 - Integration tests for auth middleware chain (all three options)
 - E2E tests for authenticated routes
 - E2E tests for role-based routing
-- Applet development guide: using `identity` in applets
+- Mod-app development guide: using `identity` in mod-apps
 - Administrator guide: choosing between Options A, C, and D
 
 ---
@@ -783,13 +783,13 @@ Implement the auth service process for network-dependent auth:
         [check=require-header  header=authorization]
       ]
 
-      /* Request filtering (inbound: client → applet) */
+      /* Request filtering (inbound: client → mod-app) */
       requestFilter=[
         allowHeaders=[authorization content-type content-length accept x-request-id]
         allowCookies=[session_id csrf_token]
       ]
 
-      /* Response filtering (outbound: applet → client) */
+      /* Response filtering (outbound: mod-app → client) */
       responseFilter=[
         denyHeaders=[x-internal-* server]
         denyCookies=[internal_*]
@@ -806,8 +806,8 @@ Implement the auth service process for network-dependent auth:
 - **Auth provider privilege depends on option**: Option A (responder-side) and Option C (auth service process) run auth code unprivileged. Option D (operator-embedded) runs auth code in the privileged operator process — only trusted, audited providers should be used there.
 - **Provider modules must be trusted** — they are loaded from the filesystem and run with the permissions of the process that loads them. Administrators should audit provider code.
 - **Secrets should not appear in config files** — use `:env:VAR_NAME` to load from environment variables.
-- **Header filtering prevents header injection** — applets cannot forge request headers that were filtered out inbound, and cannot set response headers that are filtered outbound.
-- **Identity is injected by the server** — applets cannot forge identity by sending a crafted `identity` field in the request body (the identity field is added by the operator or responder, not parsed from the request).
+- **Header filtering prevents header injection** — mod-apps cannot forge request headers that were filtered out inbound, and cannot set response headers that are filtered outbound.
+- **Identity is injected by the server** — mod-apps cannot forge identity by sending a crafted `identity` field in the request body (the identity field is added by the operator or responder, not parsed from the request).
 - **Auth failures return minimal information** — denial responses should not leak information about why the request was denied (e.g., "Unauthorized" not "Token expired").
 - **Operator auth cache security**: The operator auth cache (Options C and D) must not be poisonable. Cache keys must be the full credential string (not a truncated or hashed version that could collide). Cache entries must respect TTL strictly.
 
@@ -815,7 +815,7 @@ Implement the auth service process for network-dependent auth:
 
 ## 12. Open Questions
 
-1. **Should auth providers be allowed to modify the request body?** (e.g., decrypt an encrypted body before forwarding to applet).
+1. **Should auth providers be allowed to modify the request body?** (e.g., decrypt an encrypted body before forwarding to mod-app).
    - **Resolved** NO. DEFINITELY NOT.
 2. **Should auth results be cached?** (e.g., cache JWT verification results for the token's lifetime) — Yes, but cache invalidation is complex. Propose opt-in caching per provider.
    - **Resolved** Yes, opt-in caching per provider is likely to be critical for adequate performance.
@@ -823,8 +823,8 @@ Implement the auth service process for network-dependent auth:
    - **Resolved** Optional; most deployments won't need it.
 4. **How should auth errors be logged?**
    - **Resolved** Auth failures should be logged at `warn` level with request ID and denial reason (but not the token/credential itself).
-5. **Should there be a way for applets to trigger re-authentication?** (e.g., return a 401 that causes the client to re-authenticate)
-   - **Resolved** Applets can already return 401; no special server support needed.
+5. **Should there be a way for mod-apps to trigger re-authentication?** (e.g., return a 401 that causes the client to re-authenticate)
+   - **Resolved** Mod-apps can already return 401; no special server support needed.
 6. **Which option(s) should be implemented first?** — Option A (responder-side) is simplest and provides immediate value. Options C and D require more design work but are architecturally superior. Recommend implementing Option A first, then Option D (operator-embedded stateless auth), then Option C (auth service process).
    - **Resolved** Option D, then Option C
 7. **Should the auth service process (Option C) use the same pool manager as responders?**

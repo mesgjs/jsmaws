@@ -58,7 +58,7 @@ This document provides an example configuration for JSMAWS using the new pool-ba
 	]
 	
 	/* Application Root Directory */
-	/* Base path for relative applet paths */
+	/* Base path for relative mod-app paths */
 	appRoot=/var/www/apps
 	
 	/* Default Filesystem Root */
@@ -126,7 +126,7 @@ This document provides an example configuration for JSMAWS using the new pool-ba
 		[
 			path='/api/health'
 			pool=fast
-			applet=@health
+			app=@health
 			method=read
 		]
 		
@@ -318,10 +318,10 @@ For complex deployments with multiple workload types:
 	
 	routes=[
 		[path='/static/*' pool=static handler=static]
-		[path='/api/public/*' pool=public applet=@public]
-		[path='/api/admin/*' pool=admin applet=@admin]
-		[path='/batch/*' pool=batch applet=@batch]
-		[path='/ws/*' pool=websocket type=websocket applet=@*]
+		[path='/api/public/*' pool=public app=@public]
+		[path='/api/admin/*' pool=admin app=@admin]
+		[path='/batch/*' pool=batch app=@batch]
+		[path='/ws/*' pool=websocket type=websocket app=@*]
 	]
 )]
 ```

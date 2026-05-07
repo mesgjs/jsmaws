@@ -35,45 +35,45 @@ Deno.test("Route - parses path with parameters", () => {
 	assertEquals(route.pathParts[3].name, 'name');
 });
 
-Deno.test("Route - parses named applet path", () => {
+Deno.test("Route - parses named mod-app path", () => {
 	const route = new Route({ path: 'api/@myapp' });
 
 	assertEquals(route.pathParts.length, 2);
 	assertEquals(route.pathParts[0].type, 'literal');
-	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[1].type, 'app-named');
 	assertEquals(route.pathParts[1].name, 'myapp');
 });
 
-Deno.test("Route - parses wildcard applet", () => {
+Deno.test("Route - parses wildcard mod-app", () => {
 	const route = new Route({ path: 'apps/@*' });
 
 	assertEquals(route.pathParts.length, 2);
-	assertEquals(route.pathParts[1].type, 'applet-any');
+	assertEquals(route.pathParts[1].type, 'app-any');
 });
 
-Deno.test("Route - parses applet with required parameter", () => {
+Deno.test("Route - parses mod-app with required parameter", () => {
 	const route = new Route({ path: 'api/@myapp/:action' });
 
 	assertEquals(route.pathParts.length, 3);
-	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[1].type, 'app-named');
 	assertEquals(route.pathParts[2].type, 'param');
 	assertEquals(route.pathParts[2].name, 'action');
 });
 
-Deno.test("Route - parses applet with optional parameter", () => {
+Deno.test("Route - parses mod-app with optional parameter", () => {
 	const route = new Route({ path: 'api/@myapp/:?format' });
 
 	assertEquals(route.pathParts.length, 3);
-	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[1].type, 'app-named');
 	assertEquals(route.pathParts[2].type, 'optional-param');
 	assertEquals(route.pathParts[2].name, 'format');
 });
 
-Deno.test("Route - parses applet with tail parameter", () => {
+Deno.test("Route - parses mod-app with tail parameter", () => {
 	const route = new Route({ path: 'api/@myapp/:*' });
 
 	assertEquals(route.pathParts.length, 3);
-	assertEquals(route.pathParts[1].type, 'applet-named');
+	assertEquals(route.pathParts[1].type, 'app-named');
 	assertEquals(route.pathParts[2].type, 'tail');
 });
 
@@ -134,7 +134,7 @@ Deno.test("Route - parses redirect", () => {
 	assertEquals(route.href, 'https://example.com');
 });
 
-Deno.test("Route - parses applet from spec", () => {
+Deno.test("Route - parses mod-app from spec", () => {
 	const route = new Route({ path: 'api/users', app: '/path/to/app.esm.js' });
 
 	assertEquals(route.app, '/path/to/app.esm.js');
@@ -255,7 +255,7 @@ Deno.test("Route - matchPath case-insensitive method matching", () => {
 	assertExists(route.matchPath('/api/users', 'POST'));
 });
 
-Deno.test("Route - matchPath matches named applet", () => {
+Deno.test("Route - matchPath matches named mod-app", () => {
 	const config = new Configuration({ fsRouting: true });
 	const route = new Route({ path: 'apps/@myapp' }, config);
 	const match = route.matchPath('/apps/myapp', 'GET');
@@ -265,7 +265,7 @@ Deno.test("Route - matchPath matches named applet", () => {
 	assertEquals(match.app, 'apps/myapp');
 });
 
-Deno.test("Route - matchPath matches wildcard applet", () => {
+Deno.test("Route - matchPath matches wildcard mod-app", () => {
 	const config = new Configuration({ fsRouting: true });
 	const route = new Route({ path: 'apps/@*' }, config);
 	const match = route.matchPath('/apps/anyapp', 'GET');
@@ -275,7 +275,7 @@ Deno.test("Route - matchPath matches wildcard applet", () => {
 	assertEquals(match.app, 'apps/anyapp');
 });
 
-Deno.test("Route - matchPath matches applet with required parameter", () => {
+Deno.test("Route - matchPath matches mod-app with required parameter", () => {
 	const config = new Configuration({ fsRouting: true });
 	const route = new Route({ path: 'api/@myapp/:action' }, config);
 	const match = route.matchPath('/api/myapp/create', 'GET');
@@ -286,7 +286,7 @@ Deno.test("Route - matchPath matches applet with required parameter", () => {
 	assertEquals(match.params.action, 'create');
 });
 
-Deno.test("Route - matchPath matches applet with optional parameter when present", () => {
+Deno.test("Route - matchPath matches mod-app with optional parameter when present", () => {
 	const config = new Configuration({ fsRouting: true });
 	const route = new Route({ path: 'api/@myapp/:?format' }, config);
 	const match = route.matchPath('/api/myapp/json', 'GET');
@@ -297,7 +297,7 @@ Deno.test("Route - matchPath matches applet with optional parameter when present
 	assertEquals(match.params.format, 'json');
 });
 
-Deno.test("Route - matchPath matches applet with optional parameter when absent", () => {
+Deno.test("Route - matchPath matches mod-app with optional parameter when absent", () => {
 	const config = new Configuration({ fsRouting: true });
 	const route = new Route({ path: 'api/@myapp/:?format' }, config);
 	const match = route.matchPath('/api/myapp', 'GET');
@@ -308,7 +308,7 @@ Deno.test("Route - matchPath matches applet with optional parameter when absent"
 	assertEquals(match.params.format, undefined);
 });
 
-Deno.test("Route - matchPath matches applet with tail parameter", () => {
+Deno.test("Route - matchPath matches mod-app with tail parameter", () => {
 	const config = new Configuration({ fsRouting: true });
 	const route = new Route({ path: 'api/@myapp/:*' }, config);
 	const match = route.matchPath('/api/myapp/path/to/resource', 'GET');

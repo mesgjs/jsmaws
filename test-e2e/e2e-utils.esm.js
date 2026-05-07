@@ -242,35 +242,35 @@ export async function connectPolyTransportWebSocket (url, timeoutMs = 5000) {
 	// Now create the PolyTransport stack
 	// Create WebSocketTransport
 	const wsTransport = new WebSocketTransport({ ws });
-	
+
 	// Accept all channels
 	wsTransport.addEventListener('newChannel', (event) => {
 		event.accept();
 	});
-	
+
 	await wsTransport.start();
-	
+
 	// Open the pre-designated 'bidi' channel
 	const bidiChannel = await wsTransport.requestChannel('bidi');
 	await bidiChannel.addMessageTypes(['bidi-frame']);
-	
+
 	// Establish NestedTransport over the bidi channel
 	const nestedTransport = new NestedTransport({
 		channel: bidiChannel,
 		messageType: 'bidi-frame',
 	});
-	
+
 	// Accept all channels on the nested transport
 	nestedTransport.addEventListener('newChannel', (event) => {
 		event.accept();
 	});
-	
+
 	await nestedTransport.start();
-	
-	// Request the application channel (must match what the applet opens)
+
+	// Request the application channel (must match what the mod-app opens)
 	const appChannel = await nestedTransport.requestChannel('echo');
 	await appChannel.addMessageTypes(['data']);
-	
+
 	return { wsTransport, nestedTransport, bidiChannel, appChannel };
 }
 
@@ -280,7 +280,7 @@ export async function connectPolyTransportWebSocket (url, timeoutMs = 5000) {
  */
 export async function closePolyTransportWebSocket (connection) {
 	const { appChannel, nestedTransport, bidiChannel, wsTransport } = connection;
-	
+
 	// Close in reverse order of creation
 	if (appChannel) {
 		await appChannel.close();

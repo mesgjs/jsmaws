@@ -1,5 +1,5 @@
 /**
- * JSMAWS Built-in Static File Applet
+ * JSMAWS Built-in Static File Mod-App
  * Serves static files from the configured root directory
  *
  * Features:
@@ -184,9 +184,9 @@ async function handleRangeRequest (server, resolvedPath, fileSize, rangeHeader, 
 }
 
 /**
- * Main applet entry point
+ * Main mod-app entry point
  * Called by bootstrap after environment setup and JSMAWS namespace is frozen
- * @param {object} _setupData - Setup data from bootstrap (appletPath, mode, etc.)
+ * @param {object} _setupData - Setup data from bootstrap (appPath, mode, etc.)
  */
 export default async function (_setupData) {
 	const server = globalThis.JSMAWS.server;

@@ -1,10 +1,10 @@
 /**
  * JSMAWS Responder Process
- * Unprivileged service process for executing applets and handling requests
+ * Unprivileged service process for executing mod-apps and handling requests
  *
  * This process:
  * - Runs with dropped privileges (unprivileged uid/gid)
- * - Spawns applet workers on-demand to handle requests
+ * - Spawns mod-app workers on-demand to handle requests
  * - Receives request messages from operator via PipeTransport req-N channels
  * - Sends response messages back to operator via the same req-N channels
  * - Implements tiered response chunking
@@ -12,11 +12,11 @@
  * - Supports streaming, SSE, and WebSocket connections
  *
  * Architecture:
- * - Direct applet spawning (no intermediate wrapper)
+ * - Direct mod-app spawning (no intermediate wrapper)
  * - One-shot workers for regular requests (security/isolation)
  * - Long-lived workers for streaming/WebSocket connections
  * - Process-level module caching (automatic via Deno)
- * - Responder ↔ Applet communication via PostMessageTransport (PolyTransport)
+ * - Responder ↔ Mod-App communication via PostMessageTransport (PolyTransport)
  * - Operator ↔ Responder communication via PipeTransport (PolyTransport)
  *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
@@ -28,7 +28,7 @@ import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
 
 /**
  * Responder process class
- * Spawns applet workers on-demand to handle requests
+ * Spawns mod-app workers on-demand to handle requests
  */
 class ResponderProcess extends ServiceProcess {
 	constructor (processId, poolName) {
@@ -86,7 +86,7 @@ class ResponderProcess extends ServiceProcess {
 	 * Called after this.config has been updated by the ServiceProcess base class.
 	 */
 	async handleConfigUpdate () {
-		console.info(`[${this.processId}] Received configuration update`);
+		console.debug(`[${this.processId}] Received configuration update`);
 
 		// Update chunk size from config (PolyTransport handles chunking; we only need maxChunkBytes)
 		this.chunkingConfig = {
@@ -151,7 +151,7 @@ class ResponderProcess extends ServiceProcess {
 
 		// Loop 2: 'bidi-frame' relay (dechunk: false — forward chunks verbatim)
 		// bidi-frame carries NestedTransport byte-stream traffic; chunks must not be
-		// reassembled before forwarding to the applet's bidi channel.
+		// reassembled before forwarding to the mod-app's app channel.
 		(async () => {
 			// console.log('*** hndReqCh (res client -> app) bidi-relay ready');
 			let requestId = null; // Unknown until channel is assigned
@@ -178,8 +178,8 @@ class ResponderProcess extends ServiceProcess {
 
 		this.isShuttingDown = true;
 
-		// Phase 1: fire-and-forget graceful stop on each applet transport so
-		// applets can finish in-flight work.  Collect the stop promises so we
+		// Phase 1: fire-and-forget graceful stop on each mod-app transport so
+		// mod-app can finish in-flight work.  Collect the stop promises so we
 		// can await them all at the end (after any hard-terminate phase).
 		const stopPromises = [];
 		for (const requestInfo of this.activeRequests.values()) {
@@ -212,7 +212,7 @@ class ResponderProcess extends ServiceProcess {
 		// before we tear down the operator transport.
 		await Promise.all(stopPromises);
 
-		// Log shutdown complete BEFORE stopping transport (which closes stdout)
+		// Log shutdown complete BEFORE stopping transport
 		console.info(`[${this.processId}] Shutdown complete`);
 
 		// Stop operator transport (graceful drain)
@@ -220,24 +220,24 @@ class ResponderProcess extends ServiceProcess {
 			await this.transport.stop();
 		}
 
-		console.info(`[${this.processId}] Exiting`);
+		console.debug(`[${this.processId}] Exiting`);
 		Deno.exit(0);
 	}
 
 	/**
-	 * Handle error response ('res-error' message) from applet.
+	 * Handle error response ('res-error' message) from mod-app.
 	 * @param {string|number} id - Request ID
 	 * @param {string} errorJson - JSON-encoded error
 	 * @param {object} requestInfo - Active request info
 	 */
-	async #onAppletResError (id, errorJson, requestInfo) {
+	async #onAppResError (id, errorJson, requestInfo) {
 		let errorData;
 		try {
 			errorData = JSON.parse(errorJson);
 		} catch (_) {
 			errorData = { error: errorJson };
 		}
-		console.error(`[${this.processId}] Applet error for request ${id}:`, errorData.error);
+		console.error(`[${this.processId}] Mod-app error for request ${id}:`, errorData.error);
 		if (errorData.stack) console.error(errorData.stack);
 
 		// Send error first (sets responseStarted), then abort the worker.
@@ -246,13 +246,13 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Handle response metadata ('res' message) from applet.
+	 * Handle response metadata ('res' message) from mod-app.
 	 * Sends the response metadata to the operator via the req-N channel.
 	 * @param {string|number} id - Request ID
 	 * @param {string} resJson - JSON-encoded response metadata
 	 * @param {object} requestInfo - Active request info
 	 */
-	async #onAppletResMeta (id, resJson, requestInfo) {
+	async #onAppResMeta (id, resJson, requestInfo) {
 		const { status, headers, mode, keepAlive } = JSON.parse(resJson);
 
 		console.debug(`[${this.processId}] Response metadata: status=${status}, mode=${mode}, keepAlive=${keepAlive}`);
@@ -302,28 +302,28 @@ class ResponderProcess extends ServiceProcess {
 			totalWorkers: this.maxConcurrentRequests,
 		});
 
-		console.debug(`[${this.processId}] Sending response metadata to operator...`);
+		// console.debug(`[${this.processId}] Sending response metadata to operator...`);
 		requestInfo.responseStarted = true;
 		await requestInfo.reqChannel.write('res', resPayload);
-		console.debug(`[${this.processId}] Response metadata sent successfully`);
+		// console.debug(`[${this.processId}] Response metadata sent successfully`);
 	}
 
 	/**
 	 * General worker-termination handler.
-	 * Attached to the applet PostMessageTransport 'stopped' event.
+	 * Attached to the mod-app PostMessageTransport 'stopped' event.
 	 * Sends a 503 error response if no response was started, then removes
 	 * the request from activeRequests.
 	 *
-	 * This is the single, authoritative cleanup path for all cases where an
-	 * applet transport stops (graceful completion, timeout abort, shutdown
+	 * This is the single, authoritative cleanup path for all cases where a
+	 * mod-app transport stops (graceful completion, timeout abort, shutdown
 	 * hard-terminate, or unexpected worker exit).
 	 *
 	 * @param {string|number} id - Request ID
 	 */
-	#onAppletTransportStopped (id) {
+	#onAppTransportStopped (id) {
 		const requestInfo = this.activeRequests.get(id);
 		if (!requestInfo) return; // Already cleaned up
-		const { timeout, idleTimeout, connectionTimeout, appletChannel, reqChannel, responseStarted } = requestInfo;
+		const { timeout, idleTimeout, connectionTimeout, appChannel, reqChannel, responseStarted } = requestInfo;
 
 		// Clear all timers (request, idle, connection timeouts)
 		clearTimeout(timeout);
@@ -339,8 +339,8 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Handle inbound bidi-frame from operator (client → applet).
-	 * Forwards to the applet's bidi channel.
+	 * Handle inbound bidi-frame from operator (client → mod-app).
+	 * Forwards to the mod-app's app channel.
 	 * @param {object} reqChannel - The req-N channel the frame arrived on
 	 * @param {Uint8Array|undefined} frameData - Frame data
 	 */
@@ -348,25 +348,25 @@ class ResponderProcess extends ServiceProcess {
 		const requestInfo = this.activeRequests.get(requestId);
 
 		if (!requestInfo) {
-			console.debug(`[${this.processId}] Bidi frame for unknown/closed request ${requestId}`);
+			console.warn(`[${this.processId}] Bidi frame for unknown/closed request ${requestId}`);
 			return;
 		}
 
-		const { appletChannel, mode } = requestInfo;
+		const { appChannel, mode } = requestInfo;
 		if (mode !== 'bidi') {
 			console.warn(`[${this.processId}] Bidi frame for non-bidi request ${requestId}`);
 			return;
 		}
 
-		// Forward to applet's bidi channel (dechunk: false relay)
-		await appletChannel.write('bidi-frame', frameData, { eom: false });
+		// Forward to mod-app's app channel (dechunk: false relay)
+		await appChannel.write('bidi-frame', frameData, { eom: false });
 	}
 
 	/**
 	 * Log startup information after configuration is loaded.
 	 */
 	async onStarted () {
-		console.log(`[${this.processId}] Pool: ${this.poolName}, max concurrent: ${this.maxConcurrentRequests}`);
+		console.debug(`[${this.processId}] Pool: ${this.poolName}, max concurrent: ${this.maxConcurrentRequests}`);
 	}
 
 	/**
@@ -389,13 +389,13 @@ class ResponderProcess extends ServiceProcess {
 		try {
 			// Check if we're at capacity
 			if (this.activeRequests.size >= this.maxConcurrentRequests) {
-				console.warn(`[${this.processId}] At capacity (${this.activeRequests.size}/${this.maxConcurrentRequests}), returning 503`);
+				console.debug(`[${this.processId}] At capacity (${this.activeRequests.size}/${this.maxConcurrentRequests}), returning 503`);
 				await this.#sendErrorResponse(reqChannel, id, 503, 'Service Unavailable');
 				return;
 			}
 
 			const urlObj = new URL(url);
-			console.log(`[${this.processId}] Request: ${method?.toUpperCase()} ${urlObj.pathname} -> ${app}`);
+			console.debug(`[${this.processId}] Request: ${method?.toUpperCase()} ${urlObj.pathname} -> ${app}`);
 
 			// Resolve timeout configuration with hierarchy: route > pool > global
 			const timeouts = this.config.getTimeoutConfig(this.poolName, routeSpec);
@@ -407,9 +407,9 @@ class ResponderProcess extends ServiceProcess {
 			const upgradeHeader = headers?.['upgrade'];
 			const mode = (upgradeHeader?.toLowerCase() === 'websocket') ? 'bidi' : 'response';
 
-			// Spawn applet worker and establish PostMessageTransport
-			const { worker, transport, c2cChannel, appletChannel } =
-				await this.#spawnAppletWorker(app, mode);
+			// Spawn mod-app worker and establish PostMessageTransport
+			const { worker, transport, c2cChannel, appChannel } =
+				await this.#spawnAppWorker(app, mode);
 
 			// Set up request timeout: send error first (sets responseStarted), then abort.
 			const timeout = reqTimeout ? setTimeout(() => {
@@ -422,7 +422,7 @@ class ResponderProcess extends ServiceProcess {
 
 			// Track active request
 			this.activeRequests.set(id, {
-				appletChannel,
+				appChannel,
 				isStreaming: false,
 				mode,
 				reqChannel,
@@ -435,12 +435,12 @@ class ResponderProcess extends ServiceProcess {
 			});
 			this.channelMap.set(reqChannel, id);
 
-			// Register the general worker-termination handler on the applet transport.
+			// Register the general worker-termination handler on the mod-app transport.
 			// This is the single authoritative path for 503 + state cleanup when the
 			// transport stops for any reason (graceful, disconnected, or shutdown).
-			transport.addEventListener('stopped', () => this.#onAppletTransportStopped(id));
+			transport.addEventListener('stopped', () => this.#onAppTransportStopped(id));
 
-			// Forward applet C2C console output to operator via the req-N channel
+			// Forward mod-app C2C console output to operator via the req-N channel
 			// (con-* message types, not the C2C channel — associates output with the request)
 			this.#startC2CForwarding(id, c2cChannel, reqChannel);
 
@@ -453,7 +453,7 @@ class ResponderProcess extends ServiceProcess {
 				this.cleanupRequest(id);
 			};
 
-			// Check for built-in applets and prepare configuration
+			// Check for built-in mod-apps and prepare configuration
 			let builtinConfig = null;
 			if (app === '@static') {
 				builtinConfig = {
@@ -478,15 +478,15 @@ class ResponderProcess extends ServiceProcess {
 				maxChunkSize: this.chunkingConfig.chunkSize,
 			};
 
-			// Add config for built-in applets only
+			// Add config for built-in mod-apps only
 			if (builtinConfig) {
 				requestPayload.config = builtinConfig;
 			}
 
-			// Send request to applet via the 'applet' channel
-			await appletChannel.write('req', JSON.stringify(requestPayload));
+			// Send request to mod-app via the 'app' channel
+			await appChannel.write('req', JSON.stringify(requestPayload));
 
-			this.#processAppletResponse(id, appletChannel);
+			this.#processAppResponse(id, appChannel);
 
 		} catch (error) {
 			console.error(`[${this.processId}] Request handling error:`, error);
@@ -507,7 +507,7 @@ class ResponderProcess extends ServiceProcess {
 		await reqChannel.write('res-frame', null, { ifOpen: true });
 
 		// For non-keepAlive requests: the bootstrap stops the transport after the
-		// applet entry point returns, so the 'stopped' event will handle cleanup.
+		// mod-app entry point returns, so the 'stopped' event will handle cleanup.
 		// For keepAlive requests: start the idle timeout between frames.
 		if (requestInfo.keepAlive && requestInfo.timeouts.idleTimeout > 0) {
 			requestInfo.idleTimeout = this.#startIdleTimeout(id, requestInfo.timeouts.idleTimeout);
@@ -531,31 +531,31 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Spawn applet worker and establish PostMessageTransport.
-	 * Returns { worker, transport, appletChannel, c2cChannel }.
+	 * Spawn mod-app worker and establish PostMessageTransport.
+	 * Returns { worker, transport, appChannel, c2cChannel }.
 	 * The caller is responsible for setting up the bootstrap channel and
 	 * forwarding C2C output.
 	 *
-	 * @param {string} appletPath - Applet path or built-in alias (e.g. '@static')
+	 * @param {string} appPath - Mod-app path or built-in alias (e.g. '@static')
 	 * @param {string} mode - Request mode ('response', 'stream', 'bidi')
-	 * @returns {Promise<{ worker, transport, bootstrapChannel, appletChannel }>}
+	 * @returns {Promise<{ worker, transport, bootstrapChannel, appChannel }>}
 	 */
-	async #spawnAppletWorker (appletPath, mode) {
-		// Determine permissions based on applet path
+	async #spawnAppWorker (appPath, mode) {
+		// Determine permissions based on mod-app path
 		let readAny = false, keepDeno = false;
-		switch (appletPath) {
+		switch (appPath) {
 		case '@static':
-			appletPath = './applets/static-content.esm.js';
+			appPath = './apps/static-content.esm.js';
 			readAny = keepDeno = true;
 			break;
 		}
-		const appletURL = new URL(appletPath, import.meta.url);
-		const appletHref = appletURL.href;
-		const isUrlBased = appletHref.startsWith('https://') || appletHref.startsWith('http://');
-		const bootstrapURL = new URL('./applets/bootstrap.esm.js', import.meta.url);
+		const appURL = new URL(appPath, import.meta.url);
+		const appHref = appURL.href;
+		const isUrlBased = appHref.startsWith('https://') || appHref.startsWith('http://');
+		const bootstrapURL = new URL('./apps/bootstrap.esm.js', import.meta.url);
 
 		const readable = [bootstrapURL.pathname];
-		if (!isUrlBased) readable.push(appletURL.pathname);
+		if (!isUrlBased) readable.push(appURL.pathname);
 
 		const permissions = {
 			read: readAny || readable,
@@ -572,7 +572,7 @@ class ResponderProcess extends ServiceProcess {
 			deno: { permissions },
 		});
 
-		console.debug(`[${this.processId}] Created worker with bootstrap for applet "${appletPath}"`);
+		console.debug(`[${this.processId}] Created worker with bootstrap for mod-app "${appPath}"`);
 
 		// Establish PostMessageTransport with the worker
 		const c2cSymbol = Symbol('c2c');
@@ -590,31 +590,31 @@ class ResponderProcess extends ServiceProcess {
 
 		await transport.start();
 
-		// Get the C2C channel (applet console output)
+		// Get the C2C channel (mod-app console output)
 		const c2cChannel = transport.getChannel(c2cSymbol);
 
 		// Send setup instructions to bootstrap via the private 'bootstrap' channel
 		const bootstrapChannel = await transport.requestChannel('bootstrap');
 		await bootstrapChannel.addMessageTypes(['setup']);
 		await bootstrapChannel.write('setup', JSON.stringify({
-			appletPath: appletHref,
+			appPath: appHref,
 			mode,
 			keepDeno,
 		}));
 
-		// Set up the applet communication channel
-		const appletChannel = await transport.requestChannel('applet');
-		await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
+		// Set up the mod-app communication channel
+		const appChannel = await transport.requestChannel('app');
+		await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
 
-		return { worker, transport, c2cChannel, appletChannel };
+		return { worker, transport, c2cChannel, appChannel };
 	}
 
 	/**
-	 * Start forwarding applet C2C console output to operator via the req-N channel.
+	 * Start forwarding mod-app C2C console output to operator via the req-N channel.
 	 * C2C bare names (trace/debug/info/warn/error) are forwarded with 'con-' prefix
 	 * to avoid collision with other message types on the req-N channel.
 	 * @param {string|number} id - Request ID
-	 * @param {object} c2cChannel - The C2C channel from the applet's PostMessageTransport
+	 * @param {object} c2cChannel - The C2C channel from the mod-app's PostMessageTransport
 	 * @param {object} reqChannel - The req-N channel to forward to
 	 */
 	#startC2CForwarding (id, c2cChannel, reqChannel) {
@@ -669,12 +669,12 @@ class ResponderProcess extends ServiceProcess {
 	}
 
 	/**
-	 * Start reading response metadata and body from the applet channel,
+	 * Start reading response metadata and body from the mod-app channel,
 	 * and relay to the operator via req-N channel.
 	 * @param {string|number} id - Request ID
-	 * @param {object} appletChannel - The 'applet' channel from PostMessageTransport
+	 * @param {object} appChannel - The 'app' channel from PostMessageTransport
 	 */
-	#processAppletResponse (id, appletChannel) {
+	#processAppResponse (id, appChannel) {
 		const requestInfo = this.activeRequests.get(id);
 		if (!requestInfo) return;
 		const { reqChannel, mode } = requestInfo;
@@ -684,17 +684,17 @@ class ResponderProcess extends ServiceProcess {
 		// 'res-error' carries error response (sent instead of res + res-frame)
 		(async () => {
 			while (true) {
-				const msg = await appletChannel.read({ only: ['res', 'res-error'] });
+				const msg = await appChannel.read({ only: ['res', 'res-error'] });
 				if (!msg) break;
 				await msg.process(async () => {
 					const info = this.activeRequests.get(id);
 					if (!info) return;
 					switch (msg.messageType) {
 					case 'res':
-						await this.#onAppletResMeta(id, msg.text, info);
+						await this.#onAppResMeta(id, msg.text, info);
 						break;
 					case 'res-error':
-						await this.#onAppletResError(id, msg.text, info);
+						await this.#onAppResError(id, msg.text, info);
 						break;
 					}
 				});
@@ -703,11 +703,11 @@ class ResponderProcess extends ServiceProcess {
 
 		// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
 		// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
-		// Applets use PostMessageTransport (object stream, no auto text encoding), so
+		// Mod-apps use PostMessageTransport (object stream, no auto text encoding), so
 		// string writes set msg.text (not msg.data). Use msg.data ?? msg.text to handle both.
 		(async () => {
 			while (true) {
-				const msg = await appletChannel.read({ only: 'res-frame', dechunk: false });
+				const msg = await appChannel.read({ only: 'res-frame', dechunk: false });
 				if (!msg) break;
 				let done = false;
 				await msg.process(async () => {
@@ -732,7 +732,7 @@ class ResponderProcess extends ServiceProcess {
 		(async () => {
 			// if (mode === 'bidi') console.log('*** pAR (res app->cli) bidi relay ready');
 			while (true) {
-				const msg = await appletChannel.read({ only: 'bidi-frame', dechunk: false });
+				const msg = await appChannel.read({ only: 'bidi-frame', dechunk: false });
 				if (!msg) break;
 				await msg.process(async () => {
 					// console.log('*** Res App->Cli bidi relay', msg.dataSize);

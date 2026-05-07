@@ -82,7 +82,7 @@ export class SSLManager {
 
 			// Check if files exist
 			if (!certInfo.mtime || !keyInfo.mtime) {
-				console.warn('SSL certificate files not found');
+				console.error('SSL certificate files not found');
 				return false;
 			}
 
@@ -105,15 +105,15 @@ export class SSLManager {
 				keyInfo.target !== this.lastKeyTarget;
 
 			if (certChanged || keyChanged) {
-				console.info('SSL certificate files changed:');
+				console.info('SSL certificate files changed');
 				if (certChanged) {
-					console.info(`  Certificate: ${this.certFile}`);
+					console.debug(`  Certificate: ${this.certFile}`);
 					if (certInfo.target !== this.lastCertTarget) {
 						console.debug(`    Symlink target changed: ${this.lastCertTarget} -> ${certInfo.target}`);
 					}
 				}
 				if (keyChanged) {
-					console.info(`  Key: ${this.keyFile}`);
+					console.debug(`  Key: ${this.keyFile}`);
 					if (keyInfo.target !== this.lastKeyTarget) {
 						console.debug(`    Symlink target changed: ${this.lastKeyTarget} -> ${keyInfo.target}`);
 					}

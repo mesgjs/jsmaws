@@ -5,19 +5,19 @@
  * Routes are matched in order, with the first matching route being used.
  *
  * Route Types:
- * - Filesystem routes: Contain @name or @* applet components (require filesystem access)
+ * - Filesystem routes: Contain @name or @* mod-app components (require filesystem access)
  * - Virtual routes: Have explicit app property (including @static) or response property
  * - Response routes: Virtual routes with response code (and possibly href for redirects)
  *
  * Supports:
  * - Literal path matching
  * - Parameter matching (:name, :?name, :*)
- * - Applet path matching (@name, @*)
+ * - Mod-app path matching (@name, @*)
  * - Regex pattern matching
  * - HTTP method filtering
  * - Pool-based request routing
  * - Response codes and redirects
- * - Static file serving via @static applet
+ * - Static file serving via @static mod-app
  *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -38,7 +38,7 @@ class Route {
 		this.method = ['get']; // HTTP methods
 		this.response = null; // Response code or redirect
 		this.href = null; // Redirect target
-		this.app = null; // Applet path (or @static for static files)
+		this.app = null; // Mod-app path (or @static for static files)
 		this.root = null; // Local root directory
 		this.headers = {}; // Response headers (plain object)
 		this.isFilesystem = false; // Filesystem route (requires FS access)
@@ -51,21 +51,21 @@ class Route {
 	 * Classify route as filesystem, virtual, or neither
 	 * 
 	 * Classification rules:
-	 * - Filesystem route: Contains @name or @* applet component (regardless of app property)
+	 * - Filesystem route: Contains @name or @* mod-app component (regardless of app property)
 	 * - Virtual route: Has non-empty app property (including @static) OR has response property
 	 * - Response routes are a variation of virtual routes
 	 */
 	classifyRoute () {
-		// Check for applet components in path
+		// Check for mod-app components in path
 		for (const part of this.pathParts) {
-			if (part.type === 'applet-named' || part.type === 'applet-any') {
+			if (part.type === 'app-named' || part.type === 'app-any') {
 				this.isFilesystem = true;
 				this.isVirtual = false;
 				return;
 			}
 		}
 
-		// If no applet components, check for explicit app property or response
+		// If no mod-app components, check for explicit app property or response
 		if (this.app || this.response) {
 			this.isFilesystem = false;
 			this.isVirtual = true;
@@ -75,7 +75,7 @@ class Route {
 		// Neither filesystem nor virtual - invalid route
 		this.isFilesystem = false;
 		this.isVirtual = false;
-		console.warn(`Route has no applet resolution mechanism: ${this.spec.path ?? '(no path)'}`);
+		console.warn(`Route has no app resolution mechanism: ${this.spec.path ?? '(no path)'}`);
 	}
 
 	/**
@@ -167,7 +167,7 @@ class Route {
 		};
 
 		let urlIndex = 0;
-		let prePath = []; // Track pre-applet path parts for filesystem routes
+		let prePath = []; // Track pre-mod-app path parts for filesystem routes
 
 		for (let i = 0; i < this.pathParts.length; i++) {
 			const part = this.pathParts[i];
@@ -176,7 +176,7 @@ class Route {
 				if (urlIndex >= urlParts.length || urlParts[urlIndex] !== part.value) {
 					return null;
 				}
-				// Track literal parts before applet for filesystem path construction
+				// Track literal parts before mod-app for filesystem path construction
 				if (!result.app || result.app === this.app) {
 					prePath.push(urlParts[urlIndex]);
 				}
@@ -187,22 +187,22 @@ class Route {
 				}
 				result.params[part.name] = urlParts[urlIndex];
 				urlIndex++;
-			} else if (part.type === 'applet-named') {
+			} else if (part.type === 'app-named') {
 				if (urlIndex >= urlParts.length || urlParts[urlIndex] !== part.name) {
 					return null;
 				}
-				// For filesystem routes, construct full applet path
+				// For filesystem routes, construct full mod-app path
 				if (this.isFilesystem && !this.root) {
 					result.app = [...prePath, part.name].join('/');
 				} else {
 					result.app = part.name;
 				}
 				urlIndex++;
-			} else if (part.type === 'applet-any') {
+			} else if (part.type === 'app-any') {
 				if (urlIndex >= urlParts.length) {
 					return null;
 				}
-				// For filesystem routes, construct full applet path
+				// For filesystem routes, construct full mod-app path
 				if (this.isFilesystem && !this.root) {
 					result.app = [...prePath, urlParts[urlIndex]].join('/');
 				} else {
@@ -295,9 +295,9 @@ class Route {
 			} else if (part.startsWith(':')) {
 				return { type: 'param', name: part.substring(1) };
 			} else if (part === '@*') {
-				return { type: 'applet-any' };
+				return { type: 'app-any' };
 			} else if (part.startsWith('@')) {
-				return { type: 'applet-named', name: part.substring(1) };
+				return { type: 'app-named', name: part.substring(1) };
 			} else {
 				return { type: 'literal', value: part };
 			}
@@ -345,7 +345,7 @@ class Route {
 			this.href = spec.href;
 		}
 
-		// Parse applet path (including @static for static file serving)
+		// Parse mod-app path (including @static for static file serving)
 		if (spec.app) {
 			this.app = spec.app;
 		}
@@ -373,7 +373,7 @@ class Route {
 	}
 
 	/**
-		* Verify filesystem applet route exists (async)
+		* Verify filesystem mod-app route exists (async)
 		* This method should be called after matchPath() for filesystem routes
 		* @param {Object} match from matchPath()
 		* @returns {Promise<Object|null>} Match result with resolved app path, or null if not found

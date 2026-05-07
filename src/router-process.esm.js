@@ -43,7 +43,7 @@ class RouterProcess extends ServiceProcess {
 	 * Called after this.config has been updated by the ServiceProcess base class.
 	 */
 	async handleConfigUpdate () {
-		console.info(`[${this.processId}] Received configuration update`);
+		console.debug(`[${this.processId}] Received configuration update`);
 
 		// Propagate updated config to pool manager and workers
 
@@ -122,12 +122,15 @@ class RouterProcess extends ServiceProcess {
 			await this.poolManager.shutdown(timeout);
 		}
 
+		// Log complete before loss of transport/C2C
+		console.info(`[${this.processId}] Shutdown complete`);
+
 		// Stop transport (graceful drain)
 		if (this.transport) {
 			await this.transport.stop();
 		}
 
-		console.info(`[${this.processId}] Shutdown complete`);
+		console.debug(`[${this.processId}] Exiting`);
 		Deno.exit(0);
 	}
 

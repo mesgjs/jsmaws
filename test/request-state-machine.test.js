@@ -81,7 +81,7 @@ function makeContext (requestId, mockOperator, opts = {}) {
 		poolName: opts.poolName ?? 'standard',
 		routeSpec: opts.routeSpec ?? null,
 		request: req,
-		appletPath: opts.app ?? null,
+		appPath: opts.app ?? null,
 		operator: mockOperator,
 	});
 }
@@ -572,10 +572,10 @@ Deno.test('RequestContext - stores app field', () => {
 		process: mockProcess,
 		poolName: 'standard',
 		request: new Request('https://example.com/test'),
-		appletPath: '/path/to/applet.esm.js',
+		appPath: '/path/to/app.esm.js',
 	});
 
-	assertEquals(context.app, '/path/to/applet.esm.js');
+	assertEquals(context.app, '/path/to/app.esm.js');
 });
 
 Deno.test('RequestContext - stores routeSpec', () => {

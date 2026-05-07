@@ -7,24 +7,24 @@
 
 ## 1. Problem Statement
 
-Both the auth API design ([`arch/auth-api-design.md`](auth-api-design.md)) and the RPC API design ([`arch/rpc-api-design.md`](rpc-api-design.md)) require a mechanism for supplying credentials, API keys, and other sensitive values to modules and applets. Previously (since updated), the `env:VAR_NAME` shorthand appeared informally in those documents (e.g., `secret=env:JWT_SECRET`, `password=env:DB_PASSWORD`) without a formal specification.
+Both the auth API design ([`arch/auth-api-design.md`](auth-api-design.md)) and the RPC API design ([`arch/rpc-api-design.md`](rpc-api-design.md)) require a mechanism for supplying credentials, API keys, and other sensitive values to modules and mod-apps. Previously (since updated), the `env:VAR_NAME` shorthand appeared informally in those documents (e.g., `secret=env:JWT_SECRET`, `password=env:DB_PASSWORD`) without a formal specification.
 
 This document formalizes that pattern into a **general-purpose value-resolver system** with:
 
 1. **Multiple source schemes** — `:env:`, `:kv:`, `:file:`, `:secret:`, and `::` (empty scheme = literal, the default).
-2. **Server-side resolution** — Secrets are resolved by the operator (typically, or possibly by the responder) before being passed to auth providers, data-source adapters, and other server-side modules. Applet code never sees raw credentials.
-3. **Applet-side injection** — A filtered, explicitly-enumerated set of resolved values can be injected into applet workers at request time, enabling applets to receive feature flags, tenant IDs, public API endpoints, public keys (or even sensitive values such as private keys when the administrator explicitly chooses to inject them) without hard-coding them.
-4. **Scope-based merging** — Applet environment values are defined at global, pool, and route levels and merged, with more-specific scopes overriding less-specific ones.
+2. **Server-side resolution** — Secrets are resolved by the operator (typically, or possibly by the responder) before being passed to auth providers, data-source adapters, and other server-side modules. Mod-app code never sees raw credentials.
+3. **Mod-app-side injection** — A filtered, explicitly-enumerated set of resolved values can be injected into mod-app workers at request time, enabling mod-apps to receive feature flags, tenant IDs, public API endpoints, public keys (or even sensitive values such as private keys when the administrator explicitly chooses to inject them) without hard-coding them.
+4. **Scope-based merging** — Mod-app environment values are defined at global, pool, and route levels and merged, with more-specific scopes overriding less-specific ones.
 
 ---
 
 ## 2. Design Principles
 
-1. **Least privilege**: Applets receive only the values they are explicitly granted. Server-side secrets (DB passwords, JWT signing keys) are never injected into applet workers unless explicitly configured.
+1. **Least privilege**: Mod-apps receive only the values they are explicitly granted. Server-side secrets (DB passwords, JWT signing keys) are never injected into mod-app workers unless explicitly configured.
 2. **Scheme-based extensibility**: New value sources can be added without changing the configuration syntax.
-3. **Consistent syntax**: The same `:scheme:reference` syntax is used everywhere a "resolved value" is needed — in auth provider config, data source config, and applet injection definitions.
-4. **Operator-side resolution**: All scheme resolution happens in the operator or responder process (privileged or semi-privileged), never inside the sandboxed applet worker.
-5. **Explicit applet injection required**: Values resolved for server-side use (e.g., DB passwords) are not automatically available to applets. A separate `appEnv` block at the route/pool/global level must explicitly define what applets may receive.
+3. **Consistent syntax**: The same `:scheme:reference` syntax is used everywhere a "resolved value" is needed — in auth provider config, data source config, and mod-app injection definitions.
+4. **Operator-side resolution**: All scheme resolution happens in the operator or responder process (privileged or semi-privileged), never inside the sandboxed mod-app worker.
+5. **Explicit mod-app injection required**: Values resolved for server-side use (e.g., DB passwords) are not automatically available to mod-apps. A separate `appEnv` block at the route/pool/global level must explicitly define what mod-apps may receive.
 6. **Mesgjs-compatible**: The API is expressible in SLID configuration and plain JavaScript.
 
 ---
@@ -196,25 +196,25 @@ The configuration system must treat any value resolved from `:env:`, `:kv:`, `:f
 
 ---
 
-## 5. Applet-Side Injection
+## 5. Mod-App-Side Injection
 
 ### 5.1 Motivation
 
-Applets sometimes need configuration values that are environment-specific:
+Mod-apps sometimes need configuration values that are environment-specific:
 - Feature flags (`featureNewUI=true`)
 - Public API endpoints (`paymentApiUrl=https://api.stripe.com/v1`)
 - Tenant identifiers (`tenantId=acme-corp`)
 - API keys — both public/publishable keys and, when the administrator explicitly chooses, private/secret keys
 
-These values should not be hard-coded in applet source files. The env/secrets system provides a controlled injection mechanism via the `appEnv` configuration block.
+These values should not be hard-coded in mod-app source files. The env/secrets system provides a controlled injection mechanism via the `appEnv` configuration block.
 
-As the sensitivity-level of any particular value often cannot be determined solely from the source, it is the user's responsibility to make sure only the necessary information is approved for applet environment injection.
+As the sensitivity-level of any particular value often cannot be determined solely from the source, it is the user's responsibility to make sure only the necessary information is approved for mod-app environment injection.
 
 ### 5.2 `appEnv` Block
 
-The `appEnv` block defines key-value pairs to inject into applet workers. It can appear at the global, pool, or route level. Values at different scopes are **merged**, with more-specific scopes overriding less-specific ones (route > pool > global).
+The `appEnv` block defines key-value pairs to inject into mod-app workers. It can appear at the global, pool, or route level. Values at different scopes are **merged**, with more-specific scopes overriding less-specific ones (route > pool > global).
 
-Each key in `appEnv` maps to a value reference (or a plain string). The resolved value is injected into the applet worker as `globalThis.JSMAWS.env[key]`.
+Each key in `appEnv` maps to a value reference (or a plain string). The resolved value is injected into the mod-app worker as `globalThis.JSMAWS.env[key]`.
 
 To **delete** a value inherited from a broader scope, set the key to `:delete:`. A deleted key will not appear in `globalThis.JSMAWS.env` (unless explicitly added back in the current or a more specific scope).
 
@@ -224,7 +224,7 @@ To **delete** a value inherited from a broader scope, set the key to `:delete:`.
 
 ```slid
 [(
-  /* Values injected into all applets (unless overridden or deleted at pool/route level) */
+  /* Values injected into all mod-apps (unless overridden or deleted at pool/route level) */
   appEnv=[
     appVersion=:env:APP_VERSION
     featureNewUI=:env:FEATURE_NEW_UI
@@ -288,7 +288,7 @@ The effective `appEnv` for a request is computed by merging the global, pool, an
    - All other entries override or add keys.
 3. Merge the route's `appEnv` on top (same rules as step 2, applied to the result of step 2).
 
-The result is the set of key-value pairs injected into the applet worker as `setupData.appEnv`.
+The result is the set of key-value pairs injected into the mod-app worker as `setupData.appEnv`.
 
 **Example merge:**
 
@@ -302,7 +302,7 @@ The result is the set of key-value pairs injected into the applet worker as `set
 
 ### 5.5 Injection Mechanics
 
-At request dispatch time, the responder assembles the `setupData` object sent to the applet worker's bootstrap. The effective `appEnv` (after merging) is included as `setupData.appEnv`:
+At request dispatch time, the responder assembles the `setupData` object sent to the mod-app worker's bootstrap. The effective `appEnv` (after merging) is included as `setupData.appEnv`:
 
 ```javascript
 // setupData received by bootstrap.esm.js
@@ -328,7 +328,7 @@ The bootstrap exposes the injected values via `globalThis.JSMAWS.env`:
 jsmawsNamespace.env = Object.freeze(setupData.appEnv ?? {});
 ```
 
-Applet code accesses injected values via:
+Mod-app code accesses injected values via:
 
 ```javascript
 export default async function (_setupData) {
@@ -339,24 +339,24 @@ export default async function (_setupData) {
 
 ### 5.6 Value Types
 
-All injected values are **strings** in `globalThis.JSMAWS.env`. SLID configuration values may be non-string types (numbers, booleans via `@t`/`@f`, etc.), so the `appEnv` assembly step **coerces all values to strings** using JavaScript's standard `String()` conversion before including them in `setupData.appEnv`. Applets that need numeric or boolean values must parse them:
+All injected values are **strings** in `globalThis.JSMAWS.env`. SLID configuration values may be non-string types (numbers, booleans via `@t`/`@f`, etc.), so the `appEnv` assembly step **coerces all values to strings** using JavaScript's standard `String()` conversion before including them in `setupData.appEnv`. Mod-apps that need numeric or boolean values must parse them:
 
 ```javascript
 const maxRetries = parseInt(globalThis.JSMAWS.env.maxRetries ?? '3', 10);
 const featureEnabled = globalThis.JSMAWS.env.featureNewUI === 'true';
 ```
 
-This is intentional: it keeps the applet API simple and consistent (always strings), while allowing administrators to use natural SLID types in configuration without needing to quote everything.
+This is intentional: it keeps the mod-app API simple and consistent (always strings), while allowing administrators to use natural SLID types in configuration without needing to quote everything.
 
 ### 5.7 Security Constraints on Injection
 
-The following constraints apply to applet-side injection:
+The following constraints apply to mod-app-side injection:
 
-1. **No values injected by default**: While any value can be injected into an applet worker, none are ever injected automatically. Values must be explicitly listed in an `appEnv` block at an appropriate scope to be injected.
+1. **No values injected by default**: While any value can be injected into an mod-app worker, none are ever injected automatically. Values must be explicitly listed in an `appEnv` block at an appropriate scope to be injected.
 
-2. **Injection is one-way and read-only**: Applets cannot write to the env namespace (`globalThis.JSMAWS.env` is frozen). This particular feature deliberately omits any provision for sending values in the opposite direction (*from* applets).
+2. **Injection is one-way and read-only**: Mod-apps cannot write to the env namespace (`globalThis.JSMAWS.env` is frozen). This particular feature deliberately omits any provision for sending values in the opposite direction (*from* mod-apps).
 
-3. **No cross-route leakage**: Each request's `setupData.appEnv` is assembled fresh from the effective merged `appEnv` for that route. An applet cannot access values from a different route's `appEnv`.
+3. **No cross-route leakage**: Each request's `setupData.appEnv` is assembled fresh from the effective merged `appEnv` for that route. An mod-app cannot access values from a different route's `appEnv`.
 
 ---
 
@@ -429,7 +429,7 @@ Value resolution is **async** (`resolveObject()` returns a `Promise`), while `Co
 | `src/operator-process.esm.js` | Holds the `ValueResolver` instance; calls `await valueResolver.resolveObject(rawConfig, rawConfig)` to produce a resolved plain object; passes the resolved object to `config.updateConfig()` and to responders via IPC |
 | `src/configuration.esm.js` | `Configuration.updateConfig()` receives an already-resolved plain object; `getEffectiveAppEnv(routeSpec, poolName)` merges and coerces `appEnv` blocks (values are already resolved strings — no async needed) |
 | `src/responder-process.esm.js` | Receives already-resolved config from operator; calls `config.getEffectiveAppEnv()` when assembling `setupData` |
-| `src/applets/bootstrap.esm.js` | Reads `setupData.appEnv` and exposes as `globalThis.JSMAWS.env` |
+| `src/apps/bootstrap.esm.js` | Reads `setupData.appEnv` and exposes as `globalThis.JSMAWS.env` |
 
 ### 6.3 Resolved Configuration
 
@@ -472,7 +472,7 @@ This approach avoids the lifecycle ambiguity of holding open KV store handles ac
     ]
   ] */
 
-  /* Values injected into all applets (merged with pool/route appEnv) */
+  /* Values injected into all mod-apps (merged with pool/route appEnv) */
   appEnv=[
     appVersion=:env:APP_VERSION
     featureNewUI=:env:FEATURE_NEW_UI
@@ -559,7 +559,7 @@ routes=[
 
 ---
 
-## 8. Applet API
+## 8. Mod-App API
 
 ### 8.1 `globalThis.JSMAWS.env`
 
@@ -580,11 +580,11 @@ Properties:
 - Frozen (`Object.isFrozen(globalThis.JSMAWS.env) === true`)
 - All values are strings
 - Keys are exactly those present in the effective merged `appEnv` for the route (after `:delete:` keys are removed and all values coerced to strings)
-- Available from the first line of the applet's default export function
+- Available from the first line of the mod-app's default export function
 
 ### 8.2 Mesgjs-Style Access (Future)
 
-For Mesgjs applets, the env namespace will be accessible via the standard Mesgjs message-passing API. The exact form is TBD pending Mesgjs integration design.
+For Mesgjs mod-apps, the env namespace will be accessible via the standard Mesgjs message-passing API. The exact form is TBD pending Mesgjs integration design.
 
 ---
 
@@ -604,7 +604,7 @@ auth=[
 Under this proposal:
 - `:env:JWT_SECRET` is a value reference resolved by the `ValueResolver` at startup.
 - The resolved value is passed to the auth provider's `init()` or `check()` call.
-- The JWT secret is **never** injected into applet workers (it is not in any `appEnv` block).
+- The JWT secret is **never** injected into mod-app workers (it is not in any `appEnv` block).
 - The auth provider receives the resolved value as a plain string in its configuration object.
 
 ### 9.2 Data Access API
@@ -624,8 +624,8 @@ services=[
 Under this proposal:
 - All value references in `services` are resolved by the `ValueResolver` at startup.
 - The resolved configuration is passed to the adapter's `init()` call in the responder process.
-- Database passwords are **never** injected into applet workers.
-- Applets access services via the `JSMAWS.rpc` channel (IPC), not via direct connections.
+- Database passwords are **never** injected into mod-app workers.
+- Mod-apps access services via the `JSMAWS.rpc` channel (IPC), not via direct connections.
 
 ### 9.3 Separation of Concerns
 
@@ -646,7 +646,7 @@ Under this proposal:
 │  └──────────────────┘  └──────────────────┘                     │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  Applet Injection (appEnv merge applied)                 │   │
+│  │  Mod-App Injection (appEnv merge applied)                 │   │
 │  │  Only explicitly-enumerated values pass                  │   │
 │  │  → setupData.appEnv → globalThis.JSMAWS.env (frozen)     │   │
 │  └──────────────────────────────────────────────────────────┘   │
@@ -693,29 +693,29 @@ Under this proposal:
    - On startup and config reload: calls `await valueResolver.resolveObject(rawConfig, rawConfig)` to produce a resolved plain object, then passes it to `config.updateConfig()` and to responders via IPC
    - `resolveObject()` handles NANOS input (or the operator converts NANOS to a plain object before passing)
 
-### Phase 2: Applet Injection
+### Phase 2: Mod-App Injection
 
 8. **`src/responder-process.esm.js`** — Injection into setupData
    - Call `config.getEffectiveAppEnv(routeSpec, poolName)` when assembling `setupData`
    - Include result as `setupData.appEnv`
 
-9. **`src/applets/bootstrap.esm.js`** — Expose `JSMAWS.env`
+9. **`src/apps/bootstrap.esm.js`** — Expose `JSMAWS.env`
    - `jsmawsNamespace.env = Object.freeze(setupData.appEnv ?? {})`
 
 ### Phase 3: Tests and Documentation
 
 10. Unit tests for `ValueResolver` (all schemes)
 11. Unit tests for `Configuration.getEffectiveAppEnv()` (merge hierarchy)
-12. Integration tests for applet injection (bootstrap receives `setupData.appEnv`)
-13. E2E tests for env-injected applets
-14. Administrator guide: configuring value references and applet injection
-15. Applet developer guide: using `globalThis.JSMAWS.env`
+12. Integration tests for mod-app injection (bootstrap receives `setupData.appEnv`)
+13. E2E tests for env-injected mod-apps
+14. Administrator guide: configuring value references and mod-app injection
+15. Mod-app developer guide: using `globalThis.JSMAWS.env`
 
 ---
 
 ## 11. Security Considerations
 
-- **No values injected by default**: Values are never injected into applet workers unless explicitly enumerated in an `appEnv` block. The `appEnv` configuration is the security boundary.
+- **No values injected by default**: Values are never injected into mod-app workers unless explicitly enumerated in an `appEnv` block. The `appEnv` configuration is the security boundary.
 - **Deletion support**: Setting a key to `:delete:` in a more-specific `appEnv` block deletes it from the merged result, preventing injection of values defined at broader scopes.
 - **Frozen env object**: `globalThis.JSMAWS.env` (a "shallow" object containing only string-valued properties) is frozen.
 - **No serialization of resolved values**: Resolved values must not appear in logs, error messages, or diagnostic output. Raw (unresolved) config is not retained; IPC transmits only the resolved config over the trusted operator ↔ responder channel.
@@ -730,13 +730,13 @@ Under this proposal:
 1. **Should `:delete:` accept an optional reference portion, or require it to be empty?**
   - **Resolved**: The reference portion is ignored if present. The special key `*=:delete:` clears all accumulated keys at that point in the merge, allowing a more-specific scope to start fresh. Keys defined in the same block, or in more-specific scopes, are applied normally.
 
-2. **Should `appEnv` values support non-string types?** (e.g., numbers, booleans) — Current proposal: strings only, for simplicity. Applets parse as needed. Revisit if this proves too inconvenient.
-  - **Resolved** No. Value domain is applet responsibility. Avoid assumptions, PolyTransport byte-stream encoding complications, responder value re-parsing.
+2. **Should `appEnv` values support non-string types?** (e.g., numbers, booleans) — Current proposal: strings only, for simplicity. Mod-apps parse as needed. Revisit if this proves too inconvenient.
+  - **Resolved** No. Value domain is mod-app responsibility. Avoid assumptions, PolyTransport byte-stream encoding complications, responder value re-parsing.
 
 3. **How should `:kv:` references handle missing keys?** — Current proposal: `undefined` (same as missing env var). Should there be a default value syntax? e.g., `:kv:key?default-value`.
-  - **Resolved** Default-value handling is (trivial) applet responsibility. No need to complicate the server.
+  - **Resolved** Default-value handling is (trivial) mod-app responsibility. No need to complicate the server.
 
-4. **Should there be a `reload` API for applets?** (e.g., to pick up updated env values mid-request) — No. Env values are resolved at request dispatch time and are immutable for the lifetime of the applet worker. Applets that need dynamic config should use the `rpc` channel to query a KV store directly (if granted access).
+4. **Should there be a `reload` API for mod-apps?** (e.g., to pick up updated env values mid-request) — No. Env values are resolved at request dispatch time and are immutable for the lifetime of the mod-app worker. Mod-apps that need dynamic config should use the `rpc` channel to query a KV store directly (if granted access).
   - **Resolved** Correct - static data only (which might include credentials to access a live data connection, via separate [`arch/rpc-api-design.md`](rpc-api-design.md))
 
 5. **Should the `:secret:` scheme be implemented in Phase 1 as a stub, or deferred entirely?** — Current proposal: stub in Phase 1 (logs error, returns `undefined`). This allows configuration files to use `:secret:` references without breaking, while making it clear the feature is not yet implemented.
@@ -786,4 +786,4 @@ Under this proposal:
 
 ---
 
-[supplemental keywords: environment variables, secrets management, credentials, API keys, value resolver, env injection, applet configuration, kv store, file secrets, Docker secrets, appEnv, access control, configuration security, :secret: scheme, :env: scheme, :kv: scheme, :file: scheme, :delete: scheme, literal scheme, empty scheme, :: syntax, :scheme: syntax, selector, kvStores, secretsStores, setupData, JSMAWS.env, bootstrap, operator, responder, value reference, scheme prefix, merge semantics, scope hierarchy, erasure, key deletion, reload, caching, modularity, extensibility, scheme handlers]
+[supplemental keywords: environment variables, secrets management, credentials, API keys, value resolver, env injection, mod-app configuration, kv store, file secrets, Docker secrets, appEnv, access control, configuration security, :secret: scheme, :env: scheme, :kv: scheme, :file: scheme, :delete: scheme, literal scheme, empty scheme, :: syntax, :scheme: syntax, selector, kvStores, secretsStores, setupData, JSMAWS.env, bootstrap, operator, responder, value reference, scheme prefix, merge semantics, scope hierarchy, erasure, key deletion, reload, caching, modularity, extensibility, scheme handlers]

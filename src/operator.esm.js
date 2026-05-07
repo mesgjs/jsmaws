@@ -1,5 +1,5 @@
 /**
- * JavaScript Multi-Applet Web Server (JSMAWS)
+ * JavaScript Modular Application Web Server (JSMAWS)
  * Operator process entry point
  *
  * This is the main entry point for the privileged operator process.

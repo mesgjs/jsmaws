@@ -21,7 +21,7 @@ import {
 Deno.test('E2E WebSocket - Basic connection and upgrade with PolyTransport', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -50,7 +50,7 @@ Deno.test('E2E WebSocket - Basic connection and upgrade with PolyTransport', asy
 Deno.test('E2E WebSocket - Receive welcome message', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -82,7 +82,7 @@ Deno.test('E2E WebSocket - Receive welcome message', async () => {
 Deno.test('E2E WebSocket - Echo single message', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -120,7 +120,7 @@ Deno.test('E2E WebSocket - Echo single message', async () => {
 Deno.test('E2E WebSocket - Echo multiple messages', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -168,7 +168,7 @@ Deno.test('E2E WebSocket - Echo multiple messages', async () => {
 Deno.test('E2E WebSocket - Binary data echo', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -211,7 +211,7 @@ Deno.test('E2E WebSocket - Binary data echo', async () => {
 Deno.test('E2E WebSocket - Large message echo', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -250,7 +250,7 @@ Deno.test('E2E WebSocket - Large message echo', async () => {
 Deno.test('E2E WebSocket - Concurrent bidirectional messages', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -301,7 +301,7 @@ Deno.test('E2E WebSocket - Concurrent bidirectional messages', async () => {
 Deno.test('E2E WebSocket - Connection close handling', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 1, maxProcs: 1 }
@@ -338,7 +338,7 @@ Deno.test('E2E WebSocket - Connection close handling', async () => {
 Deno.test('E2E WebSocket - Multiple concurrent connections', async () => {
 	const { operator } = await createTestServer({
 		routes: [
-			{ path: '/ws-echo', pool: 'standard', app: '../examples/applets/websocket-echo.esm.js' }
+			{ path: '/ws-echo', pool: 'standard', app: '../examples/apps/websocket-echo.esm.js' }
 		],
 		pools: {
 			standard: { minProcs: 2, maxProcs: 2 }

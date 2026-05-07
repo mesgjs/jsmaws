@@ -1,15 +1,15 @@
 /**
- * Static Content Applet Tests
- * Tests for the built-in static file serving applet
+ * Static Content Mod-App Tests
+ * Tests for the built-in static file serving mod-app
  *
- * The static content applet uses PolyTransport channel API via globalThis.JSMAWS.server:
+ * The static content mod-app uses PolyTransport channel API via globalThis.JSMAWS.server:
  * - Reads 'req' message (JSON) for request metadata
  * - Writes 'res' message (JSON text) for response status + headers
  * - Writes 'res-frame' messages (binary Uint8Array) for response body chunks
  * - Signals end-of-stream with zero-data 'res-frame' (null data, default eom:true)
  * - Writes 'res-error' message (JSON text) on error
  *
- * Tests use PostMessageTransport to communicate with the applet via bootstrap.
+ * Tests use PostMessageTransport to communicate with the mod-app via bootstrap.
  *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -18,8 +18,8 @@ import { assertEquals, assert } from 'https://deno.land/std@0.208.0/assert/mod.t
 import { join } from 'https://deno.land/std@0.208.0/path/mod.ts';
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
 
-const bootstrapPath = new URL('../src/applets/bootstrap.esm.js', import.meta.url).href;
-const staticContentPath = new URL('../src/applets/static-content.esm.js', import.meta.url).href;
+const bootstrapPath = new URL('../src/apps/bootstrap.esm.js', import.meta.url).href;
+const staticContentPath = new URL('../src/apps/static-content.esm.js', import.meta.url).href;
 
 // Setup test directory and files
 let testDir;
@@ -58,7 +58,7 @@ Deno.test.afterAll(async () => {
 
 /**
  * Drain remaining messages from a channel until end-of-stream (null/empty frame).
- * Mirrors the readToEOS helper in applet-bootstrap.test.js.
+ * Mirrors the readToEOS helper in app-bootstrap.test.js.
  * @param {object} channel - PolyTransport channel to drain
  */
 async function readToEOS (channel) {
@@ -73,7 +73,7 @@ async function readToEOS (channel) {
  * Set up a static content worker via bootstrap with PostMessageTransport.
  * @param {symbol} [c2cSymbol] - Optional C2C symbol for console interception.
  *   If not provided, native console logging is used (helpful for debugging).
- * Returns { appletChannel, cleanup }
+ * Returns { appChannel, cleanup }
  */
 async function setupStaticWorker (c2cSymbol = undefined) {
 	const worker = new Worker(bootstrapPath, {
@@ -105,33 +105,33 @@ async function setupStaticWorker (c2cSymbol = undefined) {
 	const bootstrapChannel = await transport.requestChannel('bootstrap');
 	await bootstrapChannel.addMessageTypes(['setup']);
 	await bootstrapChannel.write('setup', JSON.stringify({
-		appletPath: staticContentPath,
+		appPath: staticContentPath,
 		mode: 'response',
 		keepDeno: true, // Static content needs Deno file APIs
 		keepWorkers: false,
 	}));
 
-	// Set up the applet communication channel
-	const appletChannel = await transport.requestChannel('applet');
-	await appletChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+	// Set up the mod-app communication channel
+	const appChannel = await transport.requestChannel('app');
+	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
 
 	const cleanup = async () => {
 		await transport.stop({ discard: true }).catch(() => {});
 		worker.terminate();
 	};
 
-	return { appletChannel, cleanup };
+	return { appChannel, cleanup };
 }
 
 /**
- * Send a request to the static content applet and collect all response frames.
+ * Send a request to the static content mod-app and collect all response frames.
  * Returns { status, headers, body, bodyText } or { error } on res-error.
  */
-async function sendStaticRequest (appletChannel, requestData) {
-	await appletChannel.write('req', JSON.stringify(requestData));
+async function sendStaticRequest (appChannel, requestData) {
+	await appChannel.write('req', JSON.stringify(requestData));
 
 	// Read response metadata (res or res-error)
-	const resMeta = await appletChannel.read({ only: ['res', 'res-error'], decode: true });
+	const resMeta = await appChannel.read({ only: ['res', 'res-error'], decode: true });
 	let metaData;
 	await resMeta.process(() => {
 		metaData = JSON.parse(resMeta.text);
@@ -147,7 +147,7 @@ async function sendStaticRequest (appletChannel, requestData) {
 	// Read without filters (like readToEOS) to avoid dechunk/only interaction issues.
 	const bodyChunks = [];
 	let message;
-	while (message = await appletChannel.read()) {
+	while (message = await appChannel.read()) {
 		if (!message.data && !message.text) {
 			message.done();
 			break;
@@ -178,10 +178,10 @@ async function sendStaticRequest (appletChannel, requestData) {
 // ─── Basic file serving ───────────────────────────────────────────────────────
 
 Deno.test('Static Content - serves small text file', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: {},
@@ -204,10 +204,10 @@ Deno.test('Static Content - serves small text file', async () => {
 });
 
 Deno.test('Static Content - serves HTML file with correct MIME type', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.html',
 			headers: {},
@@ -229,10 +229,10 @@ Deno.test('Static Content - serves HTML file with correct MIME type', async () =
 });
 
 Deno.test('Static Content - MIME type first-match strategy', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.json',
 			headers: {},
@@ -256,10 +256,10 @@ Deno.test('Static Content - MIME type first-match strategy', async () => {
 });
 
 Deno.test('Static Content - explicit MIME type overrides extension', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: {},
@@ -281,10 +281,10 @@ Deno.test('Static Content - explicit MIME type overrides extension', async () =>
 });
 
 Deno.test('Static Content - default MIME type for unknown extension', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/binary.bin',
 			headers: {},
@@ -307,10 +307,10 @@ Deno.test('Static Content - default MIME type for unknown extension', async () =
 // ─── Security ─────────────────────────────────────────────────────────────────
 
 Deno.test('Static Content - prevents path traversal attack', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/../../../etc/passwd',
 			headers: {},
@@ -331,10 +331,10 @@ Deno.test('Static Content - prevents path traversal attack', async () => {
 });
 
 Deno.test('Static Content - returns 404 for non-existent file', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/nonexistent.txt',
 			headers: {},
@@ -355,10 +355,10 @@ Deno.test('Static Content - returns 404 for non-existent file', async () => {
 });
 
 Deno.test('Static Content - returns 404 when root not configured', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: {},
@@ -380,10 +380,10 @@ Deno.test('Static Content - returns 404 when root not configured', async () => {
 // ─── Subdirectory and binary ──────────────────────────────────────────────────
 
 Deno.test('Static Content - serves file from subdirectory', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/subdir/nested.txt',
 			headers: {},
@@ -404,10 +404,10 @@ Deno.test('Static Content - serves file from subdirectory', async () => {
 });
 
 Deno.test('Static Content - serves binary file correctly', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/binary.bin',
 			headers: {},
@@ -433,12 +433,12 @@ Deno.test('Static Content - serves binary file correctly', async () => {
 // ─── Chunking ─────────────────────────────────────────────────────────────────
 
 Deno.test('Static Content - chunks large file', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
 		const chunkSize = 32768; // 32KB chunks
 
-		await appletChannel.write('req', JSON.stringify({
+		await appChannel.write('req', JSON.stringify({
 			method: 'GET',
 			url: 'https://example.com/large.bin',
 			headers: {},
@@ -452,7 +452,7 @@ Deno.test('Static Content - chunks large file', async () => {
 		}));
 
 		// Read response metadata
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		let metaData;
 		await resMeta.process(() => {
 			metaData = JSON.parse(resMeta.text);
@@ -467,7 +467,7 @@ Deno.test('Static Content - chunks large file', async () => {
 		const bodyChunks = [];
 		let frameCount = 0;
 		let message;
-		while (message = await appletChannel.read()) {
+		while (message = await appChannel.read()) {
 			if (!message.data && !message.text) {
 				message.done();
 				break;
@@ -492,10 +492,10 @@ Deno.test('Static Content - chunks large file', async () => {
 // ─── Range requests ───────────────────────────────────────────────────────────
 
 Deno.test('Static Content - handles Range request', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: { 'Range': 'bytes=0-4' }, // First 5 bytes: "Hello"
@@ -518,10 +518,10 @@ Deno.test('Static Content - handles Range request', async () => {
 });
 
 Deno.test('Static Content - handles Range request with open end', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: { 'Range': 'bytes=7-' }, // From byte 7 to end: "World!"
@@ -543,10 +543,10 @@ Deno.test('Static Content - handles Range request with open end', async () => {
 });
 
 Deno.test('Static Content - returns 416 for invalid Range', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: { 'Range': 'bytes=100-200' }, // Beyond file size
@@ -567,10 +567,10 @@ Deno.test('Static Content - returns 416 for invalid Range', async () => {
 });
 
 Deno.test('Static Content - returns 416 for malformed Range header', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: { 'Range': 'invalid-range-header' },
@@ -590,10 +590,10 @@ Deno.test('Static Content - returns 416 for malformed Range header', async () =>
 });
 
 Deno.test('Static Content - handles case-insensitive Range header', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/test.txt',
 			headers: { 'range': 'bytes=0-4' }, // lowercase 'range'
@@ -613,12 +613,12 @@ Deno.test('Static Content - handles case-insensitive Range header', async () => 
 });
 
 Deno.test('Static Content - chunks large Range request', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
 		const chunkSize = 16384; // 16KB chunks
 
-		await appletChannel.write('req', JSON.stringify({
+		await appChannel.write('req', JSON.stringify({
 			method: 'GET',
 			url: 'https://example.com/large.bin',
 			headers: { 'Range': 'bytes=0-49999' }, // First 50KB
@@ -632,7 +632,7 @@ Deno.test('Static Content - chunks large Range request', async () => {
 		}));
 
 		// Read response metadata
-		const resMeta = await appletChannel.read({ only: 'res', decode: true });
+		const resMeta = await appChannel.read({ only: 'res', decode: true });
 		let metaData;
 		await resMeta.process(() => {
 			metaData = JSON.parse(resMeta.text);
@@ -647,7 +647,7 @@ Deno.test('Static Content - chunks large Range request', async () => {
 		const bodyChunks = [];
 		let frameCount = 0;
 		let message;
-		while (message = await appletChannel.read()) {
+		while (message = await appChannel.read()) {
 			if (!message.data && !message.text) {
 				message.done();
 				break;
@@ -671,10 +671,10 @@ Deno.test('Static Content - chunks large Range request', async () => {
 // ─── Permission errors ────────────────────────────────────────────────────────
 
 Deno.test('Static Content - returns 404 for unreadable file', async () => {
-	const { appletChannel, cleanup } = await setupStaticWorker();
+	const { appChannel, cleanup } = await setupStaticWorker();
 
 	try {
-		const result = await sendStaticRequest(appletChannel, {
+		const result = await sendStaticRequest(appChannel, {
 			method: 'GET',
 			url: 'https://example.com/unreadable.txt',
 			headers: {},

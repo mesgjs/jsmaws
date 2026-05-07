@@ -1,6 +1,6 @@
 /**
  * E2E Tests for SSE Streaming Responses
- * Tests Server-Sent Events with the sse-clock applet
+ * Tests Server-Sent Events with the sse-clock mod-app
  */
 
 import { assertEquals, assertExists } from 'https://deno.land/std@0.208.0/assert/mod.ts';
@@ -12,7 +12,7 @@ import {
 	readSSEEvents,
 } from './e2e-utils.esm.js';
 
-Deno.test('E2E - SSE streaming with sse-clock applet', async () => {
+Deno.test('E2E - SSE streaming with sse-clock mod-app', async () => {
 	// Create test configuration with SSE route
 	const testConfig = {
 		noSSL: true,
@@ -27,7 +27,7 @@ Deno.test('E2E - SSE streaming with sse-clock applet', async () => {
 		routes: [
 			{
 				path: '/clock',
-				app: '../examples/applets/sse-clock.esm.js',
+				app: '../examples/apps/sse-clock.esm.js',
 				pool: 'stream',
 			}
 		]
@@ -46,7 +46,7 @@ Deno.test('E2E - SSE streaming with sse-clock applet', async () => {
 		assertEquals(response.headers.get('cache-control'), 'no-cache');
 		assertEquals(response.headers.get('connection'), 'keep-alive');
 
-		// Read SSE events (applet sends 10 events)
+		// Read SSE events (mod-app sends 10 events)
 		const events = await readSSEEvents(response, 10, 15000);
 
 		// Verify we received all 10 events
@@ -56,7 +56,7 @@ Deno.test('E2E - SSE streaming with sse-clock applet', async () => {
 		for (let i = 0; i < events.length; i++) {
 			const event = events[i];
 			assertEquals(event.event, 'message', `Event ${i + 1} should be 'message' type`);
-			
+
 			// Parse event data
 			const data = JSON.parse(event.data);
 			assertExists(data.timestamp, `Event ${i + 1} should have timestamp`);
@@ -84,7 +84,7 @@ Deno.test('E2E - SSE streaming handles early client disconnect', async () => {
 		routes: [
 			{
 				path: '/clock',
-				app: '../examples/applets/sse-clock.esm.js',
+				app: '../examples/apps/sse-clock.esm.js',
 				pool: 'stream',
 			}
 		]
@@ -132,7 +132,7 @@ Deno.test('E2E - SSE streaming with multiple concurrent clients', async () => {
 		routes: [
 			{
 				path: '/clock',
-				app: '../examples/applets/sse-clock.esm.js',
+				app: '../examples/apps/sse-clock.esm.js',
 				pool: 'stream',
 			}
 		]
@@ -197,7 +197,7 @@ Deno.test('E2E - SSE streaming respects pool configuration', async () => {
 		routes: [
 			{
 				path: '/clock',
-				app: '../examples/applets/sse-clock.esm.js',
+				app: '../examples/apps/sse-clock.esm.js',
 				pool: 'stream',
 			}
 		]

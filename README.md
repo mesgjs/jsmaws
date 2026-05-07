@@ -1,13 +1,13 @@
-# JavaScript Multi-Applet Web Server (JSMAWS)
+# JavaScript Modular Application Web Server (JSMAWS)
 
-A Deno-based web server for secure execution of JavaScript applets with SSL management, static file serving, and process isolation.
+A Deno-based web server for secure execution of JavaScript modular applications ("mod-apps") with SSL management, static file serving, and process isolation.
 
 ## Features
 
 - **HTTP to HTTPS Redirect**: Automatic redirection with ACME challenge bypass
 - **SSL Certificate Management**: Integration with Let's Encrypt ACME protocol
 - **Static File Serving**: Efficient delivery of static content
-- **JavaScript Applet Execution**: Support for both internal (worker-based) and external (subprocess-based) execution
+- **JavaScript Mod-App Execution**: Support for both internal (worker-based) and external (subprocess-based) execution
 - **WebSocket Support**: Real-time communication capabilities
 - **SLID Configuration**: Human-readable configuration format using NANOS
 
@@ -109,7 +109,7 @@ jsmaws/
 
 ### Planned
 - Phase 4: Configuration and Routing
-- Phase 5: Applet Loading
+- Phase 5: Mod-app Loading
 - Phase 6: Internal Request Handling
 - Phase 7: External Request Handling
 - Phase 8: WebSocket Support

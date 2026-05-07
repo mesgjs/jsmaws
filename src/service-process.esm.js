@@ -229,7 +229,7 @@ export class ServiceProcess {
 					}
 				});
 			}
-			console.info(`[${this.processId}] Control channel closed`);
+			console.debug(`[${this.processId}] Control channel closed`);
 		})();
 	}
 
@@ -310,7 +310,7 @@ export class ServiceProcess {
 			this.transport.addEventListener('stopped', resolve);
 		});
 
-		console.info(`[${this.processId}] Transport stopped, process exiting`);
+		console.debug(`[${this.processId}] Transport stopped, process exiting`);
 
 		// Stop buffer pool
 		if (this._bufferPool) {
