@@ -1,8 +1,17 @@
 # JSMAWS Authentication and Authorization API Design
 
-**Status:** [APPROVED]  
-**Date:** 2026-04-27  
-**Updated:** 2026-04-28
+**Status:** [APPROVED, SUPERSEDED IN PART — see [`arch/revisions-20260510.md`](revisions-20260510.md)]
+**Date:** 2026-04-27
+**Updated:** 2026-05-10
+
+> **Note (2026-05-10):** The `auth` field in routes (Sections 5, 9, 10) is superseded by the new `authn` model from [`arch/revisions-20260510.md`](revisions-20260510.md). Key changes:
+> - Top-level `authn` replaces per-route `auth` for site-level default authentication
+> - Route groups (`routeGroups`) provide per-group `authn` overrides and `role` checks
+> - Header/cookie filtering (`requestFilter`/`responseFilter`) is now at route-group level, not per-authn-provider
+> - Multi-host SNI routing is supported via `hostRoutes`
+> - Per-request second-level auth cache by provider added alongside TTL-based first-level cache
+>
+> The core auth provider interface (Section 4), built-in providers (Section 8), and Options C/D architecture (Sections 3, 3a, 5) remain valid. Implementation should use the revised configuration model.
 
 ---
 
@@ -826,7 +835,7 @@ Implement the auth service process for network-dependent auth:
 5. **Should there be a way for mod-apps to trigger re-authentication?** (e.g., return a 401 that causes the client to re-authenticate)
    - **Resolved** Mod-apps can already return 401; no special server support needed.
 6. **Which option(s) should be implemented first?** — Option A (responder-side) is simplest and provides immediate value. Options C and D require more design work but are architecturally superior. Recommend implementing Option A first, then Option D (operator-embedded stateless auth), then Option C (auth service process).
-   - **Resolved** Option D, then Option C
+   - **Resolved** Option D, then Option C (do not invest resources implementing option A)
 7. **Should the auth service process (Option C) use the same pool manager as responders?**
    - **Resolved** Yes, use the generic pool manager. The auth service pool would be a small, long-lived pool (similar to the router-process pool).
 8. **How should the operator cache auth results for Option C?**
