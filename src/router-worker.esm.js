@@ -18,6 +18,8 @@
  * - Pool-based request routing
  * - Response codes and redirects
  * - Static file serving via @static mod-app
+ * - Route groups (named, reusable routing via routeGroups config key)
+ * - Host-based routing (multi-host SNI via hostRoutes config key)
  *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -443,29 +445,84 @@ class Router {
 	}
 
 	/**
-	 * Find the first matching route for a request
+	 * Build Route objects from a raw route spec array (for hostRoutes entries).
+	 * @param {Array} routeSpecs - Array of route spec objects
+	 * @returns {Array} Array of Route objects (or group reference objects)
+	 */
+	#buildRouteObjects (routeSpecs) {
+		const routes = [];
+		for (const routeSpec of routeSpecs) {
+			if (!routeSpec || typeof routeSpec !== 'object') continue;
+			// Group references are passed through as-is (handled in #searchRouteArray)
+			if (routeSpec.group) {
+				routes.push(routeSpec);
+				continue;
+			}
+			const route = new Route(routeSpec, this.config);
+			if (!this.config.routing.fsRouting && route.isFilesystem) {
+				console.error(`Skipping filesystem route (fsRouting disabled): ${route.spec.path ?? '(no path)'}`);
+				continue;
+			}
+			routes.push(route);
+		}
+		return routes;
+	}
+
+	/**
+	 * Check if a qualified route group's conditions are met.
+	 * Conditions: incpre (include prefix), excpre (exclude prefix), method.
+	 *
+	 * @param {Object} groupConfig - Qualified group configuration
+	 * @param {string} pathname - URL pathname
+	 * @param {string} method - HTTP method
+	 * @returns {boolean} True if all conditions are met
+	 */
+	#checkGroupConditions (groupConfig, pathname, method) {
+		// incpre: include if any prefix matches
+		if (groupConfig.incpre != null) {
+			const prefixes = Array.isArray(groupConfig.incpre)
+				? groupConfig.incpre
+				: (typeof groupConfig.incpre === 'string' ? [groupConfig.incpre] : Object.values(groupConfig.incpre));
+			const matches = prefixes.some(prefix => pathname.startsWith(prefix));
+			if (!matches) return false;
+		}
+
+		// excpre: exclude if any prefix matches
+		if (groupConfig.excpre != null) {
+			const prefixes = Array.isArray(groupConfig.excpre)
+				? groupConfig.excpre
+				: (typeof groupConfig.excpre === 'string' ? [groupConfig.excpre] : Object.values(groupConfig.excpre));
+			const matches = prefixes.some(prefix => pathname.startsWith(prefix));
+			if (matches) return false;
+		}
+
+		// method: include if method matches
+		if (groupConfig.method != null) {
+			const methods = Array.isArray(groupConfig.method)
+				? groupConfig.method.map(m => m.toLowerCase())
+				: (typeof groupConfig.method === 'string' ? [groupConfig.method.toLowerCase()] : Object.values(groupConfig.method).map(m => m.toLowerCase()));
+			if (!methods.includes(method.toLowerCase())) return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Find the first matching route for a request.
+	 * Supports hostRoutes (multi-host SNI routing) and routeGroups (named route groups).
+	 *
 	 * @param {string} pathname URL pathname
 	 * @param {string} method HTTP method
+	 * @param {string} [hostname] Request hostname (for hostRoutes support)
 	 * @returns {Promise<Object|null>} Route match result or null
+	 *   Result: { route, match, routeGroup } where routeGroup is the matched group config (or null)
 	 */
-	async findRoute (pathname, method = 'GET') {
-		for (const route of this.routes) {
-			// Use the complete match() method which includes filesystem verification
-			const match = await route.match(pathname, method);
-			if (match) {
-				// For virtual routes with relative app paths, resolve using appRoot
-				const app = match.app;
-				if (route.isVirtual && app && app !== '@static' && !app.startsWith('https://') && !app.startsWith('http://') && !app.startsWith('/')) {
-					match.app = `${this.config.routing.appRoot}${match.app}`;
-				}
+	async findRoute (pathname, method = 'GET', hostname = null) {
+		// Determine which route array to use (hostRoutes vs top-level routes)
+		const routeArray = this.#resolveRouteArray(hostname);
 
-				return {
-					route,
-					match,
-				};
-			}
-		}
-		return null;
+		// Search through the route array (may include group references)
+		return await this.#searchRouteArray(routeArray, pathname, method);
 	}
 
 	/**
@@ -478,6 +535,13 @@ class Router {
 		if (Array.isArray(routesSpec)) {
 			for (const routeSpec of routesSpec) {
 				if (!routeSpec || typeof routeSpec !== 'object') continue;
+
+				// Group references are stored as-is (resolved at match time)
+				if (routeSpec.group) {
+					this.routes.push(routeSpec);
+					continue;
+				}
+
 				const route = new Route(routeSpec, this.config);
 
 				// Skip filesystem routes when fsRouting is disabled
@@ -489,6 +553,160 @@ class Router {
 				this.routes.push(route);
 			}
 		}
+	}
+
+	/**
+	 * Resolve the route array to use for a request.
+	 * If hostRoutes is configured, look up the hostname (with alias support).
+	 * Falls back to top-level routes if no hostRoutes or no hostname match.
+	 *
+	 * @param {string|null} hostname - Request hostname
+	 * @returns {Array} Route array to search
+	 */
+	#resolveRouteArray (hostname) {
+		const hostRoutes = this.config.hostRoutes;
+		if (!hostRoutes || !hostname) {
+			return this.routes;
+		}
+
+		// Follow alias chain (max 10 hops to prevent infinite loops)
+		let currentHost = hostname;
+		for (let i = 0; i < 10; i++) {
+			const hostEntry = hostRoutes[currentHost];
+			if (!hostEntry) break;
+
+			// Check for alias
+			if (hostEntry.alias) {
+				currentHost = hostEntry.alias;
+				continue;
+			}
+
+			// Found a routes array for this host
+			if (Array.isArray(hostEntry)) {
+				return this.#buildRouteObjects(hostEntry);
+			}
+			break;
+		}
+
+		// Try wildcard default
+		const wildcardEntry = hostRoutes['*'];
+		if (wildcardEntry) {
+			if (Array.isArray(wildcardEntry)) {
+				return this.#buildRouteObjects(wildcardEntry);
+			}
+		}
+
+		// Fall back to top-level routes
+		return this.routes;
+	}
+
+	/**
+	 * Search a route array for a matching route.
+	 * Handles both direct Route objects and group references.
+	 *
+	 * @param {Array} routeArray - Array of Route objects or group reference objects
+	 * @param {string} pathname - URL pathname
+	 * @param {string} method - HTTP method
+	 * @returns {Promise<Object|null>} Match result or null
+	 */
+	async #searchRouteArray (routeArray, pathname, method) {
+		for (const item of routeArray) {
+			// Group reference: { group: 'groupName' }
+			if (item && typeof item === 'object' && !(item instanceof Route) && item.group) {
+				const result = await this.#searchRouteGroup(item.group, pathname, method);
+				if (result) return result;
+				continue;
+			}
+
+			// Direct Route object
+			const route = item;
+			if (!(route instanceof Route)) continue;
+
+			const match = await route.match(pathname, method);
+			if (match) {
+				// For virtual routes with relative app paths, resolve using appRoot
+				const app = match.app;
+				if (route.isVirtual && app && app !== '@static' && !app.startsWith('https://') && !app.startsWith('http://') && !app.startsWith('/')) {
+					match.app = `${this.config.routing.appRoot}${match.app}`;
+				}
+
+				return { route, match, routeGroup: null };
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Search a named route group for a matching route.
+	 * Handles both qualified groups (with conditions) and unqualified groups (plain arrays).
+	 *
+	 * @param {string} groupName - Name of the route group
+	 * @param {string} pathname - URL pathname
+	 * @param {string} method - HTTP method
+	 * @returns {Promise<Object|null>} Match result (with routeGroup set) or null
+	 */
+	async #searchRouteGroup (groupName, pathname, method) {
+		const routeGroups = this.config.routeGroups;
+		const groupDef = routeGroups[groupName];
+		if (!groupDef) {
+			console.warn(`Route group not found: ${groupName}`);
+			return null;
+		}
+
+		// Determine if this is a qualified group (has a 'routes' property) or unqualified (plain array)
+		let routesArray;
+		let groupConfig = null;
+
+		if (Array.isArray(groupDef)) {
+			// Unqualified group: plain array of routes
+			routesArray = groupDef;
+		} else if (groupDef && typeof groupDef === 'object' && groupDef.routes) {
+			// Qualified group: object with routes + optional conditions
+			groupConfig = groupDef;
+			routesArray = Array.isArray(groupDef.routes) ? groupDef.routes : Object.values(groupDef.routes);
+
+			// Check conditions (incpre, excpre, method)
+			if (!this.#checkGroupConditions(groupConfig, pathname, method)) {
+				return null;
+			}
+		} else {
+			console.warn(`Invalid route group definition: ${groupName}`);
+			return null;
+		}
+
+		// Search routes within the group (no nested group references allowed)
+		for (const routeSpec of routesArray) {
+			if (!routeSpec || typeof routeSpec !== 'object') continue;
+			// Route-group routes may not contain group references (no nesting)
+			if (routeSpec.group) {
+				console.warn(`Nested route group references are not allowed (in group '${groupName}')`);
+				continue;
+			}
+
+			// If the route has no method spec and the group has a method condition,
+			// inherit the group's method as the effective method for this route.
+			// Individual route method specs override the group's method condition.
+			const effectiveRouteSpec = (groupConfig?.method != null && routeSpec.method == null) ? { ...routeSpec, method: groupConfig.method } : routeSpec;
+
+			const route = new Route(effectiveRouteSpec, this.config);
+			if (!this.config.routing.fsRouting && route.isFilesystem) {
+				console.error(`Skipping filesystem route (fsRouting disabled): ${route.spec.path ?? '(no path)'}`);
+				continue;
+			}
+
+			const match = await route.match(pathname, method);
+			if (match) {
+				// For virtual routes with relative app paths, resolve using appRoot
+				const app = match.app;
+				if (route.isVirtual && app && app !== '@static' && !app.startsWith('https://') && !app.startsWith('http://') && !app.startsWith('/')) {
+					match.app = `${this.config.routing.appRoot}${match.app}`;
+				}
+
+				return { route, match, routeGroup: groupConfig };
+			}
+		}
+
+		return null;
 	}
 
 	/**
@@ -533,34 +751,35 @@ if (typeof self !== 'undefined' && self.postMessage) {
 					break;
 				}
 
-				case 'route': {
-					// Find matching route
-					const { pathname, method } = data;
-					if (!router) {
-						throw new Error('Router not initialized');
-					}
-
-					const result = await router.findRoute(pathname, method);
-					self.postMessage({
-						type: 'route-res',
-						id,
-						success: true,
-						result: result ? {
-							route: {
-								pool: result.route.pool,
-								method: result.route.method,
-								response: result.route.response,
-								href: result.route.href, // target href for redirects
-								app: result.route.app, // *route* app, *if present*
-								root: result.route.root, // *route* root, *if present*
-								isFilesystem: result.route.isFilesystem,
-								isVirtual: result.route.isVirtual,
-							},
-							match: result.match,
-						} : null,
-					});
-					break;
+			case 'route': {
+				// Find matching route
+				const { pathname, method, hostname } = data;
+				if (!router) {
+					throw new Error('Router not initialized');
 				}
+
+				const result = await router.findRoute(pathname, method, hostname ?? null);
+				self.postMessage({
+					type: 'route-res',
+					id,
+					success: true,
+					result: result ? {
+						route: {
+							pool: result.route.pool,
+							method: result.route.method,
+							response: result.route.response,
+							href: result.route.href, // target href for redirects
+							app: result.route.app, // *route* app, *if present*
+							root: result.route.root, // *route* root, *if present*
+							isFilesystem: result.route.isFilesystem,
+							isVirtual: result.route.isVirtual,
+						},
+						match: result.match,
+						routeGroup: result.routeGroup ?? null,
+					} : null,
+				});
+				break;
+			}
 
 				default:
 					throw new Error(`Unknown message type: ${type}`);

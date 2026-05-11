@@ -76,6 +76,18 @@ export class Configuration {
 	}
 
 	/**
+	 * Get top-level authn configuration (site-level default authentication providers).
+	 * Returns the authn array (list of provider config objects), or empty array if not set.
+	 * Per-route-group authn overrides are in routeGroups[name].authn.
+	 * @returns {Array} Authn provider config array
+	 */
+	get authn () {
+		const authn = this.config.authn;
+		if (!authn) return [];
+		return Array.isArray(authn) ? authn : Object.values(authn);
+	}
+
+	/**
 	 * Get SSL certificate file path
 	 * @returns {string|undefined}
 	 */
@@ -247,6 +259,16 @@ export class Configuration {
 	}
 
 	/**
+	 * Get hostRoutes configuration for multi-host SNI routing.
+	 * Returns the hostRoutes object (hostname → routes/alias), or null if not set.
+	 * When present, host-specific routing is used instead of top-level routes.
+	 * @returns {Object|null} hostRoutes configuration (plain object) or null
+	 */
+	get hostRoutes () {
+		return this.config.hostRoutes ?? null;
+	}
+
+	/**
 	 * Get HTTP port
 	 * @returns {number}
 	 */
@@ -351,6 +373,15 @@ export class Configuration {
 	 */
 	get pools () {
 		return this.config.pools;
+	}
+
+	/**
+	 * Get routeGroups configuration (named, reusable routing groups).
+	 * Returns the routeGroups object (name → group definition), or empty object if not set.
+	 * @returns {Object} routeGroups configuration (plain object)
+	 */
+	get routeGroups () {
+		return this.config.routeGroups ?? {};
 	}
 
 	/**

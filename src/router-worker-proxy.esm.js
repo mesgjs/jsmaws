@@ -2,7 +2,7 @@
  * JSMAWS Router Worker Proxy
  * A reusable router worker wrapper (proxy) for both operator (internal routing) and router-process (delegated routing)
  * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 /**
@@ -116,15 +116,20 @@ export class RouterWorkerProxy {
 
 	/**
 	 * Find route using worker
+	 * @param {string} pathname - URL pathname
+	 * @param {string} method - HTTP method
+	 * @param {string|null} [hostname] - Request hostname (for hostRoutes support)
+	 * @returns {Promise<Object|null>} Route match result or null
+	 *   Result: { route, match, routeGroup } where routeGroup is the matched group config (or null)
 	 */
-	async findRoute (pathname, method) {
+	async findRoute (pathname, method, hostname = null) {
 		if (!this.isInitialized) {
 			throw new Error('Worker not initialized');
 		}
 
 		this.isAvailable = false;
 		try {
-			const result = await this.sendMessage('route', { pathname, method });
+			const result = await this.sendMessage('route', { pathname, method, hostname });
 			return result;
 		} finally {
 			this.isAvailable = true;

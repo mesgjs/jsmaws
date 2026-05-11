@@ -21,12 +21,19 @@ import { RequestChannelPool } from './request-channel-pool.esm.js';
 import { CONTROL_MESSAGE_TYPES } from './service-process.esm.js';
 
 /**
- * Service process types
+ * Service process types and associated script paths
  */
 export const ProcessType = {
+	AUTH: 'auth',
 	RESPONDER: 'responder',
 	ROUTER: 'router',
 };
+
+const ScriptTypePath = {
+	auth: 'src/auth-service-process.esm.js',
+	responder: 'src/responder-process.esm.js',
+	router: 'src/router-process.esm.js',
+}
 
 /**
  * Process state
@@ -187,12 +194,14 @@ export class ProcessManager {
 	 * @returns {Promise<{item: ManagedProcess, isWorker: false}>}
 	 */
 	async createProcess (processId, type, poolName, poolConfig) {
+		// Determine script path
+		const scriptPath = ScriptTypePath[type];
+		if (!scriptPath) {
+			throw new RangeError(`createProcess: Unknown type ${type} requested`);
+		}
+
 		this.logger.info(`Creating ${type} process: ${processId}`);
 
-		// Determine script path
-		const scriptPath = type === ProcessType.RESPONDER
-			? 'src/responder-process.esm.js'
-			: 'src/router-process.esm.js';
 
 		// Get UID/GID from global config (not pool-specific)
 		// this.config is a Configuration instance; raw values are in this.config.config

@@ -23,6 +23,9 @@ import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
 import { RequestContext, RequestState } from './operator-request-state.esm.js';
 import { ValueResolver } from './value-resolver.esm.js';
+import { OperatorAuth } from './operator-auth.esm.js';
+import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
+import { applyRequestFilter, applyResponseFilter } from './header-filter.esm.js';
 
 const ACME_CHALLENGE_PREFIX = '/.well-known/acme-challenge/';
 
@@ -60,6 +63,9 @@ export class OperatorProcess {
 		});
 		// Value resolver for :scheme: references in configuration
 		this.valueResolver = new ValueResolver();
+		// Option D: operator-embedded stateless auth runner (JWT, API key, Basic)
+		// Initialized lazily on first auth request (or in start() after config is loaded)
+		this.operatorAuth = new OperatorAuth();
 	}
 
 	/**
@@ -93,9 +99,17 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Forward request to service process via PipeTransport using state machine
+	 * Forward request to service process via PipeTransport using state machine.
+	 *
+	 * @param {Request} req - HTTP request
+	 * @param {Object} route - Matched route object
+	 * @param {Object} match - Route match result
+	 * @param {string} remote - Remote IP address
+	 * @param {Object|null} [identity] - Auth identity (from operatorAuth.runAuth())
+	 * @param {Object|null} [requestFilter] - Effective requestFilter spec (route-group or top-level)
+	 * @param {Object|null} [responseFilter] - Effective responseFilter spec (route-group or top-level)
 	 */
-	async forwardToServiceProcess (req, route, match, remote) {
+	async forwardToServiceProcess (req, route, match, remote, { identity = null, requestFilter = null, responseFilter = null } = {}) {
 		const poolName = route.spec?.pool ?? 'standard';
 		const appPath = match.app || route.app;
 		const root = match.root;
@@ -143,6 +157,7 @@ export class OperatorProcess {
 			poolManager,
 			poolItemId: poolItem.id,
 			reqChannel,
+			responseFilter,
 		});
 
 		try {
@@ -159,8 +174,14 @@ export class OperatorProcess {
 				? await req.arrayBuffer()
 				: new ArrayBuffer(0);
 
-			// Convert headers to plain object for JSON serialization
-			const headersObj = Object.fromEntries(req.headers.entries());
+			// Convert headers to plain object for JSON serialization, then apply requestFilter
+			const rawHeadersObj = Object.fromEntries(req.headers.entries());
+			const headersObj = applyRequestFilter(rawHeadersObj, requestFilter);
+
+			// Inject addHeaders from auth result (e.g. x-user-id, x-user-roles)
+			if (identity?.addHeaders) {
+				Object.assign(headersObj, identity.addHeaders);
+			}
 
 			const url = new URL(req.url);
 			this.logger.debug(`Sending ${requestId} to ${process.id} (usage ${poolItem.usageCount}) for ${req.method} ${url.pathname}`);
@@ -171,7 +192,7 @@ export class OperatorProcess {
 			// Start processing req-N channel messages (handles res, res-error, res-frame, bidi-frame, con-*)
 			context.processReqChannelMessages(reqChannel);
 
-			// Build request payload
+			// Build request payload (include identity for mod-app consumption)
 			const requestPayload = JSON.stringify({
 				id: requestId,
 				method: req.method,
@@ -185,6 +206,7 @@ export class OperatorProcess {
 				routeParams: match.params || {},
 				routeTail: match.tail || '',
 				routeSpec: route.spec || null,
+				identity: identity ?? null,
 			});
 
 			// Send request via req-N channel
@@ -272,6 +294,11 @@ export class OperatorProcess {
 		// The pools getter handles the default-pool fallback automatically.
 		this.config.updateConfig(resolvedConfig);
 
+		// Invalidate auth cache on config reload (auth config may have changed)
+		if (this.operatorAuth) {
+			this.operatorAuth.clearCache();
+		}
+
 		// Update router configuration (no-op if router not yet initialized)
 		if (this.router) {
 			this.router.updateConfig();
@@ -348,10 +375,12 @@ export class OperatorProcess {
 
 		try {
 			if (this.router) {
-				const routeMatch = await this.router.findRoute(url.pathname, req.method);
+				// Pass hostname for hostRoutes (SNI) support
+				const hostname = url.hostname;
+				const routeMatch = await this.router.findRoute(url.pathname, req.method, hostname);
 
 				if (routeMatch) {
-					const { route, match } = routeMatch;
+					const { route, match, routeGroup } = routeMatch;
 
 					// Handle response codes (redirects, 404, etc.)
 					if (route.response) {
@@ -382,8 +411,53 @@ export class OperatorProcess {
 						});
 					}
 
-					// Route matched - forward to service process
-					const response = await this.forwardToServiceProcess(req, route, match, remote);
+					// Run authentication (operator-embedded, Option D).
+					// AuthResult is always { allow: bool, identity, ... }:
+					//   allow=true:  { allow: true, identity: Object|null, addHeaders: Object }
+					//   allow=false: { allow: false, identity: null, denyStatus: number, denyMessage: string }
+					// Auth chain: route-group authn overrides top-level authn (revisions-20260510.md).
+					// Providers are tried in order; first success stops the chain.
+					const headersObj = Object.fromEntries(req.headers.entries());
+					const poolName = route.spec?.pool ?? 'standard';
+					const authResult = await this.operatorAuth.runAuth({
+						method: req.method,
+						url: req.url,
+						headers: headersObj,
+						routeSpec: route.spec ?? null,
+						poolName,
+						routeGroup: routeGroup ?? null,
+						topLevelAuthn: this.config.authn,
+					});
+
+					if (!authResult.allow) {
+						// Auth denied — return denial response without forwarding to responder
+						const denyStatus = authResult.denyStatus ?? 401;
+						const denyMessage = authResult.denyMessage ?? 'Unauthorized';
+						const body = JSON.stringify({ error: denyMessage });
+						const duration = (Date.now() - startTime) / 1000;
+						this.logger.logRequest(req.method, url.pathname, denyStatus, body.length, duration, remote);
+						this.logger.warn(`[auth] Denied ${req.method} ${url.pathname}: ${denyMessage}`);
+						return new Response(body, {
+							status: denyStatus,
+							headers: { 'content-type': 'application/json' },
+						});
+					}
+
+					// Determine effective requestFilter and responseFilter.
+					// Route-group level overrides top-level (per revisions-20260510.md).
+					const requestFilter = (routeGroup?.requestFilter != null)
+						? routeGroup.requestFilter
+						: (this.config.config.requestFilter ?? null);
+					const responseFilter = (routeGroup?.responseFilter != null)
+						? routeGroup.responseFilter
+						: (this.config.config.responseFilter ?? null);
+
+					// Route matched - forward to service process with auth identity and filters
+					const response = await this.forwardToServiceProcess(req, route, match, remote, {
+						identity: authResult.identity ?? null,
+						requestFilter,
+						responseFilter,
+					});
 
 					const duration = (Date.now() - startTime) / 1000;
 					const bytes = parseInt(response.headers.get('content-length') || '0');

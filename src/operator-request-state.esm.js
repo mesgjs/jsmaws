@@ -10,6 +10,7 @@
 
 import { WebSocketTransport } from '@poly-transport/transport/websocket.esm.js';
 import { OperatorProcess } from './operator-process.esm.js';
+import { applyResponseFilter } from './header-filter.esm.js';
 
 /**
  * Request state machine states
@@ -68,7 +69,7 @@ export function webSocketUpgrade (context, bidiParams) {
  * transition logic as methods.
  */
 export class RequestContext {
-	constructor ({requestId, process, poolName, routeSpec, request, appPath, operator, reqChannel, poolManager, poolItemId}) {
+	constructor ({requestId, process, poolName, routeSpec, request, appPath, operator, reqChannel, poolManager, poolItemId, responseFilter}) {
 		this.requestId = requestId;
 		this.process = process;
 		this.poolName = poolName;
@@ -79,6 +80,7 @@ export class RequestContext {
 		this.reqChannel = reqChannel ?? null; // req-N channel for this request
 		this.poolManager = poolManager ?? null;
 		this.poolItemId = poolItemId ?? null;
+		this.responseFilter = responseFilter ?? null; // Response header filter spec
 
 		// State machine
 		this.state = RequestState.WAITING_FIRST_FRAME;
@@ -186,7 +188,12 @@ export class RequestContext {
 		// Extract connection data from message
 		const { mode, status, headers: rawHeaders, keepAlive } = JSON.parse(resData);
 
-		const headers = this.operator.convertHeaders(rawHeaders);
+		// Apply responseFilter if configured (route-group level overrides top-level)
+		const filteredHeaders = this.responseFilter
+			? applyResponseFilter(rawHeaders ?? {}, this.responseFilter)
+			: (rawHeaders ?? {});
+
+		const headers = this.operator.convertHeaders(filteredHeaders);
 
 		// Save in context
 		this.mode = mode;

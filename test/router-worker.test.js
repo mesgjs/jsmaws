@@ -905,3 +905,326 @@ Deno.test("RouterWorkerProxy - generates unique message IDs", () => {
 
 	worker.terminate();
 });
+
+// ============================================================================
+// Router Class - Route Groups Tests
+// ============================================================================
+
+Deno.test("Router - findRoute matches route in unqualified group", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'myGroup' }],
+		routeGroups: {
+			myGroup: [
+				{ path: 'api/users', app: '/users.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/users.esm.js');
+	assertEquals(result.routeGroup, null); // Unqualified groups have no group config
+});
+
+Deno.test("Router - findRoute matches route in qualified group", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'apiGroup' }],
+		routeGroups: {
+			apiGroup: {
+				incpre: '/api',
+				routes: [
+					{ path: 'api/users', app: '/users.esm.js' },
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/users.esm.js');
+	assertExists(result.routeGroup); // Qualified groups return group config
+	assertEquals(result.routeGroup.incpre, '/api');
+});
+
+Deno.test("Router - findRoute skips qualified group when incpre does not match", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'apiGroup' },
+			{ path: 'other/path', app: '/other.esm.js' },
+		],
+		routeGroups: {
+			apiGroup: {
+				incpre: '/api',
+				routes: [
+					{ path: 'api/users', app: '/users.esm.js' },
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// /other/path does not match incpre=/api, so group is skipped
+	const result = await router.findRoute('/other/path', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/other.esm.js');
+	assertEquals(result.routeGroup, null);
+});
+
+Deno.test("Router - findRoute skips qualified group when excpre matches", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'apiGroup' },
+			{ path: 'api/public', app: '/public.esm.js' },
+		],
+		routeGroups: {
+			apiGroup: {
+				excpre: '/api/public',
+				routes: [
+					{ path: 'api/public', app: '/private.esm.js' },
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// /api/public matches excpre, so group is skipped
+	const result = await router.findRoute('/api/public', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/public.esm.js');
+});
+
+Deno.test("Router - findRoute skips qualified group when method does not match", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'postGroup' },
+			{ path: 'api/data', app: '/get-handler.esm.js' },
+		],
+		routeGroups: {
+			postGroup: {
+				method: 'post',
+				routes: [
+					{ path: 'api/data', app: '/post-handler.esm.js' },
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// GET request does not match method=post group
+	const result = await router.findRoute('/api/data', 'GET');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/get-handler.esm.js');
+});
+
+Deno.test("Router - findRoute matches qualified group with method array", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'writeGroup' }],
+		routeGroups: {
+			writeGroup: {
+				method: ['post', 'put'],
+				routes: [
+					{ path: 'api/data', app: '/write-handler.esm.js' },
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const postResult = await router.findRoute('/api/data', 'POST');
+	assertExists(postResult);
+	assertEquals(postResult.match.app, '/write-handler.esm.js');
+
+	const putResult = await router.findRoute('/api/data', 'PUT');
+	assertExists(putResult);
+
+	const getResult = await router.findRoute('/api/data', 'GET');
+	assertEquals(getResult, null);
+});
+
+Deno.test("Router - findRoute returns null for unknown group", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'nonExistentGroup' }],
+		routeGroups: {},
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/users', 'GET');
+	assertEquals(result, null);
+});
+
+Deno.test("Router - findRoute warns about nested group references", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'outerGroup' }],
+		routeGroups: {
+			outerGroup: [
+				{ group: 'innerGroup' }, // Nested group reference — not allowed
+				{ path: 'api/users', app: '/users.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	// Nested group reference is skipped; direct route still matches
+	const result = await router.findRoute('/api/users', 'GET');
+	assertExists(result);
+	assertEquals(result.match.app, '/users.esm.js');
+});
+
+Deno.test("Router - findRoute returns routeGroup with authn and filters", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'secureGroup' }],
+		routeGroups: {
+			secureGroup: {
+				authn: [{ provider: '@jwt', secret: 'test-secret' }],
+				requestFilter: { allowHeaders: ['authorization', 'content-type'] },
+				responseFilter: { denyHeaders: ['x-internal-*'] },
+				routes: [
+					{ path: 'api/secure', app: '/secure.esm.js' },
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/secure', 'GET');
+
+	assertExists(result);
+	assertExists(result.routeGroup);
+	assertExists(result.routeGroup.authn);
+	assertExists(result.routeGroup.requestFilter);
+	assertExists(result.routeGroup.responseFilter);
+});
+
+// ============================================================================
+// Router Class - Host Routes Tests
+// ============================================================================
+
+Deno.test("Router - findRoute uses top-level routes when no hostRoutes", async () => {
+	const config = new Configuration({
+		routes: [{ path: 'api/users', app: '/users.esm.js' }],
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/users', 'GET', 'example.com');
+
+	assertExists(result);
+	assertEquals(result.match.app, '/users.esm.js');
+});
+
+Deno.test("Router - findRoute uses host-specific routes when hostRoutes configured", async () => {
+	const config = new Configuration({
+		hostRoutes: {
+			'api.example.com': [
+				{ path: 'api/users', app: '/api-users.esm.js' },
+			],
+			'*': [
+				{ path: 'api/users', app: '/default-users.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	const apiResult = await router.findRoute('/api/users', 'GET', 'api.example.com');
+	assertExists(apiResult);
+	assertEquals(apiResult.match.app, '/api-users.esm.js');
+
+	const defaultResult = await router.findRoute('/api/users', 'GET', 'other.example.com');
+	assertExists(defaultResult);
+	assertEquals(defaultResult.match.app, '/default-users.esm.js');
+});
+
+Deno.test("Router - findRoute follows hostname alias", async () => {
+	const config = new Configuration({
+		hostRoutes: {
+			'www.example.com': { alias: 'example.com' },
+			'example.com': [
+				{ path: 'api/users', app: '/users.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	// www.example.com is an alias for example.com
+	const result = await router.findRoute('/api/users', 'GET', 'www.example.com');
+	assertExists(result);
+	assertEquals(result.match.app, '/users.esm.js');
+});
+
+Deno.test("Router - findRoute falls back to top-level routes when hostname not in hostRoutes", async () => {
+	const config = new Configuration({
+		routes: [{ path: 'api/users', app: '/fallback.esm.js' }],
+		hostRoutes: {
+			'api.example.com': [
+				{ path: 'api/users', app: '/api-users.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	// unknown.example.com not in hostRoutes, no wildcard — falls back to top-level routes
+	const result = await router.findRoute('/api/users', 'GET', 'unknown.example.com');
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - findRoute uses wildcard host when no specific match", async () => {
+	const config = new Configuration({
+		hostRoutes: {
+			'api.example.com': [
+				{ path: 'api/users', app: '/api-users.esm.js' },
+			],
+			'*': [
+				{ path: 'api/users', app: '/wildcard-users.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/users', 'GET', 'other.example.com');
+	assertExists(result);
+	assertEquals(result.match.app, '/wildcard-users.esm.js');
+});
+
+Deno.test("Router - findRoute uses top-level routes when no hostname provided", async () => {
+	const config = new Configuration({
+		routes: [{ path: 'api/users', app: '/top-level.esm.js' }],
+		hostRoutes: {
+			'api.example.com': [
+				{ path: 'api/users', app: '/host-specific.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	// No hostname provided — uses top-level routes
+	const result = await router.findRoute('/api/users', 'GET', null);
+	assertExists(result);
+	assertEquals(result.match.app, '/top-level.esm.js');
+});
+
+Deno.test("Router - findRoute supports group references in hostRoutes", async () => {
+	const config = new Configuration({
+		hostRoutes: {
+			'api.example.com': [
+				{ group: 'apiRoutes' },
+			],
+		},
+		routeGroups: {
+			apiRoutes: [
+				{ path: 'api/users', app: '/users.esm.js' },
+			],
+		},
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/users', 'GET', 'api.example.com');
+	assertExists(result);
+	assertEquals(result.match.app, '/users.esm.js');
+});
