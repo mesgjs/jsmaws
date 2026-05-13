@@ -202,7 +202,6 @@ export class ProcessManager {
 
 		this.logger.info(`Creating ${type} process: ${processId}`);
 
-
 		// Get UID/GID from global config (not pool-specific)
 		// this.config is a Configuration instance; raw values are in this.config.config
 		const uid = Number(this.config.config?.uid);

@@ -20,32 +20,32 @@ import { parseArgs } from 'https://deno.land/std@0.208.0/cli/parse_args.ts';
  *   --help                Show help message
  */
 export function parseCliArgs (args = Deno.args) {
-    const parsed = parseArgs(args, {
-        string: ['config', 'log-level'],
-        boolean: ['no-ssl', 'help'],
-        default: {
-            'no-ssl': false,
-            'log-level': 'info',
-        },
-    });
+	const parsed = parseArgs(args, {
+		string: ['config', 'log-level'],
+		boolean: ['no-ssl', 'help'],
+		default: {
+			'no-ssl': false,
+			'log-level': 'info',
+		},
+	});
 
-    const firstArg = parsed._?.[0];
-    const configFile = parsed.config || (typeof firstArg === 'string' ? firstArg : undefined) || 'jsmaws.slid';
+	const firstArg = parsed._?.[0];
+	const configFile = parsed.config || (typeof firstArg === 'string' ? firstArg : undefined) || 'jsmaws.slid';
 
-    return {
-        noSsl: parsed['no-ssl'],
-        configFile,
-        logLevel: parsed['log-level'],
-        showHelp: parsed.help,
-        unknownArgs: parsed._?.slice(parsed.config ? 0 : 1) || [],
-    };
+	return {
+		noSsl: parsed['no-ssl'],
+		configFile,
+		logLevel: parsed['log-level'],
+		showHelp: parsed.help,
+		unknownArgs: parsed._?.slice(parsed.config ? 0 : 1) || [],
+	};
 }
 
 /**
  * Display help message
  */
 export function showHelp () {
-    const help = `
+	const help = `
 JavaScript Modular Application Web Server (JSMAWS)
 
 Usage:
@@ -77,7 +77,7 @@ Security Warning:
   --no-ssl disables HTTPS and should ONLY be used for development.
   Never use --no-ssl in production environments.
 `;
-    console.log(help);
+	console.log(help);
 }
 
 /**
@@ -85,26 +85,26 @@ Security Warning:
  * Returns array of validation errors (empty if valid)
  */
 export function validateArgs (parsed) {
-    const errors = [];
+	const errors = [];
 
-    // Validate log level
-    const validLevels = ['error', 'warn', 'info', 'debug'];
-    if (!validLevels.includes(parsed.logLevel)) {
-        errors.push(`Invalid log level: ${parsed.logLevel}. Must be one of: ${validLevels.join(', ')}`);
-    }
+	// Validate log level
+	const validLevels = ['error', 'warn', 'info', 'debug'];
+	if (!validLevels.includes(parsed.logLevel)) {
+		errors.push(`Invalid log level: ${parsed.logLevel}. Must be one of: ${validLevels.join(', ')}`);
+	}
 
-    // Validate config file exists
-    try {
-        Deno.statSync(parsed.configFile);
-    } catch (error) {
-        if (error instanceof Deno.errors.NotFound) {
-            errors.push(`Configuration file not found: ${parsed.configFile}`);
-        } else {
-            errors.push(`Cannot access configuration file: ${parsed.configFile} (${error.message})`);
-        }
-    }
+	// Validate config file exists
+	try {
+		Deno.statSync(parsed.configFile);
+	} catch (error) {
+		if (error instanceof Deno.errors.NotFound) {
+			errors.push(`Configuration file not found: ${parsed.configFile}`);
+		} else {
+			errors.push(`Cannot access configuration file: ${parsed.configFile} (${error.message})`);
+		}
+	}
 
-    return errors;
+	return errors;
 }
 
 /**

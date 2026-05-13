@@ -1,0 +1,550 @@
+/**
+ * Tests for JSMAWS Built-in Auth Providers
+ * Tests @jwt, @api-key, and @basic providers
+ *
+ * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
+ */
+
+import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";
+
+// ============================================================================
+// JWT Test Helpers
+// ============================================================================
+
+/**
+ * Base64url encode a Uint8Array or string
+ */
+function encodeBase64Url (data) {
+	if (data instanceof Uint8Array) return data.toBase64({ alphabet: 'base64url', omitPadding: true });
+	return btoa(data).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+/**
+ * Create a signed HS256 JWT for testing.
+ * @param {Object} payload - JWT payload claims
+ * @param {string} secret - HMAC secret
+ * @param {Object} [headerOverrides] - Optional header field overrides
+ * @returns {Promise<string>} Signed JWT string
+ */
+async function createTestJwt (payload, secret, headerOverrides = {}) {
+	const header = { alg: 'HS256', typ: 'JWT', ...headerOverrides };
+	const headerB64 = encodeBase64Url(JSON.stringify(header));
+	const payloadB64 = encodeBase64Url(JSON.stringify(payload));
+	const signingInput = `${headerB64}.${payloadB64}`;
+
+	const keyBytes = new TextEncoder().encode(secret);
+	const cryptoKey = await crypto.subtle.importKey(
+		'raw',
+		keyBytes,
+		{ name: 'HMAC', hash: 'SHA-256' },
+		false,
+		['sign']
+	);
+
+	const signatureBytes = await crypto.subtle.sign(
+		'HMAC',
+		cryptoKey,
+		new TextEncoder().encode(signingInput)
+	);
+
+	const signatureB64 = encodeBase64Url(new Uint8Array(signatureBytes));
+	return `${signingInput}.${signatureB64}`;
+}
+
+// ============================================================================
+// @jwt Provider Tests
+// ============================================================================
+
+import jwtProvider from "../src/auth/jwt.esm.js";
+
+const JWT_SECRET = 'test-secret-key-for-unit-tests';
+const NOW = Math.floor(Date.now() / 1000);
+
+Deno.test("@jwt - allows valid HS256 JWT", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET, algorithm: 'HS256' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'user-123');
+	assertEquals(result.identity.provider, '@jwt');
+	assertEquals(result.identity.roles, []);
+});
+
+Deno.test("@jwt - denies when no Authorization header", async () => {
+	const result = await jwtProvider.authCheck({
+		headers: {},
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@jwt - denies when Authorization is not Bearer", async () => {
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: 'Basic dXNlcjpwYXNz' },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@jwt - denies when Bearer token is empty", async () => {
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: 'Bearer ' },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@jwt - denies when signature is invalid", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW, exp: NOW + 3600 },
+		'wrong-secret'
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@jwt - denies expired token", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW - 7200, exp: NOW - 3600 }, // Expired 1 hour ago
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@jwt - denies not-yet-valid token (nbf in future)", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW, nbf: NOW + 3600, exp: NOW + 7200 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@jwt - allows token without exp (no expiration)", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'user-123');
+});
+
+Deno.test("@jwt - extracts roles from default 'roles' claim", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', roles: ['admin', 'user'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.roles, ['admin', 'user']);
+});
+
+Deno.test("@jwt - extracts roles from custom claimsField", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', permissions: ['read', 'write'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET, claimsField: 'permissions' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.roles, ['read', 'write']);
+});
+
+Deno.test("@jwt - allows when required role is present", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', roles: ['admin', 'user'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET, roles: ['admin'] },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'user-123');
+});
+
+Deno.test("@jwt - denies when required role is missing (403)", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', roles: ['user'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET, roles: ['admin'] },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 403);
+	assertEquals(result.denyMessage, 'Forbidden');
+});
+
+Deno.test("@jwt - allows when any of multiple required roles is present", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', roles: ['moderator'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET, roles: ['admin', 'moderator'] },
+	});
+
+	assertEquals(result.allow, true);
+});
+
+Deno.test("@jwt - includes other claims in identity.claims", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iss: 'test-issuer', custom: 'value', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.claims.iss, 'test-issuer');
+	assertEquals(result.identity.claims.custom, 'value');
+});
+
+Deno.test("@jwt - handles Authorization header case-insensitively", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	// Test with uppercase Authorization header key
+	const result = await jwtProvider.authCheck({
+		headers: { Authorization: `Bearer ${token}` },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'user-123');
+});
+
+Deno.test("@jwt - denies malformed JWT (wrong number of parts)", async () => {
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: 'Bearer not.a.valid.jwt.token' },
+		config: { secret: JWT_SECRET },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+// ============================================================================
+// @api-key Provider Tests
+// ============================================================================
+
+import apiKeyProvider from "../src/auth/api-key.esm.js";
+
+Deno.test("@api-key - allows valid key from keys list", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-api-key': 'secret-key-1' },
+		config: { keys: 'secret-key-1,secret-key-2' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'secret-key-1');
+	assertEquals(result.identity.provider, '@api-key');
+	assertEquals(result.identity.roles, []);
+});
+
+Deno.test("@api-key - denies invalid key", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-api-key': 'invalid-key' },
+		config: { keys: 'secret-key-1,secret-key-2' },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@api-key - denies when header is missing", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: {},
+		config: { keys: 'secret-key-1' },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@api-key - uses custom header name", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-custom-key': 'my-api-key' },
+		config: { header: 'x-custom-key', keys: 'my-api-key' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'my-api-key');
+});
+
+Deno.test("@api-key - header lookup is case-insensitive", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'X-API-KEY': 'secret-key-1' },
+		config: { keys: 'secret-key-1' },
+	});
+
+	assertEquals(result.allow, true);
+});
+
+Deno.test("@api-key - uses keyMap to resolve subject", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-api-key': 'key-abc' },
+		config: { keyMap: { 'key-abc': 'alice', 'key-def': 'bob' } },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'alice');
+});
+
+Deno.test("@api-key - denies key not in keyMap", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-api-key': 'unknown-key' },
+		config: { keyMap: { 'key-abc': 'alice' } },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@api-key - accepts keys as array", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-api-key': 'key-two' },
+		config: { keys: ['key-one', 'key-two', 'key-three'] },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'key-two');
+});
+
+Deno.test("@api-key - accepts keyMap as JSON string", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-api-key': 'key-abc' },
+		config: { keyMap: '{"key-abc":"alice","key-def":"bob"}' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'alice');
+});
+
+Deno.test("@api-key - denies when no keys or keyMap configured", () => {
+	const result = apiKeyProvider.authCheck({
+		headers: { 'x-api-key': 'any-key' },
+		config: {},
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+// ============================================================================
+// @basic Provider Tests
+// ============================================================================
+
+import basicProvider from "../src/auth/basic.esm.js";
+
+/**
+ * Create a Basic auth header value for username:password
+ */
+function makeBasicAuth (username, password) {
+	return `Basic ${btoa(`${username}:${password}`)}`;
+}
+
+Deno.test("@basic - allows valid credentials", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'secret') },
+		config: { users: { alice: 'secret', bob: 'pass' } },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'alice');
+	assertEquals(result.identity.provider, '@basic');
+	assertEquals(result.identity.roles, []);
+});
+
+Deno.test("@basic - denies wrong password", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'wrong') },
+		config: { users: { alice: 'secret' } },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@basic - denies unknown username", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('unknown', 'secret') },
+		config: { users: { alice: 'secret' } },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@basic - denies when no Authorization header (returns WWW-Authenticate)", () => {
+	const result = basicProvider.authCheck({
+		headers: {},
+		config: { users: { alice: 'secret' }, realm: 'TestApp' },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+	assertExists(result.addHeaders);
+	assertEquals(result.addHeaders['www-authenticate'], 'Basic realm="TestApp"');
+});
+
+Deno.test("@basic - uses default realm 'Protected' when not configured", () => {
+	const result = basicProvider.authCheck({
+		headers: {},
+		config: { users: { alice: 'secret' } },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.addHeaders['www-authenticate'], 'Basic realm="Protected"');
+});
+
+Deno.test("@basic - denies when Authorization is not Basic", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: 'Bearer some-token' },
+		config: { users: { alice: 'secret' } },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@basic - handles Authorization header case-insensitively", () => {
+	const result = basicProvider.authCheck({
+		headers: { Authorization: makeBasicAuth('alice', 'secret') },
+		config: { users: { alice: 'secret' } },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'alice');
+});
+
+Deno.test("@basic - accepts users as comma-separated 'user:pass' string", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('bob', 'pass123') },
+		config: { users: 'alice:secret,bob:pass123' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'bob');
+});
+
+Deno.test("@basic - accepts users as JSON string", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'secret') },
+		config: { users: '{"alice":"secret","bob":"pass"}' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'alice');
+});
+
+Deno.test("@basic - supports base64-encoded passwords (base64=@t)", () => {
+	// Password 'secret' base64-encoded is 'c2VjcmV0'
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'secret') },
+		config: { users: { alice: btoa('secret') }, base64: '@t' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'alice');
+});
+
+Deno.test("@basic - supports base64=true (boolean)", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'secret') },
+		config: { users: { alice: btoa('secret') }, base64: true },
+	});
+
+	assertEquals(result.allow, true);
+});
+
+Deno.test("@basic - denies when base64 password doesn't match", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'wrong') },
+		config: { users: { alice: btoa('secret') }, base64: '@t' },
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@basic - handles password with colon (base64 encoding)", () => {
+	// Password 'pass:word' contains a colon — use base64 to avoid parsing issues
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'pass:word') },
+		config: { users: { alice: btoa('pass:word') }, base64: '@t' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'alice');
+});
+
+Deno.test("@basic - denies when no users configured", () => {
+	const result = basicProvider.authCheck({
+		headers: { authorization: makeBasicAuth('alice', 'secret') },
+		config: {},
+	});
+
+	assertEquals(result.allow, false);
+	assertEquals(result.denyStatus, 401);
+});

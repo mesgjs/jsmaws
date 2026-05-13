@@ -27,7 +27,7 @@ export class EnvScheme {
 	 * @param {string} ref - Full value reference string (e.g., ':env:JWT_SECRET')
 	 * @returns {Promise<string|undefined>} Resolved value, or undefined if not set
 	 */
-    // deno-lint-ignore require-await
+	// deno-lint-ignore require-await
 	async resolve (ref) {
 		const parsed = parseValueRef(ref);
 		const varName = parsed?.ref;
@@ -47,7 +47,7 @@ export class EnvScheme {
 	/**
 	 * No-op cleanup (env vars are read on demand, no handles to close).
 	 */
-    // deno-lint-ignore require-await
+	// deno-lint-ignore require-await
 	async done () {
 		// No-op
 	}

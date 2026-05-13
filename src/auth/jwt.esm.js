@@ -30,19 +30,17 @@ const ALGORITHM_MAP = {
 const enc = new TextEncoder();
 
 /**
- * Base64url decode to Uint8Array
+ * Decode RFC 4648 base-64-encoded URL to string or Uint8Array
+ * @param {string} b64Url - The encoded URL
+ * @returns {{string: string, bytes: Uint8Array}}
  */
-function base64urlDecode (str) {
-	// Pad to multiple of 4
-	const padded = str.replace(/-/g, '+').replace(/_/g, '/');
-	const pad = padded.length % 4;
-	const padded2 = pad ? padded + '='.repeat(4 - pad) : padded;
-	const binary = atob(padded2);
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) {
-		bytes[i] = binary.charCodeAt(i);
-	}
-	return bytes;
+export function decodeBase64Url (b64Url) {
+	// Convert to standard base-64-encoded string
+	const base64 = (b64Url.replace(/-/g, '+').replace(/_/g, '/') + '==').slice(0, (b64Url.length + 2) & ~3);
+	return {
+		get string () { return atob(base64); },
+		get bytes () { return Uint8Array.fromBase64(base64); },
+	};
 }
 
 /**
@@ -68,7 +66,7 @@ async function importRsaPublicKey (pem, algorithm) {
 		.replace(/-----BEGIN [^-]+-----/, '')
 		.replace(/-----END [^-]+-----/, '')
 		.replace(/\s+/g, '');
-	const derBytes = base64urlDecode(pemBody.replace(/\+/g, '-').replace(/\//g, '_'));
+	const derBytes = decodeBase64Url(pemBody).bytes;
 
 	return await crypto.subtle.importKey(
 		'spki',
@@ -97,7 +95,7 @@ async function verifyJwt (token, config) {
 	// Decode header
 	let header;
 	try {
-		header = JSON.parse(new TextDecoder().decode(base64urlDecode(headerB64)));
+		header = JSON.parse(decodeBase64Url(headerB64).string);
 	} catch (_) {
 		throw new Error('Invalid JWT header');
 	}
@@ -123,7 +121,7 @@ async function verifyJwt (token, config) {
 
 	// Verify signature
 	const signingInput = enc.encode(`${headerB64}.${payloadB64}`);
-	const signature = base64urlDecode(signatureB64);
+	const signature = decodeBase64Url(signatureB64).bytes;
 
 	const valid = await crypto.subtle.verify(
 		algorithm,
@@ -139,7 +137,7 @@ async function verifyJwt (token, config) {
 	// Decode payload
 	let payload;
 	try {
-		payload = JSON.parse(new TextDecoder().decode(base64urlDecode(payloadB64)));
+		payload = JSON.parse(decodeBase64Url(payloadB64).string);
 	} catch (_) {
 		throw new Error('Invalid JWT payload');
 	}

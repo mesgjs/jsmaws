@@ -2,7 +2,7 @@
 
 **Status:** [DRAFT]  
 **Date:** 2026-04-27  
-**Updated:** 2026-05-04
+**Updated:** 2026-05-13
 
 ---
 
@@ -31,7 +31,7 @@ This is impractical for most real-world applications. The goal is a **modular, p
 2. **Credentials are stored separately**: Service credentials are managed separately (see [env-secrets-design.md](env-secrets-design.md)), not in mod-app code.
 3. **Pluggable adapters**: Each service type is implemented as an adapter module. Custom adapters can be provided by administrators.
 4. **Mod-app-facing API via IPC**: Mod-apps communicate with the service layer via a PolyTransport channel (`service`), not via direct service connections.
-5. **Scoped access**: Routes/pools declare which services they can access. Mod-apps cannot access services not declared for their route.
+5. **Scoped access**: Routes/groups declare which services they can access. Mod-apps cannot access services not declared for their route/group.
 6. **Named service pools**: Services are assigned to named `servicePools` (workload profiles), not one pool per service. A single pool can serve multiple services; different pools can have different scaling strategies and process counts. This mirrors the responder pool model.
 7. **Operator as process manager**: The operator manages service process pools using the same pool infrastructure as responder pools. Service processes report health and capacity via the `control` channel.
 8. **Mesgjs-compatible**: The API should be expressible in Mesgjs message-passing style.
@@ -43,7 +43,7 @@ This is impractical for most real-world applications. The goal is a **modular, p
 ```
 Mod-App Worker (sandboxed)
   │  PostMessageTransport 'service' channel
-  │  Sends: { service: 'db', op: 'query', sql: '...', params: [...] }
+  │  Sends: { service: 'db', op: 'query', sql: '...', params: {...} }
   │  Receives: { rows: [...], rowCount: N }
   ▼
 Responder Process (unprivileged, long-lived)
@@ -93,52 +93,58 @@ This means:
 
 ---
 
-## 4. Service Channel Protocol
+## 4. Mod-App ↔ Responder: Service Channel Protocol
 
-A PolyTransport channel (`service`) is added to the mod-app communication protocol. This channel is exposed via `globalThis.JSMAWS.service` (alongside `.server`).
+A PolyTransport channel (`service`) is added to the mod-app communication protocol. This channel is exposed via `globalThis.JSMAWS.service.channel` (alongside `.server`).
 
-The service channel uses **message types as sub-channels** to enable true concurrent requests. PolyTransport supports 2^16 (65,536) message types, making message type exhaustion a non-issue for practical workloads.
+The service channel uses **dynamically assigned message types** to enable true concurrent requests: each in-flight request is assigned one message type for its response data; that assignment is released when the response is complete. PolyTransport supports 2^16 (65,536) message types, making exhaustion a non-issue for practical workloads.
 
-### Channel Setup
+### 4.1 Channel Setup
 
 The `service` channel is only opened when the route has services configured. The bootstrap reads the setup data and opens the channel if `setupData.services` is non-empty.
 
-**No PolyTransport message type registration is used.** All communication uses numeric message types directly (via `channel.write(messageType, data)` and `channel.read({ only: messageType })`). This avoids the limit on unregistered, numeric types (typically 256) when also using registered, string-based message types, and also eliminates type-registration overhead.
+**No PolyTransport-managed message-type registration is used on this channel.** All communication uses numeric message types (via `channel.write(messageType, data)` and `channel.read({ only: messageType })`) managed by JSMAWS.
 
 ```javascript
 // In bootstrap.esm.js (addition):
 if (setupData.services?.length > 0) {
     const serviceChannel = await transport.requestChannel('service');
     // No addMessageTypes() call - using numeric types only
-    jsmawsNamespace.service = serviceChannel;
+    jsmawsNamespace.service = Object.freeze({
+        channel: serviceChannel,
+        request: makeServiceRequest(serviceChannel),
+        release: releaseServiceMessageType,
+    });
 }
 ```
 
-### Message Type Allocation
+### 4.2 Message Type Allocation
 
-**Message Type 0**: Control "sub-channel" (by prior agreement between responder and mod-app)
+**Message Type 0**: Control sub-channel (by prior agreement between responder and mod-app)
 - Used for: request initiation, response message-type assignment, errors
 - Distinguished by `type` field in JSON payload: `'svc-req'`, `'svc-mta'`, `'svc-err'`
 
-**Message Types 1-65535**: Response data "sub-channels" (allocated dynamically by JSMAWS)
-- Allocated by responder when forwarding a request to service process
-- Returned to mod-app via `svc-mta` message on type 0
-- Used for response data only (one message type per in-flight request)
-- Deallocated after response completion
+**Message Types 1-65535**: Response data (assigned dynamically by JSMAWS)
+- One message type is assigned per in-flight request when the responder forwards it to the service process
+- The bootstrap code receives the assigned message type via `svc-mta` on type 0 and resolves the corresponding `service.request()` promise with it
+- All response data for that request arrives on the assigned message type
+- The responder tracks active assignments in a map; new assignments use the next consecutive Uint16 value (wrapping, skipping 0 and any currently active assignment)
+- The mod-app calls `JSMAWS.service.release(messageType)` after it has finished reading the response; the bootstrap removes the assignment from the map
+- No message type is assigned for failed requests (error returned on type 0 via `svc-err`; `service.request()` promise rejects)
 
-### Control Messages (Message Type 0)
+### 4.3 Control Messages (Message Type 0)
 
 #### Request (`type: 'svc-req'`)
 
 ```javascript
 // Mod-App → Responder (on message type 0)
-await service.write(0, JSON.stringify({
+await JSMAWS.service.channel.write(0, JSON.stringify({
     type: 'svc-req',
-    reqId: 'q1',            // Mod-app-supplied request ID (for mod-app's own tracking)
+    reqId: 1,               // Mod-app-supplied request ID (consecutive integer, for tracking)
     service: 'db',          // Service name (must be in route's services list)
     op: 'query',            // Operation type (service-specific)
-    sql: 'SELECT * FROM users WHERE id = $1',
-    params: [userId],
+    sql: 'SELECT * FROM users WHERE id = :id',
+    params: { id: userId },
     // ... operation-specific fields
 }));
 ```
@@ -146,35 +152,35 @@ await service.write(0, JSON.stringify({
 #### Response Message-Type Assignment (`type: 'svc-mta'`)
 
 ```javascript
-// Responder → Mod-App (on message type 0, intra-process)
+// Responder → Mod-App bootstrap (on message type 0)
 {
     type: 'svc-mta',
-    reqId: 'q1',            // Matches mod-app's request
-    responseChannel: 42,    // Numeric message type for response data
+    reqId: 1,             // Matches mod-app's request
+    messageType: 42,      // Numeric message type for response data on the 'service' channel
 }
 ```
 
-The `svc-mta` message is sent intra-process (responder → mod-app worker via `PostMessageTransport`), so latency is negligible.
+The `svc-mta` message is sent intra-process (responder → mod-app worker via `PostMessageTransport`), so latency is negligible. The bootstrap resolves the `service.request()` promise with the assigned message type.
 
 #### Error (`type: 'svc-err'`)
 
 ```javascript
-// Responder → Mod-App (on message type 0)
+// Responder → Mod-App bootstrap (on message type 0)
 {
     type: 'svc-err',
-    reqId: 'q1',            // Matches mod-app's request
+    reqId: 1,               // Matches mod-app's request
     error: 'Connection refused',
     code: 'ECONNREFUSED',   // Optional error code
 }
 ```
 
-### Response Data Messages (Message Types 1-65535)
+### 4.4 Response Data Messages (Message Types 1-65535)
 
 Response data is sent on the assigned numeric message type. The payload format is service-specific.
 
 ```javascript
 // Responder → Mod-App (on assigned message type, e.g., 42)
-await service.write(42, JSON.stringify({
+await JSMAWS.service.channel.write(42, JSON.stringify({
     rows: [...],
     rowCount: N,
     fields: [...],
@@ -183,15 +189,51 @@ await service.write(42, JSON.stringify({
 
 For streaming responses (future enhancement), multiple frames can be sent on the same response message type without mixing data from different requests.
 
-### Concurrency Model
+### 4.5 `JSMAWS.service` — High-Level API
 
-Each in-flight request gets its own response sub-channel (message type). The mod-app can:
+The bootstrap exposes three functions on `JSMAWS.service`:
 
-1. Send multiple `svc-req` messages on type 0 concurrently
-2. Read `svc-mta` messages on type 0 to learn which message type each response will arrive on
-3. Read response data on the assigned message types independently (via `channel.read({ only: responseChannel })`)
+- **`request(payload)`** → `Promise<number>`: Submits a service request. Resolves to the assigned response message type on success; rejects with an `Error` on `svc-err`.
+- **`release(messageType)`**: Removes the message type assignment from the active-assignment map after the mod-app has finished reading the response. Should be called after `dataMsg.process()` completes.
+- **`channel`**: The raw `service` PolyTransport channel, for reading response data on assigned message types.
 
-This enables true concurrent service calls without `reqId` matching complexity.
+```javascript
+const { request, release, channel: serviceChannel } = JSMAWS.service;
+
+// Submit request; resolves to the assigned response message type
+const responseMessageType = await request({
+    service: 'db',
+    op: 'query',
+    sql: 'SELECT * FROM users WHERE id = :id',
+    params: { id: userId },
+});
+
+// Read response data on the assigned message type
+const dataMsg = await serviceChannel.read({ only: responseMessageType, decode: true });
+let result;
+await dataMsg.process(() => { result = JSON.parse(dataMsg.text); });
+
+// Release the message type assignment (local bookkeeping only)
+release(responseMessageType);
+```
+
+**Implementation notes:**
+- `request()` assigns consecutive integer `reqId` values internally.
+- An internal type-0 reader loop (started when the `service` channel is opened) reads `svc-mta` and `svc-err` messages and resolves/rejects the corresponding pending promises.
+- The mod-app does not need to read from message type 0 directly.
+- `release()` is purely local — it removes the entry from the bootstrap's active-assignment map. No message is sent to the responder. The responder ↔ service process side cleans up independently when the req-N channel response arrives.
+- If `release()` is never called, the assignment remains in the map until the worker exits — harmless (just a little memory consumption), since the map is per-worker and the Uint16 counter wraps around a 65535-entry space.
+
+### 4.6 Concurrency Model
+
+Each in-flight request is assigned its own message type for response data. The mod-app can:
+
+1. Call `JSMAWS.service.request()` multiple times concurrently (each returns a promise that resolves to the assigned message type)
+2. Await the promises to learn which message type each response will arrive on
+3. Read response data on the assigned message types independently (via `channel.read({ only: responseMessageType })`)
+4. Call `JSMAWS.service.release(messageType)` after reading each (final, if more than one) response to remove the assignment from the active-assignment map
+
+This enables true concurrent service calls without `reqId` matching complexity in response data.
 
 ---
 
@@ -203,15 +245,15 @@ The responder sits between the mod-app's `service` channel and the service proce
 
 Mod-apps supply a `reqId` in each `svc-req` message for their own tracking. However, mod-app-supplied `reqId` values **must not be forwarded directly** to the service process. If they were:
 
-- Two mod-apps running concurrently (e.g., in different workers on the same responder) could use the same `reqId` string, causing response misrouting.
+- Two mod-apps running concurrently (e.g., in different workers on the same responder) could use the same `reqId`, causing response misrouting.
 - A malicious mod-app could craft `reqId` values that collide with another mod-app's in-flight requests.
 
 **Solution: Responder-assigned relay IDs and response message types**
 
 The responder maintains a per-connection relay table. When forwarding a `svc-req` to a service process, the responder:
 
-1. Generates a unique relay ID (e.g., a monotonically incrementing integer scoped to the responder's connection to that service process).
-2. Allocates a response message type (numeric, 1-65535) for this request.
+1. Generates a unique relay ID (a monotonically incrementing integer scoped to the responder's connection to that service process).
+2. Allocates a response message type (numeric, 1-65535) for this request on the mod-app's `service` channel.
 3. Records the mapping: `relayId → { appReqId, appChannel, responseMessageType }`.
 4. Sends `svc-mta` to the mod-app on message type 0 with the allocated `responseMessageType`.
 5. Forwards the request to the service process with `reqId: relayId` (replacing the mod-app-supplied value).
@@ -220,24 +262,24 @@ The responder maintains a per-connection relay table. When forwarding a `svc-req
 
 ```
 Mod-App Worker A               Responder                  Service Process
-  svc-req { type: 'svc-req', reqId: 'q1', ... } (on msg type 0)
+  svc-req { type: 'svc-req', reqId: 1, ... } (on msg type 0)
   ──────────────────────────►
-                               relay table: { 'r-1' → { reqId: 'q1', ch: A, respMsgType: 42 } }
-                               svc-mta { type: 'svc-mta', reqId: 'q1', responseChannel: 42 } (on msg type 0)
+                               relay table: { 'r-1' → { reqId: 1, ch: A, responseMessageType: 42 } }
+                               svc-mta { type: 'svc-mta', reqId: 1, messageType: 42 } (on msg type 0)
   ◄──────────────────────────
                                svc-req { reqId: 'r-1', ... } (forwarded to service process)
                                ──────────────────────────────────────────────►
                                                            svc-res { reqId: 'r-1', ... }
                                ◄──────────────────────────────────────────────
-                               lookup 'r-1' → { reqId: 'q1', ch: A, respMsgType: 42 }
-                               response data (on msg type 42)
+                               lookup 'r-1' → { reqId: 1, ch: A, responseMessageType: 42 }
+                               response data (on msg type 42 of 'service' channel)
   ◄──────────────────────────
 ```
 
 This ensures that:
 - Mod-apps cannot interfere with each other's requests regardless of `reqId` choice.
 - The service process sees only responder-scoped relay IDs, never mod-app-supplied values.
-- Each in-flight request has its own response message type (sub-channel).
+- Each in-flight request has its own response message type on the `service` channel.
 - The relay table is cleaned up when a response is received or the mod-app connection closes.
 
 ### 5.2 Fan-Out to Multiple Service Process Connections
@@ -273,7 +315,88 @@ Responder
 
 ---
 
-## 6. Service Adapter Interface
+## 6. Responder ↔ Service Process Protocol
+
+The responder communicates with service process instances over `SocketTransport` (wrapping a Deno Unix domain socket or TCP loopback connection). This layer uses **req-N style named channels** — the same pattern used for operator ↔ responder communication.
+
+### 6.1 Channel Structure
+
+Each responder ↔ service process connection uses:
+
+- **`control` channel**: Lifecycle messages (config, health, capacity, shutdown). Established at connection time.
+- **`req-N` channels** (N = 0, 1, 2, ...): One channel per in-flight service request. Allocated from a pool; returned after the response is complete.
+
+This mirrors the operator ↔ responder req-N channel pool pattern ([`src/request-channel-pool.esm.js`](../src/request-channel-pool.esm.js)).
+
+### 6.2 Request/Response Flow
+
+```
+Responder                              Service Process Instance
+  │  (req-N channel, e.g. req-3)
+  │
+  │  svc-req (JSON text)
+  │  { reqId: 'r-1', service: 'db', op: 'query',
+  │    sql: 'SELECT ...', params: {...} }
+  ──────────────────────────────────────────────►
+  │
+  │                                    (adapter executes query)
+  │
+  │  svc-res (JSON text)
+  │  { reqId: 'r-1', rows: [...], rowCount: N, fields: [...] }
+  ◄──────────────────────────────────────────────
+  │
+  │  (req-3 channel returned to pool)
+```
+
+### 6.3 Message Types
+
+**`svc-req`** — Responder → Service Process (on req-N channel)
+
+```javascript
+{
+    reqId: 'r-1',           // Responder-assigned relay ID (monotonic integer, connection-scoped)
+    service: 'db',          // Service name (validated against pool's service list)
+    op: 'query',            // Operation type (service-specific)
+    // ... operation-specific fields (sql, params, txId, etc.)
+}
+```
+
+**`svc-res`** — Service Process → Responder (on req-N channel)
+
+```javascript
+{
+    reqId: 'r-1',           // Matches relay ID from svc-req
+    // ... operation-specific result fields (rows, rowCount, value, ok, etc.)
+}
+```
+
+**`svc-err`** — Service Process → Responder (on req-N channel)
+
+```javascript
+{
+    reqId: 'r-1',           // Matches relay ID from svc-req
+    error: 'Connection refused',
+    code: 'ECONNREFUSED',   // Optional error code
+}
+```
+
+**`svc-unavailable`** — Service Process → Responder (on req-N channel or control channel)
+
+Sent when the service process instance is saturated and cannot accept new requests. The responder should request a new socket address from the operator and reconnect.
+
+```javascript
+{
+    reason: 'POOL_EXHAUSTED',   // or 'SHUTTING_DOWN', etc.
+}
+```
+
+### 6.4 Streaming Responses (Future Enhancement)
+
+For large result sets, the service process can stream rows back as they arrive. See Section 18 (Future Enhancements).
+
+---
+
+## 7. Service Adapter Interface
 
 A service adapter is a JavaScript module that manages connections to a specific service type:
 
@@ -302,18 +425,18 @@ export default {
 
 ---
 
-## 7. Usage Patterns
+## 8. Usage Patterns
 
 ### Pattern A: Single Request/Response (Simplest)
 
-The mod-app sends a `svc-req` message, waits for the response channel assignment, then reads the response. This is the simplest model and covers the majority of use cases (queries, lookups, writes, service calls).
+The mod-app calls `JSMAWS.service.request()`, awaits the assigned message type, then reads the response. This is the simplest model and covers the majority of use cases (queries, lookups, writes, service calls).
 
 **Mod-app code:**
 
 ```javascript
 export default async function (_setupData) {
     const server = globalThis.JSMAWS.server;
-    const service = globalThis.JSMAWS.service;
+    const { request, release, channel: serviceChannel } = globalThis.JSMAWS.service;
 
     // Read HTTP request
     const reqMsg = await server.read({ only: 'req', decode: true });
@@ -324,35 +447,21 @@ export default async function (_setupData) {
     const { routeParams } = requestData;
 
     try {
-        // Send service request on message type 0 (control sub-channel)
-        await service.write(0, JSON.stringify({
-            type: 'svc-req',
-            reqId: 'q1',
+        // Submit service request; resolves to the assigned response message type
+        const responseMessageType = await request({
             service: 'db',
             op: 'query',
-            sql: 'SELECT * FROM users WHERE id = $1',
-            params: [routeParams.userId],
-        }));
+            sql: 'SELECT * FROM users WHERE id = :id',
+            params: { id: routeParams.userId },
+        });
 
-        // Read response channel assignment on message type 0
-        const assignMsg = await service.read({ only: 0, decode: true });
-        if (!assignMsg) throw new Error('Service channel closed');
-
-        let assignment;
-        await assignMsg.process(() => { assignment = JSON.parse(assignMsg.text); });
-
-        if (assignment.type === 'svc-err') {
-            throw new Error(assignment.error);
-        }
-
-        const { responseChannel } = assignment;
-
-        // Read response data on assigned message type
-        const dataMsg = await service.read({ only: responseChannel, decode: true });
+        // Read response data on the assigned message type
+        const dataMsg = await serviceChannel.read({ only: responseMessageType, decode: true });
         if (!dataMsg) throw new Error('Service channel closed');
 
         let result;
         await dataMsg.process(() => { result = JSON.parse(dataMsg.text); });
+        release(responseMessageType);
 
         // Send HTTP response
         await server.write('res', JSON.stringify({
@@ -379,149 +488,59 @@ export default async function (_setupData) {
 
 ---
 
-### Pattern B: Concurrent Requests with Independent Response Channels
+### Pattern B: Concurrent Requests
 
-The mod-app can send multiple `svc-req` messages concurrently and read responses independently on their assigned message types. This enables true parallel service calls.
+The mod-app can submit multiple requests concurrently and read responses independently on their assigned message types. This enables true parallel service calls.
 
 **Mod-app code:**
 
 ```javascript
-// Send two queries concurrently on message type 0
-await service.write(0, JSON.stringify({
-    type: 'svc-req',
-    reqId: 'user',
-    service: 'db',
-    op: 'query',
-    sql: 'SELECT * FROM users WHERE id = $1',
-    params: [userId],
-}));
+const { request, release, channel: serviceChannel } = globalThis.JSMAWS.service;
 
-await service.write(0, JSON.stringify({
-    type: 'svc-req',
-    reqId: 'prefs',
-    service: 'db',
-    op: 'query',
-    sql: 'SELECT * FROM preferences WHERE user_id = $1',
-    params: [userId],
-}));
+let userData, prefsData;
 
-// Read response channel assignments on message type 0
-const channels = {};
-for (let i = 0; i < 2; i++) {
-    const assignMsg = await service.read({ only: 0, decode: true });
-    if (!assignMsg) break;
-    await assignMsg.process(() => {
-        const assignment = JSON.parse(assignMsg.text);
-        if (assignment.type === 'svc-mta') {
-            channels[assignment.reqId] = assignment.responseChannel;
-        }
-    });
-}
+await Promise.all([
+    request({
+        service: 'db',
+        op: 'query',
+        sql: 'SELECT * FROM users WHERE id = :id',
+        params: { id: userId },
+    })
+    .then((type) => serviceChannel.read({ only: type, decode: true }))
+    .then((message) => message.process(() => {
+        userData = JSON.parse(message.text)?.rows[0];
+        release(message.messageType);
+    })),
 
-// Read responses independently on their assigned message types
-const userMsg = await service.read({ only: channels.user, decode: true });
-const prefsMsg = await service.read({ only: channels.prefs, decode: true });
-
-let user, prefs;
-await userMsg.process(() => { user = JSON.parse(userMsg.text); });
-await prefsMsg.process(() => { prefs = JSON.parse(prefsMsg.text); });
-
-const userData = user.rows[0];
-const prefsData = prefs.rows[0];
+    request({
+        service: 'db',
+        op: 'query',
+        sql: 'SELECT * FROM preferences WHERE user_id = :id',
+        params: { id: userId },
+    })
+    .then((type) => serviceChannel.read({ only: type, decode: true }))
+    .then((message) => message.process(() => {
+        prefsData = JSON.parse(message.text)?.rows[0];
+        release(message.messageType);
+    })),
+])
 ```
 
 **Advantages:**
 - True concurrent service calls (reduces latency for multi-service requests)
 - No `reqId` matching complexity in response data
-- Each request has its own response sub-channel
+- Each request has its own response message type
 - Responses can be read in any order
 
 **Disadvantages:**
-- More complex mod-app code
-- Requires tracking response channel assignments
+- Slightly more complex mod-app code
+- Requires tracking response message types
 
 ---
 
-### Option C: Streaming Results
+## 9. Built-in Service Adapters
 
-For large result sets, the service process streams rows back to the mod-app as they arrive from the service. This avoids buffering the entire result set in memory.
-
-**Protocol extension:**
-
-```javascript
-// Service Process → Responder → Mod-App: streaming response
-{ reqId: 'svc-1', type: 'svc-res-start', columns: ['id', 'name', 'email'] }
-{ reqId: 'svc-1', type: 'svc-res-row',   row: [1, 'Alice', 'alice@example.com'] }
-{ reqId: 'svc-1', type: 'svc-res-row',   row: [2, 'Bob',   'bob@example.com'] }
-{ reqId: 'svc-1', type: 'svc-res-end',   rowCount: 2 }
-```
-
-**Advantages:**
-- Memory-efficient for large result sets
-- Enables progressive rendering
-
-**Disadvantages:**
-- More complex protocol
-- More complex mod-app code
-- Requires careful flow control (PolyTransport handles this)
-
-**Verdict:** Streaming is a useful extension but not required for the initial implementation. Propose as a future enhancement.
-
----
-
-### Option D: Service via Named Service Pools (Approved Architecture)
-
-Service process instances are managed by the operator in named pools (`servicePools`). Each pool is a workload profile that can serve one or more services. The operator maintains a socket registry mapping service names to available pool instances, and load-balances responder connections across instances.
-
-**Architecture:**
-
-```
-Operator
-  │  manages servicePools
-  │  maintains socket registry: service name → pool → available socket addresses
-  │
-  ├── servicePool "shared" (minProcesses=1, maxProcesses=2, strategy=dynamic)
-  │     Each instance loads: db adapter, cache adapter
-  │     ├── Instance 1 (socket: /run/jsmaws/svc-shared-1.sock)
-  │     └── Instance 2 (socket: /run/jsmaws/svc-shared-2.sock)
-  │
-  └── servicePool "analytics" (minProcesses=2, maxProcesses=8, strategy=static)
-        Each instance loads: analytics-db adapter
-        ├── Instance 1 (socket: /run/jsmaws/svc-analytics-1.sock)
-        ├── Instance 2 (socket: /run/jsmaws/svc-analytics-2.sock)
-        └── ...
-
-Responder A ──SocketTransport──► svc-shared-1.sock
-Responder B ──SocketTransport──► svc-shared-2.sock
-Responder C ──SocketTransport──► svc-analytics-1.sock
-```
-
-When a responder needs to make a service call, it requests a socket address from the operator for the named service. The operator looks up which pool serves that service, selects an available instance (load balancing), and returns the socket address. The responder then connects directly to that instance for the duration of the request (or maintains a persistent connection for efficiency).
-
-**Advantages:**
-- Connection count capped at `maxConnections × poolSize` regardless of how many responders are running
-- Service process instances survive responder restarts (connections not lost on responder recycling)
-- Operator is not in the service data path (no bottleneck, no privileged process handling data)
-- Single IPC hop: Responder → Service Process Instance
-- Architecturally consistent with how production services (PostgreSQL, Redis) themselves work
-- Credentials held in service process instances only (not in each responder)
-- Service process instances can be updated/restarted independently of responders
-- Workload grouping: low-volume services share a pool; high-volume services get dedicated pools
-- Consistent with responder pool model (pools are workload profiles, not per-route containers)
-
-**Disadvantages:**
-- Requires `SocketTransport` support in PolyTransport
-- Socket file lifecycle management (cleanup on crash, permissions)
-- Transaction scope crosses process boundary — service process must detect responder death to roll back open transactions
-- Higher implementation complexity than per-responder model
-
-**Verdict:** This is the approved architecture.
-
----
-
-## 8. Built-in Service Adapters
-
-### 8.1 `@postgres` — PostgreSQL
+### 9.1 `@postgres` — PostgreSQL
 
 ```slid
 services=[
@@ -543,17 +562,17 @@ services=[
 
 ```javascript
 // Query (returns rows)
-{ op: 'query', sql: 'SELECT ...', params: [...] }
+{ op: 'query', sql: 'SELECT * FROM users WHERE id = :id', params: { id: 1 } }
 // → { rows: [...], rowCount: N, fields: [...] }
 
 // Execute (no rows returned)
-{ op: 'execute', sql: 'INSERT ...', params: [...] }
+{ op: 'execute', sql: 'INSERT INTO events (name) VALUES (:name)', params: { name: 'login' } }
 // → { rowCount: N }
 
 // Transaction
 { op: 'begin' }
 // → { txId: 'tx-1' }
-{ op: 'query', txId: 'tx-1', sql: '...', params: [...] }
+{ op: 'query', txId: 'tx-1', sql: 'UPDATE accounts SET balance = balance - :amount WHERE id = :id', params: { amount: 100, id: fromId } }
 // → { rows: [...] }
 { op: 'commit', txId: 'tx-1' }
 // → { ok: true }
@@ -561,11 +580,11 @@ services=[
 // → { ok: true }
 ```
 
-### 8.2 `@mysql` — MySQL / MariaDB
+### 9.2 `@mysql` — MySQL / MariaDB
 
 Same interface as `@postgres` (SQL-compatible operations).
 
-### 8.3 `@sqlite` — SQLite
+### 9.3 `@sqlite` — SQLite
 
 ```slid
 services=[
@@ -580,7 +599,7 @@ services=[
 
 Same SQL operations as `@postgres`.
 
-### 8.4 `@redis` — Redis / Valkey
+### 9.4 `@redis` — Redis / Valkey
 
 ```slid
 services=[
@@ -629,7 +648,7 @@ services=[
 // Pub/Sub (future enhancement — requires streaming)
 ```
 
-### 8.5 `@mongodb` — MongoDB
+### 9.5 `@mongodb` — MongoDB
 
 ```slid
 services=[
@@ -671,7 +690,7 @@ services=[
 // → { documents: [...] }
 ```
 
-### 8.6 `@http` — HTTP API Client
+### 9.6 `@http` — HTTP API Client
 
 ```slid
 services=[
@@ -700,7 +719,7 @@ services=[
 // PUT, PATCH, DELETE (same pattern)
 ```
 
-### 8.7 `@kv` — Key-Value Store (Deno KV)
+### 9.7 `@kv` — Key-Value Store (Deno KV)
 
 ```slid
 services=[
@@ -739,7 +758,7 @@ services=[
 
 ---
 
-## 9. Configuration Schema
+## 10. Configuration Schema
 
 ```slid
 [(
@@ -830,50 +849,61 @@ services=[
 
 ---
 
-## 10. Access Control
+## 11. Access Control
 
 Service access is scoped to routes. A mod-app can only access services declared in its route's `services` list.
 
 - If a route has no `services`, `globalThis.JSMAWS.service` is `undefined`.
-- If an mod-app tries to access a service not in its route's list, the responder returns a `svc-err` with code `ACCESS_DENIED`.
+- If a mod-app tries to access a service not in its route's list, the responder returns a `svc-err` with code `ACCESS_DENIED`.
 - Service names are validated against the global `services` configuration.
 
 This prevents mod-apps from accessing services they shouldn't (e.g., a public-facing mod-app accessing the payment API).
 
 ---
 
-## 11. Transaction Support
+## 12. Transaction Support
 
 Transactions are supported for SQL adapters. A transaction is a sequence of operations that are executed atomically.
 
 **Protocol:**
 
 ```javascript
+const { request, release, channel: serviceChannel } = globalThis.JSMAWS.service;
+
 // Begin transaction
-await service.write('svc-req', JSON.stringify({ reqId: 'tx-begin', service: 'db', op: 'begin' }));
-const beginRes = await readSvcResponse(service, 'tx-begin');
+const beginMsgType = await request({ service: 'db', op: 'begin' });
+const beginMsg = await serviceChannel.read({ only: beginMsgType, decode: true });
+let beginRes;
+await beginMsg.process(() => { beginRes = JSON.parse(beginMsg.text); });
+release(beginMsgType);
 const { txId } = beginRes;
 
 // Execute operations within transaction
-await service.write('svc-req', JSON.stringify({
-    reqId: 'tx-q1', service: 'db', op: 'query',
+const debitMsgType = await request({
+    service: 'db', op: 'execute',
     txId,
-    sql: 'UPDATE accounts SET balance = balance - $1 WHERE id = $2',
-    params: [100, fromAccountId],
-}));
-await readSvcResponse(service, 'tx-q1');
+    sql: 'UPDATE accounts SET balance = balance - :amount WHERE id = :fromId',
+    params: { amount: 100, fromId: fromAccountId },
+});
+const debitMsg = await serviceChannel.read({ only: debitMsgType, decode: true });
+await debitMsg.process(() => {});
+release(debitMsgType);
 
-await service.write('svc-req', JSON.stringify({
-    reqId: 'tx-q2', service: 'db', op: 'query',
+const creditMsgType = await request({
+    service: 'db', op: 'execute',
     txId,
-    sql: 'UPDATE accounts SET balance = balance + $1 WHERE id = $2',
-    params: [100, toAccountId],
-}));
-await readSvcResponse(service, 'tx-q2');
+    sql: 'UPDATE accounts SET balance = balance + :amount WHERE id = :toId',
+    params: { amount: 100, toId: toAccountId },
+});
+const creditMsg = await serviceChannel.read({ only: creditMsgType, decode: true });
+await creditMsg.process(() => {});
+release(creditMsgType);
 
 // Commit
-await service.write('svc-req', JSON.stringify({ reqId: 'tx-commit', service: 'db', op: 'commit', txId }));
-await readSvcResponse(service, 'tx-commit');
+const commitMsgType = await request({ service: 'db', op: 'commit', txId });
+const commitMsg = await serviceChannel.read({ only: commitMsgType, decode: true });
+await commitMsg.process(() => {});
+release(commitMsgType);
 ```
 
 **Transaction lifecycle:**
@@ -883,7 +913,7 @@ await readSvcResponse(service, 'tx-commit');
 
 ---
 
-## 12. Connection Pool Management
+## 13. Connection Pool Management
 
 Connection pools are managed by **service process instances**. The operator manages the pool of service process instances themselves.
 
@@ -916,14 +946,14 @@ db=[
 The operator manages the pool of service process instances for each `servicePool`:
 
 - Scaling strategies: `static` (fixed count), `dynamic` (scale between min/max), `ondemand` (spawn as needed)
-- Instances report capacity via `capacity-update` on the `control` channel (see Section 15)
+- Instances report capacity via `capacity-update` on the `control` channel (see Section 17.2)
 - Operator load-balances responder connections across available instances
 - Instances are recycled after `maxReqs` to mitigate memory leaks
 - Crashed instances are automatically respawned
 
 ---
 
-## 13. Custom Adapters
+## 14. Custom Adapters
 
 Administrators can provide custom service adapters:
 
@@ -937,11 +967,11 @@ services=[
 ]
 ```
 
-Custom adapters must implement the adapter interface (see Section 5). They are loaded by the service process instance and run with service process permissions.
+Custom adapters must implement the adapter interface (see Section 7 — Service Adapter Interface). They are loaded by the service process instance and run with service process permissions.
 
 ---
 
-## 14. Implementation Plan
+## 15. Implementation Plan
 
 ### Phase 1: Core Infrastructure
 
@@ -966,7 +996,7 @@ Custom adapters must implement the adapter interface (see Section 5). They are l
    - JSMAWS calls `Deno.connect()` to reach service process instance; wraps connection in `SocketTransport`
    - Maintain one `SocketTransport` connection per service pool (not per service name)
    - Maintain relay table: responder-assigned relay ID → `{ appReqId, appChannel, responseMessageType }` (see Section 5.1)
-   - Maintain message type allocator (1-65535) for response sub-channels
+   - Maintain message type assignment counter (wrapping Uint16, skipping 0 and active assignments) for the mod-app `service` channel
    - On `svc-req` from mod-app (message type 0): assign relay ID, allocate response message type, record in relay table, send `svc-mta` to mod-app (message type 0), rewrite `reqId`, forward to correct `SocketTransport` based on `service` field
    - On response from service process: look up relay ID, write response data to mod-app on allocated message type, deallocate message type
    - On error: send `svc-err` to mod-app on message type 0 (control sub-channel)
@@ -974,7 +1004,8 @@ Custom adapters must implement the adapter interface (see Section 5). They are l
 
 4. **Bootstrap update** in `src/apps/bootstrap.esm.js`
    - Open `service` channel when `setupData.services` is non-empty
-   - Expose as `globalThis.JSMAWS.service`
+   - Start internal type-0 reader loop for `svc-mta`/`svc-err` dispatch
+   - Expose `{ channel, request, release }` as `globalThis.JSMAWS.service`
 
 5. **Configuration update** in `src/configuration.esm.js`
    - Add `services` getter
@@ -1014,11 +1045,11 @@ Implement built-in adapters in `src/services/`:
 
 ---
 
-## 15. Security Considerations
+## 16. Security Considerations
 
 - **Credentials in environment variables**: Service credentials should never appear in config files. Use `:env:VAR_NAME` or related "secrets" syntax (see [env-secrets-design.md](env-secrets-design.md)).
 - **Route-scoped access**: Mod-apps can only access services declared for their route. This prevents privilege escalation.
-- **SQL injection prevention**: SQL adapters should use parameterized queries (preferably with named parameters). The adapter interface requires `params` to be separate from `sql`.
+- **SQL injection prevention**: SQL adapters should use parameterized queries with named parameters. The adapter interface requires `params` to be separate from `sql`.
 - **Connection pool isolation**: Connection pools live in service process instances, not in responders. Responders relay service calls but do not hold service connections directly.
 - **Adapter trust**: Custom adapters run with service process permissions. Administrators should audit adapter code.
 - **Error message sanitization**: Service errors returned to mod-apps should not include internal connection details (e.g., database host, credentials).
@@ -1026,11 +1057,11 @@ Implement built-in adapters in `src/services/`:
 
 ---
 
-## 16. Service Process Pool Management
+## 17. Service Process Pool Management
 
 Service process instances are managed by the operator using the same pool infrastructure as responder pools. This section describes the lifecycle, health reporting, and socket registry.
 
-### 16.1 Lifecycle
+### 17.1 Lifecycle
 
 Service process instances follow the same lifecycle as responder processes:
 
@@ -1041,7 +1072,7 @@ Service process instances follow the same lifecycle as responder processes:
 5. **Recycle**: After `maxReqs`, instance drains in-flight requests and exits; operator spawns replacement
 6. **Crash recovery**: Operator detects exit, respawns instance, updates socket registry
 
-### 16.2 Health and Capacity Reporting
+### 17.2 Health and Capacity Reporting
 
 Service process instances report health and capacity to the operator via the `control` channel, using the existing `capacity-update` message type (defined in [`src/service-process.esm.js`](../src/service-process.esm.js)):
 
@@ -1062,7 +1093,7 @@ The operator uses capacity reports to:
 
 The operator sends `health-check` messages periodically; instances respond with `health-response`.
 
-### 16.3 Socket Registry
+### 17.3 Socket Registry
 
 The operator maintains a socket registry mapping service names to available instance socket addresses:
 
@@ -1078,7 +1109,7 @@ When a responder needs to make a service call, it requests a socket address from
 
 Note: Pre-connections are expected to be naive in terms of real-time capacity, i.e. more responders might pre-connect to a service process than could be served concurrently. This should be resolved via the service-unavailable saturation response (if in-the-moment work-load ever requires it), not by forecasting some number of services processes that might potentially be required and having to manage distribution across initially unloaded resources. Responder connections should only migrate as need in response to actual requests (or lost connections), not pre-connections.
 
-### 16.4 Graceful Shutdown and Drain
+### 17.4 Graceful Shutdown and Drain
 
 When the operator needs to stop or recycle a service process instance:
 
@@ -1090,26 +1121,63 @@ When the operator needs to stop or recycle a service process instance:
 
 ---
 
-## 17. Open Questions
+## 18. Future Enhancements
+
+### 18.1 Streaming Results
+
+For large result sets, the service process can stream rows back to the mod-app as they arrive from the external service, rather than buffering the entire result set in memory.
+
+**Protocol extension (responder ↔ service process, on req-N channel):**
+
+```javascript
+// Service Process → Responder: streaming response
+{ reqId: 'r-1', type: 'svc-res-start', columns: ['id', 'name', 'email'] }
+{ reqId: 'r-1', type: 'svc-res-row',   row: [1, 'Alice', 'alice@example.com'] }
+{ reqId: 'r-1', type: 'svc-res-row',   row: [2, 'Bob',   'bob@example.com'] }
+{ reqId: 'r-1', type: 'svc-res-end',   rowCount: 2 }
+```
+
+The responder forwards each frame to the mod-app on the assigned message type. The mod-app reads multiple frames until `svc-res-end` is received, then calls `JSMAWS.service.release(messageType)`.
+
+**Advantages:**
+- Memory-efficient for large result sets
+- Enables progressive rendering
+
+**Disadvantages:**
+- More complex protocol
+- More complex mod-app code
+- Requires careful flow control (PolyTransport handles this)
+
+### 18.2 Hot-Reloadable Service Credentials
+
+Allow service credentials to be updated (e.g., rotated secrets) without restarting service process instances. Complex; deferred to a future release.
+
+### 18.3 Pub/Sub Support
+
+Redis/Valkey pub/sub and similar notification patterns require a persistent streaming connection. Deferred pending streaming support (Section 18.1).
+
+---
+
+## 19. Open Questions
 
 1. **Should service adapters be allowed to run in a separate process?** (Option D)
    - **Resolved** Yes, service adapters run in separate service process instances managed by the operator in named pools.
-10. **Relay ID strategy**: Should the responder use monotonically incrementing integers (scoped per `SocketTransport` connection) or UUIDs for relay IDs? Monotonic integers are simpler and more compact; UUIDs are globally unique but larger. Since relay IDs are scoped to a single responder↔service-process connection and are short-lived, monotonic integers are likely sufficient.
 2. **Should there be a query builder API?** (e.g., `{ op: 'select', table: 'users', where: { id: 1 } }`)
    - **Resolved** No. SQL prepared-statement with variable-binding **must** be supported for security reasons, but a query builder would be a mod-app implementation concern, not a service protocol feature.
 3. **How should large result sets be handled?**
-   - **Resolved** Services return results as soon as they are available. Large results generate backpressure via PolyTransport. Mod-apps need to plan for result pagination (e.g. SQL `limit`).
+   - **Resolved** Services return results as soon as they are available. Large results generate backpressure via PolyTransport. Mod-apps need to plan for result pagination (e.g. SQL `limit`). Streaming is a future enhancement (see Section 18.1).
 4. **Should there be a schema validation layer?** (e.g., validate query results against a schema)
    - **Resolved** This is a mod-app (or service-specific) concern, not a service API concern.
 5. **How should connection pool exhaustion be handled?**
    - **Resolved** Return `svc-err` with code `POOL_EXHAUSTED` after `acquireTimeout`. Mod-app can retry or return a 503.
-6. **Should services be hot-reloadable?** (e.g., update credentials without restarting) — Complex; propose as a future enhancement.
+6. **Should services be hot-reloadable?** (e.g., update credentials without restarting) — Complex; propose as a future enhancement (see Section 18.2).
 7. **Centralized service process via SocketTransport**
    - **Resolved**: Service adapters run in dedicated shared service process instances (Option D). JSMAWS manages the socket listen/connect steps (Unix domain socket or TCP loopback); `SocketTransport` wraps the resulting Deno socket connections. This caps connection count at `maxConnections × poolSize` regardless of responder count, and service connections survive responder recycling. The mod-app-facing `JSMAWS.service` API is identical regardless of pool size.
 8. **Per-service pools vs. named service pools**
    - **Resolved**: Named `servicePools` (workload profiles). Multiple services can be assigned to the same pool; different pools can have different scaling strategies and process counts. This mirrors the responder pool model and avoids wasteful per-service singleton processes.
 9. **Socket address assignment: static vs. dynamic**
-   - **Open**: Should socket addresses be handed out once at responder spawn time, or on-demand per service call? See Section 15.3.
+   - **Resolved**: See Section 17.3.
+10. **Relay ID strategy**: Should the responder use monotonically incrementing integers (scoped per `SocketTransport` connection) or UUIDs for relay IDs? Monotonic integers are simpler and more compact; UUIDs are globally unique but larger. Since relay IDs are scoped to a single responder↔service-process connection and are short-lived, monotonic integers are likely sufficient.
 
 ---
 

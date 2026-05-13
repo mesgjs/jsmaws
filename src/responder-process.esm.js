@@ -384,7 +384,7 @@ class ResponderProcess extends ServiceProcess {
 			return;
 		}
 
-		const { id, method, url, app, root, headers, routeParams, routeTail, routeSpec, body } = requestData;
+		const { id, method, url, app, root, headers, routeParams, routeTail, routeSpec, body, identity } = requestData;
 
 		try {
 			// Check if we're at capacity
@@ -473,6 +473,7 @@ class ResponderProcess extends ServiceProcess {
 				routeParams: routeParams || {},
 				routeTail: routeTail || '',
 				body,
+				identity: identity ?? null,
 				timeouts: {
 					request: reqTimeout,
 					idle: idleTimeout,

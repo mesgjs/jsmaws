@@ -90,3 +90,48 @@ These configuration extensions add support for host (SNI)-based routing.
 - `requestFilter` and `responseFilter` from top-level are used by default
 - `requestFilter` and/or `responseFilter` at route-group level is used instead when present
 - Filtering is not part of authn providers
+
+## Changes And Clarifications 2026-05-11-A
+
+- The *top-level* `authn` contains the list of potentially-identifying authentication providers
+  - `authn` is either an object or an array of objects
+  - The objects contain a `provider` and any required supporting props (secrets, keys, etc)
+  - Role enforcement should be implemented at the routing layer, not at this level
+  - These are evaluated *in order, before routing, initiated by the operator* (some evaluations may be delegated)
+  - *Evaluation stops at the first successful identification*
+  - Since evaluation stops immediately up success, there is no identity merging
+- A qualified route-group may include its own `authn`
+  - A route-group `authn` may be a single value or an array, but each value is *scalar* (used for filtering), *not a configuration object*
+  - Values are considered, *in order*, until one of the following matches (at which time no further values are considered):
+    - A value matching the current (successful) identity provider; the identity will be presented
+      - This *might* need to support some sort of qualifier if multiple provider instances are possible (e.g. *which* JWT?)
+    - `@allow-known` when a non-empty identity is present; the identity will be presented
+    - `@allow-all` always matches; the identity is *suppressed* (to routes in the group) if present
+    - `@deny-all` always matches; the route-group will be skipped
+  - A role may only match when an identity is presented, not when it is suppressed (an automatic failure)
+  - Route-group `authn` never triggers a new evaluation
+- The effective `authn` (route-group if present, top-level otherwise) shall be interpreted as having an *implied* `[@allow-known @allow-all]` at the end (not reached if there's an explicit `@allow-all` or `@deny-all` because they *always* match)
+- `[@allow-known @allow-all]` accepts with or without identity (presenting if present)
+- `[@allow-known @deny-all]` accepts only if identity is present
+- `[@jwt @allow-all]` accepts all, but only presents identity if `@jwt` was first successful
+- `@allow-known`, `@allow-all`, and `@deny-all` should be *built-in* and part of routing (not modules and not part of top-level `authn`)
+- A role check is always performed if the condition is present (lack of identity for any reason, *including suppression*, is treated as a non-match and the route-group is skipped)
+- Only the TTL-based cache is required (no second-level cache)
+  - There is always exactly zero or one active identities (first match), which is either presented or suppressed
+
+## Changes And Clarifications 2026-05-11-B
+
+- `addHeaders` is removed from the auth provider interface
+  - Identity is passed in normalized form to mod-apps via `requestData.identity`; no header injection needed
+  - Response headers (e.g. `WWW-Authenticate`) are a mod-app concern, not a server auth concern
+- Provider return values are simplified:
+  - `null` / `undefined`: provider did not recognize this request (no credential present, wrong credential type, or expired/not-yet-valid credential); try next provider
+  - `{ allow: true, identity }`: provider successfully identified the caller; stop chain
+  - `{ allow: false, denyStatus, denyMessage }`: credential is structurally invalid or clearly malicious (e.g. bad JWT signature, malformed token); hard deny, stop chain
+- Expired or not-yet-valid credentials are not malicious; providers return `null` for these cases, allowing other providers to attempt identification
+- Role checks are removed from individual providers; `role` is a routing-layer condition on qualified route groups
+- `@allow-all` and `@deny-all` are routing-layer constructs only (not top-level `authn` providers)
+  - Maintenance mode is handled at the routing layer (e.g. a catch-all response route with `response=302 href=/maintenance`)
+- `@allow-all` (top-level provider) is renamed to `@test-identity` to avoid confusion with the routing-layer `@allow-all` construct
+  - `@test-identity` always returns a configurable identity; intended for development and testing
+- The `providerName` field is added to the success `AuthResult` (the spec string used to load the provider, e.g. `@jwt`); used by route-group authn filter to match the active identity's provider
