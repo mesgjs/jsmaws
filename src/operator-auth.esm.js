@@ -6,7 +6,7 @@
  * run directly in the operator without an external auth service process.
  * Results are cached in an OperatorAuthCache for server-lifetime efficiency.
  *
- * Auth chain resolution (per revisions-20260510.md):
+ * Auth chain resolution (per auth-revisions-20260510.md):
  * - Route-group `authn` overrides top-level `authn` when present
  * - Top-level `authn` is the site-level default
  * - If neither is configured, all requests are allowed (no auth)
@@ -54,7 +54,7 @@ function extractCacheKey (headers, authChain) {
 
 /**
  * Resolve the effective auth chain for a request.
- * Route-group authn overrides top-level authn (per revisions-20260510.md).
+ * Route-group authn overrides top-level authn (per auth-revisions-20260510.md).
  *
  * @param {Object|null} routeGroup - Matched route group config (or null)
  * @param {Array} topLevelAuthn - Top-level authn array from config
@@ -101,7 +101,7 @@ export class OperatorAuth {
 	 * Run auth for a request using the operator-embedded auth chain.
 	 * Checks the cache first; runs the auth chain on cache miss.
 	 *
-	 * Auth chain resolution (per revisions-20260510.md):
+	 * Auth chain resolution (per auth-revisions-20260510.md):
 	 * - Route-group `authn` overrides top-level `authn` when present
 	 * - Top-level `authn` is the site-level default
 	 * - If neither is configured, all requests are allowed (no auth)
@@ -124,7 +124,7 @@ export class OperatorAuth {
 			return { allow: true, identity: null, addHeaders: {} };
 		}
 
-		// Try cache (per-request second-level cache by provider, per revisions-20260510.md)
+		// Try cache (per-request second-level cache by provider, per auth-revisions-20260510.md)
 		const cacheKey = extractCacheKey(headers, authChain);
 		if (cacheKey) {
 			const cached = this._cache.get(cacheKey);

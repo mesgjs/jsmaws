@@ -415,7 +415,7 @@ export class OperatorProcess {
 					// AuthResult is always { allow: bool, identity, ... }:
 					//   allow=true:  { allow: true, identity: Object|null, addHeaders: Object }
 					//   allow=false: { allow: false, identity: null, denyStatus: number, denyMessage: string }
-					// Auth chain: route-group authn overrides top-level authn (revisions-20260510.md).
+					// Auth chain: route-group authn overrides top-level authn (auth-revisions-20260510.md).
 					// Providers are tried in order; first success stops the chain.
 					const headersObj = Object.fromEntries(req.headers.entries());
 					const poolName = route.spec?.pool ?? 'standard';
@@ -444,7 +444,7 @@ export class OperatorProcess {
 					}
 
 					// Determine effective requestFilter and responseFilter.
-					// Route-group level overrides top-level (per revisions-20260510.md).
+					// Route-group level overrides top-level (per auth-revisions-20260510.md).
 					const requestFilter = (routeGroup?.requestFilter != null)
 						? routeGroup.requestFilter
 						: (this.config.config.requestFilter ?? null);

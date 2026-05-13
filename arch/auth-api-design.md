@@ -1,15 +1,14 @@
 # JSMAWS Authentication and Authorization API Design
 
-**Status:** [APPROVED, SUPERSEDED IN PART — see [`arch/revisions-20260510.md`](revisions-20260510.md)]
-**Date:** 2026-04-27
+**Status:** [APPROVED, SUPERSEDED IN PART — see [`arch/auth-revisions-20260510.md`](auth-revisions-20260510.md)]  
+**Date:** 2026-04-27  
 **Updated:** 2026-05-10
 
-> **Note (2026-05-10):** The `auth` field in routes (Sections 5, 9, 10) is superseded by the new `authn` model from [`arch/revisions-20260510.md`](revisions-20260510.md). Key changes:
+> **Note (2026-05-10):** The `auth` field in routes (Sections 5, 9, 10) is superseded by the new `authn` model from [`arch/auth-revisions-20260510.md`](auth-revisions-20260510.md). Key changes:
 > - Top-level `authn` replaces per-route `auth` for site-level default authentication
 > - Route groups (`routeGroups`) provide per-group `authn` overrides and `role` checks
 > - Header/cookie filtering (`requestFilter`/`responseFilter`) is now at route-group level, not per-authn-provider
 > - Multi-host SNI routing is supported via `hostRoutes`
-> - Per-request second-level auth cache by provider added alongside TTL-based first-level cache
 >
 > The core auth provider interface (Section 4), built-in providers (Section 8), and Options C/D architecture (Sections 3, 3a, 5) remain valid. Implementation should use the revised configuration model.
 
@@ -30,7 +29,7 @@ Without these, every mod-app must implement its own auth logic, leading to dupli
 ## 2. Design Principles
 
 1. **Modular / pluggable**: Auth providers are independent modules, loaded by configuration.
-2. **Composable**: Multiple providers can be chained (e.g., JWT check → role check → rate limit).
+2. **Separated concerns**: Authentication (identity determination) happens before routing; authorization (access control) happens during routing. The multi-process architecture makes traditional middleware composition impossible—authn runs in the operator, authz runs in the router (potentially different processes with `fsRouting`).
 3. **Transparent to mod-apps**: Mod-apps receive a clean, normalized identity object; they don't need to parse tokens or cookies themselves.
 4. **Operator-side enforcement**: Auth decisions happen in the operator or responder *before* the mod-app is spawned, so a rejected request never reaches untrusted code.
 5. **Header/cookie filtering**: Inbound request and outbound response header/cookie filtering is a first-class concern, not an afterthought.
@@ -39,6 +38,8 @@ Without these, every mod-app must implement its own auth logic, leading to dupli
 ---
 
 ## 3. Where Auth Fits in the Request Pipeline
+
+(Note: Options C and D chosen for implementation.)
 
 ```
 Client
@@ -77,7 +78,7 @@ The original design recommended responder-side auth as the primary approach. How
 
 - Both Options C and D run *before* routing, enabling role-based pool selection
 - Option C keeps auth code unprivileged while achieving operator-level cache efficiency
-- Option A (responder-side) remains viable for simple deployments where role-based routing is not needed
+- Option A (responder-side) remains viable for simple deployments where role-based routing is not needed \[not approved\]
 
 ---
 
@@ -105,7 +106,7 @@ Auth providers frequently benefit from caching:
 - **API key lookup**: The set of valid keys is loaded from config/environment and cached in memory.
 - **Session store**: Session data may be cached in memory to reduce backend lookups.
 
-**With responder-side auth (original recommendation):**
+**With responder-side auth (original recommendation):** \[not approved\]
 
 - Each of the N responder processes maintains its own independent cache.
 - When a responder is recycled (after `maxReqs` requests), its entire cache is discarded. The replacement responder starts cold.
@@ -113,7 +114,7 @@ Auth providers frequently benefit from caching:
 - For JWKS key fetching: the same public key set is fetched N × (restart frequency) times.
 - Cache hit rates are lower because each cache covers only 1/N of the traffic and is periodically wiped.
 
-**With operator-side auth:**
+**With operator-side auth:** \[approved\]
 
 - A single cache covers 100% of traffic.
 - The cache persists for the server lifetime — no cold-start penalty after recycling.
@@ -262,6 +263,8 @@ A hybrid is also possible: operator-embedded auth for stateless methods (JWT, AP
 ---
 
 ## 4. Auth Provider Interface
+
+(Note: Auth providers are no longer involved in request/response header/cookie filtering.)
 
 An auth provider is a JavaScript module with a well-defined interface:
 
@@ -533,7 +536,7 @@ Auth logic runs directly in the operator process for stateless auth methods (JWT
 
 ## 6. Header and Cookie Filtering
 
-Header/cookie filtering is a first-class concern, independent of auth. It should be configurable at the route level.
+Header/cookie filtering is a first-class concern, *independent of auth*. It should be configurable at the route level.
 
 The filter configuration is organized by direction (`requestFilter` / `responseFilter`), with header and cookie rules grouped together within each direction block.
 
