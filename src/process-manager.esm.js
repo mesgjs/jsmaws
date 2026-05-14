@@ -30,7 +30,7 @@ export const ProcessType = {
 };
 
 const ScriptTypePath = {
-	auth: 'src/auth-service-process.esm.js',
+	auth: 'src/auth-process.esm.js',
 	responder: 'src/responder-process.esm.js',
 	router: 'src/router-process.esm.js',
 }

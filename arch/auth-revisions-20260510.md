@@ -135,3 +135,73 @@ These configuration extensions add support for host (SNI)-based routing.
 - `@allow-all` (top-level provider) is renamed to `@test-identity` to avoid confusion with the routing-layer `@allow-all` construct
   - `@test-identity` always returns a configurable identity; intended for development and testing
 - The `providerName` field is added to the success `AuthResult` (the spec string used to load the provider, e.g. `@jwt`); used by route-group authn filter to match the active identity's provider
+
+## Changes And Clarifications 2026-05-14-A
+
+### Response Routes: `responseText` and `headers`
+
+A `response` route (a route that returns a fixed server-generated response without dispatching to a mod-app) should support two additional optional properties:
+
+- `responseText` — a plain-text body to include in the response (e.g. `"Unauthorized"`)
+- `headers` — an object of response headers to include (e.g. `[www-authenticate='Basic realm="My App"']`)
+
+This enables `WWW-Authenticate` challenges (and similar protocol-level headers) to be expressed entirely in configuration, without requiring a mod-app. For example:
+
+```slid
+routeGroups=[
+    protected=[
+        authn=[@allow-known @deny-all]
+        routes=[
+            [path=/api/:*  pool=standard  app=./apps/api.esm.js]
+        ]
+    ]
+    challenge=[
+        authn=[@allow-all]
+        routes=[
+            [path=/api/:*  response=401  responseText=Unauthorized  headers=[www-authenticate='Basic realm="My App"']]
+        ]
+    ]
+]
+routes=[
+    [group=protected]
+    [group=challenge]
+]
+```
+
+**How this works:**
+
+1. The `protected` group uses `authn=[@allow-known @deny-all]` — only routes if an identity is present. If the caller is authenticated, the request is dispatched to the mod-app.
+2. The `challenge` group uses `authn=[@allow-all]` — always matches (identity suppressed). The `response=401` route returns a fixed 401 with the `WWW-Authenticate` header, prompting the client to authenticate.
+
+**Design notes:**
+
+- `responseText` is optional; if omitted, the response body is empty (or the default HTTP status phrase).
+- `headers` is optional; if omitted, no extra headers are added beyond the standard response headers.
+- `responseText` and `headers` are only meaningful on `response` routes (routes with a `response` property specifying an HTTP status code or redirect). They are ignored on routes that dispatch to a mod-app.
+- This pattern generalizes beyond `WWW-Authenticate`: any fixed-response route can include arbitrary headers (e.g. `location` for redirects, `retry-after` for 503 maintenance responses).
+- `WWW-Authenticate` is a mod-app concern when the mod-app decides whether to require authentication (e.g. serving public content to unauthenticated users). It is a configuration concern when the server enforces authentication at the routing layer via route groups.
+
+### Route-Level `authn` and `role` Filtering
+
+Individual routes may carry their own `authn` (scalar filter) and `role` properties, with the same semantics as qualified route-group `authn`/`role`. A route-level value overrides the enclosing group-level value (or top-level default) for that specific route.
+
+**Precedence (most specific wins):** route-level `authn`/`role` > group-level `authn`/`role` > top-level implied `[@allow-known @allow-all]`
+
+**Evaluation order:** Route-level `authn`/`role` are evaluated *before* path matching for that route — consistent with how group-level `authn`/`role` are evaluated before the group's routes are searched. A route with `authn`/`role` that rejects is skipped entirely (path matching is not attempted), exactly as a group is skipped when its `authn`/`role` rejects. Conceptually, a route with `authn`/`role` is an implicit one-route group.
+
+This eliminates the need to define a separate route group solely to attach an authn filter to a single route. The `WWW-Authenticate` challenge pattern from above can be expressed more concisely without named groups:
+
+```slid
+routes=[
+    [path=/api/:*  authn=[@allow-known @deny-all]  pool=standard  app=./apps/api.esm.js]
+    [path=/api/:*  authn=[@allow-all]  response=401  responseText=Unauthorized  headers=[www-authenticate='Basic realm="My App"']]
+]
+```
+
+It also allows these types of related routes to be included in groups (groups may not contain other groups).
+
+**Implementation notes:**
+
+- Route-level `authn`/`role` use the same evaluation logic as group-level (`#evaluateGroupAuthnFilter()` and the role check).
+- If route-level `authn` or `role` rejects, the route is skipped and matching continues with the next route.
+- `requestFilter`/`responseFilter` remain group-level only; per-route filtering is not supported (the `incpre`/`excpre` group pattern covers the primary use case for filtering without per-route granularity).

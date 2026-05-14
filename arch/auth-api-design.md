@@ -655,6 +655,8 @@ auth=[[provider=@basic  realm=MyApp  users=:env:BASIC_AUTH_USERS]]
 - Users loaded from environment variable or config file
 - Maps username to identity
 
+> **Note:** `WWW-Authenticate` challenge headers are a **mod-app concern**, not a server concern. Whether to require authentication (and thus send a `WWW-Authenticate: Basic realm="..."` header on 401) is an application-level decision — a mod-app may choose to serve public content to unauthenticated users rather than challenging them. Mod-apps that require Basic auth should include the appropriate `WWW-Authenticate` header in their 401 response. The `@basic` provider does not inject this header automatically.
+
 ### 8.4 `@session` — Session Cookie Verification
 
 ```slid
@@ -745,9 +747,9 @@ Implement stateless auth in the operator for JWT, API key, and Basic auth:
 
 ### Phase 4: Option C — Auth Service Process with Operator Caching
 
-Implement the auth service process for network-dependent auth:
+Implement the auth sub-process for network-dependent auth:
 
-1. **Auth service process** in `src/auth-service-process.esm.js`
+1. **Auth process** in `src/auth-process.esm.js`
    - Unprivileged external process (like router-process)
    - Loads and runs auth provider modules
    - Communicates with operator via PipeTransport IPC
