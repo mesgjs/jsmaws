@@ -57,7 +57,7 @@ function extractCacheKey (headers, authChain) {
  * OperatorAuthn
  * Manages operator-embedded stateless authn with caching.
  *
- * Top-level authn runs before routing; the result (identity + providerName) is
+ * Top-level authn runs before routing; the result (identity + provider) is
  * passed to the router for route-group authn filtering.
  */
 export class OperatorAuthn {
@@ -85,22 +85,22 @@ export class OperatorAuthn {
 	 * Run top-level authn for a request using the operator-embedded auth chain.
 	 * Checks the cache first; runs the auth chain on cache miss.
 	 *
-	 * Returns an AuthnResult with identity and providerName for use by the router.
-	 * The router uses providerName to evaluate route-group authn scalar filters.
+	 * Returns an AuthnResult with identity and provider for use by the router.
+	 * The router uses provider to evaluate route-group authn scalar filters.
 	 *
 	 * @param {Object} opts
 	 * @param {string} opts.method - HTTP method
 	 * @param {string} opts.url - Full request URL
 	 * @param {Object} opts.headers - Request headers (plain object)
 	 * @param {Array} [opts.topLevelAuthn] - Top-level authn array from config
-	 * @returns {Promise<Object>} AuthnResult: { allow, identity, providerName } or { allow: false, denyStatus, denyMessage }
+	 * @returns {Promise<Object>} AuthnResult: { allow, identity, provider } or { allow: false, denyStatus, denyMessage }
 	 */
 	async runAuthn ({ method, url, headers, topLevelAuthn = [] }) {
 		const authChain = topLevelAuthn ?? [];
 
 		// No auth configured
 		if (!authChain || authChain.length === 0) {
-			return { allow: true, identity: null, providerName: null };
+			return { allow: true, identity: null, provider: null };
 		}
 
 		// Try cache

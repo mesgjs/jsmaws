@@ -72,7 +72,7 @@ Deno.test("runAuthnChain - allows when no auth chain", async () => {
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
-	assertEquals(result.providerName, null);
+	assertEquals(result.provider, null);
 });
 
 Deno.test("runAuthnChain - allows when auth chain is null", async () => {
@@ -81,7 +81,7 @@ Deno.test("runAuthnChain - allows when auth chain is null", async () => {
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
-	assertEquals(result.providerName, null);
+	assertEquals(result.provider, null);
 });
 
 // ============================================================================
@@ -113,7 +113,7 @@ Deno.test("runAuthnChain - stops at first success (does not accumulate identity)
 	// First provider succeeded — chain stopped
 	assertEquals(result.allow, true);
 	assertEquals(result.identity.sub, 'user-from-provider1');
-	assertEquals(result.providerName, 'provider1');
+	assertEquals(result.provider, 'provider1');
 	assertEquals(callCount, 1); // Only first provider called
 });
 
@@ -139,7 +139,7 @@ Deno.test("runAuthnChain - tries next provider when first returns null", async (
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity.sub, 'user-from-provider2');
-	assertEquals(result.providerName, 'provider2');
+	assertEquals(result.provider, 'provider2');
 });
 
 Deno.test("runAuthnChain - allows with null identity when all providers return null", async () => {
@@ -162,7 +162,7 @@ Deno.test("runAuthnChain - allows with null identity when all providers return n
 	// All providers exhausted without success — allow with null identity
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
-	assertEquals(result.providerName, null);
+	assertEquals(result.provider, null);
 });
 
 // ============================================================================
@@ -226,10 +226,10 @@ Deno.test("runAuthnChain - returns 500 on provider runtime error", async () => {
 });
 
 // ============================================================================
-// runAuthnChain Tests - providerName in result
+// runAuthnChain Tests - provider in result
 // ============================================================================
 
-Deno.test("runAuthnChain - includes providerName in success result", async () => {
+Deno.test("runAuthnChain - includes provider in success result", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			return {
@@ -244,7 +244,7 @@ Deno.test("runAuthnChain - includes providerName in success result", async () =>
 	const result = await runAuthnChain(ctx, [{ provider: '@jwt' }], mockLoader);
 
 	assertEquals(result.allow, true);
-	assertEquals(result.providerName, '@jwt');
+	assertEquals(result.provider, '@jwt');
 });
 
 // ============================================================================
@@ -264,7 +264,7 @@ Deno.test("OperatorAuthn - allows when no authn configured", async () => {
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
-	assertEquals(result.providerName, null);
+	assertEquals(result.provider, null);
 });
 
 Deno.test("OperatorAuthn - runs top-level authn chain", async () => {
@@ -290,7 +290,7 @@ Deno.test("OperatorAuthn - runs top-level authn chain", async () => {
 
 	assertEquals(result.allow, true);
 	assertEquals(usedSpec, 'top-level-provider');
-	assertEquals(result.providerName, 'top-level-provider');
+	assertEquals(result.provider, 'top-level-provider');
 });
 
 Deno.test("OperatorAuthn - caches successful authn results", async () => {

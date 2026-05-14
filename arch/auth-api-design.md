@@ -667,10 +667,10 @@ auth=[[provider=@session  cookie=session_id  store=./auth/session-store.esm.js]]
 - Session store is a user-provided module (e.g., Redis, in-memory, file-based)
 - Maps session to identity
 
-### 8.5 `@oauth-introspect` — OAuth 2.0 Token Introspection
+### 8.5 `@oauth-is` — OAuth 2.0 Token Introspection
 
 ```slid
-auth=[[provider=@oauth-introspect  endpoint=https://auth.example.com/introspect  clientId=:env:CLIENT_ID  clientSecret=:env:CLIENT_SECRET]]
+auth=[[provider=@oauth-is  endpoint=https://auth.example.com/introspect  clientId=:env:CLIENT_ID  clientSecret=:env:CLIENT_SECRET]]
 ```
 
 - Calls OAuth 2.0 token introspection endpoint
@@ -723,7 +723,7 @@ Implement built-in providers in `src/auth/`:
 - `src/auth/api-key.esm.js` — `@api-key`
 - `src/auth/basic.esm.js` — `@basic`
 - `src/auth/session.esm.js` — `@session`
-- `src/auth/oauth-introspect.esm.js` — `@oauth-introspect`
+- `src/auth/oauth-introspect.esm.js` — `@oauth-is`
 - `src/auth/allow-all.esm.js` — `@allow-all`
 - `src/auth/deny-all.esm.js` — `@deny-all`
 

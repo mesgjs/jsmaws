@@ -8,7 +8,7 @@
  *   @api-key         → src/auth/api-key.esm.js
  *   @basic           → src/auth/basic.esm.js
  *   @session         → src/auth/session.esm.js
- *   @oauth-introspect → src/auth/oauth-introspect.esm.js
+ *   @oauth-is        → src/auth/oauth-introspect.esm.js
  *
  * Note: @allow-all and @deny-all are routing-layer constructs (scalar filters in
  * route-group authn), not provider modules. They are not loadable via this loader.
@@ -25,9 +25,7 @@ const BUILTIN_PROVIDERS = {
 	'@api-key': './auth/api-key.esm.js',
 	'@basic': './auth/basic.esm.js',
 	'@session': './auth/session.esm.js',
-	'@oauth-introspect': './auth/oauth-introspect.esm.js',
-	// Can we support an alias (like @rfc7662)?
-	// And report whichever name was used in the provider field?
+	'@oauth-is': './auth/oauth-introspect.esm.js',
 };
 
 /**

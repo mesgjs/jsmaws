@@ -370,7 +370,7 @@ export class OperatorProcess {
 		try {
 			if (this.router) {
 				// Run top-level authn before routing (per auth-revisions-20260510.md 2026-05-11-A).
-				// The authn result (identity + providerName) is passed to the router so that
+				// The authn result (identity + provider) is passed to the router so that
 				// route-group scalar authn filters can be evaluated during route matching.
 				const headersObj = Object.fromEntries(req.headers.entries());
 				const authnResult = await this.operatorAuthn.runAuthn({
@@ -397,7 +397,7 @@ export class OperatorProcess {
 				// Build authState for the router (used for route-group authn filter evaluation)
 				const authState = {
 					identity: authnResult.identity ?? null,
-					providerName: authnResult.providerName ?? null,
+					provider: authnResult.provider ?? null,
 				};
 
 				// Pass hostname for hostRoutes (SNI) support; pass authState for route-group authn
@@ -408,33 +408,61 @@ export class OperatorProcess {
 					const { route, match, routeGroup, presentedIdentity } = routeMatch;
 
 					// Handle response codes (redirects, 404, etc.)
-					if (route.response) {
-						const status = typeof route.response === 'string'
-							? parseInt(route.response.split(' ')[0])
-							: route.response;
+						if (route.response) {
+							const status = typeof route.response === 'string'
+								? parseInt(route.response.split(' ')[0])
+								: route.response;
 
-						if (route.href) {
+							if (route.href) {
+								const duration = (Date.now() - startTime) / 1000;
+								this.logger.logRequest(req.method, url.pathname, status, 0, duration, remote);
+
+								// Build redirect response headers (include any route-level headers)
+								const redirectHeaders = { 'Location': route.href };
+								if (route.headers && typeof route.headers === 'object') {
+									for (const [name, value] of Object.entries(route.headers)) {
+										redirectHeaders[name] = String(value);
+									}
+								}
+
+								return new Response(null, {
+									status,
+									headers: redirectHeaders,
+								});
+							}
+
+							// Non-redirect response route: use responseText if provided, else JSON error body
+							let body;
+							let contentType;
+							if (route.responseText != null) {
+								// Use configured plain-text body (e.g. "Unauthorized")
+								body = route.responseText;
+								contentType = 'text/plain';
+							} else {
+								// Default JSON error body
+								body = JSON.stringify({
+									error: `${status} ${route.response}`,
+									path: url.pathname,
+								});
+								contentType = 'application/json';
+							}
+
+							// Build response headers (include any route-level headers)
+							const responseHeaders = { 'content-type': contentType };
+							if (route.headers && typeof route.headers === 'object') {
+								for (const [name, value] of Object.entries(route.headers)) {
+									responseHeaders[name] = String(value);
+								}
+							}
+
 							const duration = (Date.now() - startTime) / 1000;
-							this.logger.logRequest(req.method, url.pathname, status, 0, duration, remote);
+							this.logger.logRequest(req.method, url.pathname, status, body.length, duration, remote);
 
-							return new Response(null, {
+							return new Response(body, {
 								status,
-								headers: { 'Location': route.href },
+								headers: responseHeaders,
 							});
 						}
-
-						const body = JSON.stringify({
-							error: `${status} ${route.response}`,
-							path: url.pathname,
-						});
-						const duration = (Date.now() - startTime) / 1000;
-						this.logger.logRequest(req.method, url.pathname, status, body.length, duration, remote);
-
-						return new Response(body, {
-							status,
-							headers: { 'content-type': 'application/json' },
-						});
-					}
 
 					// Determine effective requestFilter and responseFilter.
 					// Route-group level overrides top-level (per auth-revisions-20260510.md).

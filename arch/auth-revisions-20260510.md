@@ -134,7 +134,7 @@ These configuration extensions add support for host (SNI)-based routing.
   - Maintenance mode is handled at the routing layer (e.g. a catch-all response route with `response=302 href=/maintenance`)
 - `@allow-all` (top-level provider) is renamed to `@test-identity` to avoid confusion with the routing-layer `@allow-all` construct
   - `@test-identity` always returns a configurable identity; intended for development and testing
-- The `providerName` field is added to the success `AuthResult` (the spec string used to load the provider, e.g. `@jwt`); used by route-group authn filter to match the active identity's provider
+- The `provider` field is added to the success `AuthResult` (the spec string used to load the provider, e.g. `@jwt`); used by route-group authn filter to match the active identity's provider
 
 ## Changes And Clarifications 2026-05-14-A
 

@@ -799,3 +799,297 @@ Deno.test("E2E Auth - @test-identity always succeeds with configurable identity"
 		await stopTestServer(operator);
 	}
 });
+
+// ============================================================================
+// Response Route responseText and headers Tests
+// ============================================================================
+
+Deno.test("E2E Auth - response route with responseText returns plain-text body", async () => {
+	// Response route with responseText: returns plain-text body instead of JSON error
+	const { operator } = await createTestServer({
+		routes: [
+			{ path: '/gone', response: 410, responseText: 'This resource is gone.' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		const response = await fetchWithTimeout(`${baseUrl}/gone`);
+
+		assertEquals(response.status, 410);
+		assertEquals(response.headers.get('content-type'), 'text/plain');
+		const body = await response.text();
+		assertEquals(body, 'This resource is gone.');
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - response route with headers includes custom response headers", async () => {
+	// Response route with headers: includes custom headers in response
+	const { operator } = await createTestServer({
+		routes: [
+			{
+				path: '/auth-required',
+				response: 401,
+				responseText: 'Unauthorized',
+				headers: { 'www-authenticate': 'Basic realm="My App"' },
+			},
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		const response = await fetchWithTimeout(`${baseUrl}/auth-required`);
+
+		assertEquals(response.status, 401);
+		assertEquals(response.headers.get('www-authenticate'), 'Basic realm="My App"');
+		const body = await response.text();
+		assertEquals(body, 'Unauthorized');
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - WWW-Authenticate challenge pattern with route groups", async () => {
+	// Pattern from auth-revisions-20260510.md 2026-05-14-A:
+	// Group 1 (protected): @allow-known @deny-all — dispatches to mod-app when authenticated
+	// Group 2 (challenge): @allow-all — returns 401 with WWW-Authenticate when not authenticated
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@api-key', keys: 'valid-key' },
+		],
+		routeGroups: {
+			protected: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/api/:*', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+			challenge: {
+				authn: '@allow-all',
+				routes: [
+					{
+						path: '/api/:*',
+						response: 401,
+						responseText: 'Unauthorized',
+						headers: { 'www-authenticate': 'Basic realm="My App"' },
+					},
+				],
+			},
+		},
+		routes: [
+			{ group: 'protected' },
+			{ group: 'challenge' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		// Authenticated request — dispatches to mod-app
+		const authedResponse = await fetchWithTimeout(`${baseUrl}/api/test`, {
+			headers: { 'x-api-key': 'valid-key' },
+		});
+		assertEquals(authedResponse.status, 200);
+		const authedBody = await authedResponse.json();
+		assertEquals(authedBody.authenticated, true);
+		assertEquals(authedBody.identity.sub, 'valid-key');
+
+		// Unauthenticated request — returns 401 with WWW-Authenticate
+		const unauthResponse = await fetchWithTimeout(`${baseUrl}/api/test`);
+		assertEquals(unauthResponse.status, 401);
+		assertEquals(unauthResponse.headers.get('www-authenticate'), 'Basic realm="My App"');
+		const unauthBody = await unauthResponse.text();
+		assertEquals(unauthBody, 'Unauthorized');
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+// ============================================================================
+// Route-Level authn/role Filtering Tests
+// ============================================================================
+
+Deno.test("E2E Auth - route-level @allow-known requires identity", async () => {
+	// Route-level authn: @allow-known @deny-all — only allows if identity present
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@api-key', keys: 'valid-key' },
+		],
+		routes: [
+			{ path: '/protected', authn: ['@allow-known', '@deny-all'], app: AUTH_ECHO_APP, pool: 'fast' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		// Without key — null identity → @allow-known skips route → @deny-all skips route → 404
+		const noKeyResponse = await fetchWithTimeout(`${baseUrl}/protected`);
+		assertEquals(noKeyResponse.status, 404);
+		await noKeyResponse.body?.cancel();
+
+		// With valid key — identity present → @allow-known presents identity → 200
+		const withKeyResponse = await fetchWithTimeout(`${baseUrl}/protected`, {
+			headers: { 'x-api-key': 'valid-key' },
+		});
+		assertEquals(withKeyResponse.status, 200);
+		const body = await withKeyResponse.json();
+		assertEquals(body.identity.sub, 'valid-key');
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - route-level @allow-all suppresses identity", async () => {
+	// Route-level authn: @allow-all — allows all, suppresses identity
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@api-key', keys: 'valid-key' },
+		],
+		routes: [
+			{ path: '/public', authn: '@allow-all', app: AUTH_ECHO_APP, pool: 'fast' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		// With valid key — @allow-all suppresses identity
+		const response = await fetchWithTimeout(`${baseUrl}/public`, {
+			headers: { 'x-api-key': 'valid-key' },
+		});
+		assertEquals(response.status, 200);
+		const body = await response.json();
+		assertEquals(body.authenticated, false); // Identity suppressed
+		assertEquals(body.identity, null);
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - WWW-Authenticate challenge pattern with route-level authn (inline)", async () => {
+	// Inline pattern from auth-revisions-20260510.md 2026-05-14-A (no named groups needed):
+	// Route 1: @allow-known @deny-all — dispatches to mod-app when authenticated
+	// Route 2: @allow-all — returns 401 with WWW-Authenticate when not authenticated
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@api-key', keys: 'valid-key' },
+		],
+		routes: [
+			{
+				path: '/api/:*',
+				authn: ['@allow-known', '@deny-all'],
+				app: AUTH_ECHO_APP,
+				pool: 'fast',
+			},
+			{
+				path: '/api/:*',
+				authn: '@allow-all',
+				response: 401,
+				responseText: 'Unauthorized',
+				headers: { 'www-authenticate': 'Basic realm="My App"' },
+			},
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		// Authenticated request — dispatches to mod-app
+		const authedResponse = await fetchWithTimeout(`${baseUrl}/api/test`, {
+			headers: { 'x-api-key': 'valid-key' },
+		});
+		assertEquals(authedResponse.status, 200);
+		const authedBody = await authedResponse.json();
+		assertEquals(authedBody.authenticated, true);
+
+		// Unauthenticated request — returns 401 with WWW-Authenticate
+		const unauthResponse = await fetchWithTimeout(`${baseUrl}/api/test`);
+		assertEquals(unauthResponse.status, 401);
+		assertEquals(unauthResponse.headers.get('www-authenticate'), 'Basic realm="My App"');
+		const unauthBody = await unauthResponse.text();
+		assertEquals(unauthBody, 'Unauthorized');
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - route-level role check passes when user has required role", async () => {
+	const token = await createTestJwt(
+		{ sub: 'admin-user', roles: ['admin', 'user'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@jwt', secret: JWT_SECRET, algorithm: 'HS256' },
+		],
+		routes: [
+			{ path: '/admin', role: 'admin', app: AUTH_ECHO_APP, pool: 'fast' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		const response = await fetchWithTimeout(`${baseUrl}/admin`, {
+			headers: { authorization: `Bearer ${token}` },
+		});
+
+		assertEquals(response.status, 200);
+		const body = await response.json();
+		assertEquals(body.identity.sub, 'admin-user');
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - route-level role check skips route when user lacks required role", async () => {
+	const token = await createTestJwt(
+		{ sub: 'regular-user', roles: ['user'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@jwt', secret: JWT_SECRET, algorithm: 'HS256' },
+		],
+		routes: [
+			{ path: '/admin', role: 'admin', app: AUTH_ECHO_APP, pool: 'fast' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		const response = await fetchWithTimeout(`${baseUrl}/admin`, {
+			headers: { authorization: `Bearer ${token}` },
+		});
+
+		// User lacks 'admin' role → route skipped → 404
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});

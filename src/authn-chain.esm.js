@@ -29,9 +29,9 @@ import { authProviderLoader } from './auth-provider-loader.esm.js';
  * @returns {Promise<AuthnResult>} Authn result
  *
  * AuthnResult (allow):
- *   { allow: true, identity: Object|null, providerName: string|null }
+ *   { allow: true, identity: Object|null, provider: string|null }
  *   - identity: populated by the first successful auth provider (sub, roles, claims, provider)
- *   - providerName: the provider spec string that succeeded (e.g. '@jwt'), or null if no auth
+ *   - provider: the provider spec string that succeeded (e.g. '@jwt'), or null if no auth
  *
  * AuthnResult (deny):
  *   { allow: false, denyStatus: number, denyMessage: string }
@@ -45,7 +45,7 @@ import { authProviderLoader } from './auth-provider-loader.esm.js';
 export async function runAuthnChain (ctx, authChain, loader = authProviderLoader) {
 	if (!authChain || !Array.isArray(authChain) || authChain.length === 0) {
 		// No auth configured — allow with null identity
-		return { allow: true, identity: null, providerName: null };
+		return { allow: true, identity: null, provider: null };
 	}
 
 	for (const providerConfig of authChain) {
@@ -99,12 +99,12 @@ export async function runAuthnChain (ctx, authChain, loader = authProviderLoader
 		return {
 			allow: true,
 			identity: result.identity ?? null,
-			providerName: providerSpec,
+			provider: providerSpec,
 		};
 	}
 
 	// All providers exhausted without success — allow with null identity
-	return { allow: true, identity: null, providerName: null };
+	return { allow: true, identity: null, provider: null };
 }
 
 /**

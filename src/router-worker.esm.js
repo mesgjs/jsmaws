@@ -27,6 +27,13 @@
 import { NANOS } from '@nanos';
 import { Configuration } from './configuration.esm.js';
 
+const rolesIntersect = (has, needs) => {
+	if (!Array.isArray(needs)) needs = [needs];
+	if (!has) return needs.length === 0;
+	const intersects = (small, large) => small.some((value) => large.includes(value));
+	return (has.length <= needs.length) ? intersects(has, needs) : intersects(needs, has);
+}
+
 /**
  * Route specification parsed from SLID configuration
  */
@@ -43,6 +50,7 @@ class Route {
 		this.app = null; // Mod-app path (or @static for static files)
 		this.root = null; // Local root directory
 		this.headers = {}; // Response headers (plain object)
+		this.responseText = null; // Optional plain-text body for response routes
 		this.isFilesystem = false; // Filesystem route (requires FS access)
 		this.isVirtual = false; // Virtual route (explicit app or response)
 
@@ -362,8 +370,18 @@ class Route {
 			this.headers = spec.headers;
 		}
 
+		// Parse optional plain-text body for response routes
+		if (spec.responseText != null) {
+			this.responseText = String(spec.responseText);
+		}
+
 		// Classify route type based on parsed data
 		this.classifyRoute();
+	}
+
+	get result () {
+		const { app, headers, href, isFilesystem, isVirtual, method, pool, response, responseText, root } = this;
+		return { app, headers, href, isFilesystem, isVirtual, method, pool, response, responseText, root };
 	}
 
 	/**
@@ -512,14 +530,14 @@ class Router {
 	 * Per auth-revisions-20260510.md 2026-05-11-A.
 	 *
 	 * Values are considered in order until one matches:
-	 *   - A value matching the current identity's providerName → identity is presented
+	 *   - A value matching the current identity's provider → identity is presented
 	 *   - '@allow-known' when a non-empty identity is present → identity is presented
 	 *   - '@allow-all' always matches → identity is suppressed (null to routes)
 	 *   - '@deny-all' always matches → route-group is skipped (return null)
 	 * Implied [@allow-known @allow-all] at end (if no explicit @allow-all or @deny-all).
 	 *
 	 * @param {Array|string} authnSpec - Route-group authn scalar filter (array or single value)
-	 * @param {Object|null} authState - Auth state: { identity, providerName } or null
+	 * @param {Object|null} authState - Auth state: { identity, provider } or null
 	 * @returns {{ presented: boolean, identity: Object|null }|null}
 	 *   null = group is skipped (@deny-all or no match before implied end)
 	 *   { presented: true, identity } = identity is presented
@@ -527,7 +545,7 @@ class Router {
 	 */
 	#evaluateGroupAuthnFilter (authnSpec, authState) {
 		const identity = authState?.identity ?? null;
-		const providerName = authState?.providerName ?? null;
+		const provider = authState?.provider ?? null;
 
 		// Normalize to array
 		const values = Array.isArray(authnSpec)
@@ -552,7 +570,7 @@ class Router {
 				continue;
 			}
 			// Provider name match
-			if (value === providerName && identity !== null) {
+			if (value === provider && identity !== null) {
 				return { presented: true, identity };
 			}
 		}
@@ -571,7 +589,7 @@ class Router {
 	 * @param {string} pathname URL pathname
 	 * @param {string} method HTTP method
 	 * @param {string} [hostname] Request hostname (for hostRoutes support)
-	 * @param {Object|null} [authState] Auth state from top-level authn: { identity, providerName }
+	 * @param {Object|null} [authState] Auth state from top-level authn: { identity, provider }
 	 * @returns {Promise<Object|null>} Route match result or null
 	 *   Result: { route, match, routeGroup, presentedIdentity }
 	 *   - routeGroup: the matched group config (or null for top-level routes)
@@ -667,7 +685,7 @@ class Router {
 	 * @param {Array} routeArray - Array of Route objects or group reference objects
 	 * @param {string} pathname - URL pathname
 	 * @param {string} method - HTTP method
-	 * @param {Object|null} authState - Auth state: { identity, providerName } or null
+	 * @param {Object|null} authState - Auth state: { identity, provider } or null
 	 * @returns {Promise<Object|null>} Match result or null
 	 */
 	async #searchRouteArray (routeArray, pathname, method, authState = null) {
@@ -683,6 +701,31 @@ class Router {
 			const route = item;
 			if (!(route instanceof Route)) continue;
 
+			// Route-level authn/role filtering (per auth-revisions-20260510.md 2026-05-14-A).
+			// Evaluated before path matching — route is skipped entirely if filter rejects.
+			// Conceptually, a route with authn/role is an implicit one-route group.
+			let routePresentedIdentity = authState?.identity ?? null;
+			if (route.spec.authn != null || route.spec.role != null) {
+				// Evaluate route-level authn filter (same logic as group-level)
+				if (route.spec.authn != null) {
+					const authnResult = this.#evaluateGroupAuthnFilter(route.spec.authn, authState);
+					if (authnResult === null) {
+						// @deny-all or no match — skip this route
+						continue;
+					}
+					routePresentedIdentity = authnResult.identity;
+				}
+
+				// Role check: always performed if present; fails if identity is null or suppressed
+				if (route.spec.role != null) {
+					if (routePresentedIdentity === null) {
+						// No identity (null or suppressed) — skip route (results in 404)
+						continue;
+					}
+					if (!rolesIntersect(routePresentedIdentity.roles, route.spec.role)) continue;
+				}
+			}
+
 			const match = await route.match(pathname, method);
 			if (match) {
 				// For virtual routes with relative app paths, resolve using appRoot
@@ -691,9 +734,7 @@ class Router {
 					match.app = `${this.config.routing.appRoot}${match.app}`;
 				}
 
-				// Top-level routes: identity is presented as-is (no group authn filter)
-				const presentedIdentity = authState?.identity ?? null;
-				return { route, match, routeGroup: null, presentedIdentity };
+				return { route, match, routeGroup: null, presentedIdentity: routePresentedIdentity };
 			}
 		}
 		return null;
@@ -709,7 +750,7 @@ class Router {
 	 * @param {string} groupName - Name of the route group
 	 * @param {string} pathname - URL pathname
 	 * @param {string} method - HTTP method
-	 * @param {Object|null} authState - Auth state: { identity, providerName } or null
+	 * @param {Object|null} authState - Auth state: { identity, provider } or null
 	 * @returns {Promise<Object|null>} Match result (with routeGroup and presentedIdentity set) or null
 	 */
 	async #searchRouteGroup (groupName, pathname, method, authState = null) {
@@ -749,21 +790,13 @@ class Router {
 			}
 
 			// Role check: always performed if present; fails if identity is null or suppressed
-			if (groupConfig.role != null) {
-				if (presentedIdentity === null) {
-					// No identity (null or suppressed) — skip group (results in 404)
-					return null;
+				if (groupConfig.role != null) {
+					if (presentedIdentity === null) {
+						// No identity (null or suppressed) — skip group (results in 404)
+						return null;
+					}
+					if (!rolesIntersect(presentedIdentity.roles, groupConfig.role)) return null;
 				}
-				const requiredRoles = Array.isArray(groupConfig.role)
-					? groupConfig.role
-					: [groupConfig.role];
-				const identityRoles = presentedIdentity.roles ?? [];
-				const hasRole = requiredRoles.some(r => identityRoles.includes(r));
-				if (!hasRole) {
-					// Role check failed — skip group (results in 404)
-					return null;
-				}
-			}
 		} else {
 			console.warn(`Invalid route group definition: ${groupName}`);
 			return null;
@@ -789,6 +822,33 @@ class Router {
 				continue;
 			}
 
+			// Route-level authn/role filtering (per auth-revisions-20260510.md 2026-05-14-A).
+			// Evaluated before path matching — route is skipped entirely if filter rejects.
+			// Route-level authn/role overrides the enclosing group-level authn/role for this route.
+			// The authState used here is the original (pre-group-filter) authState, so that
+			// route-level authn can independently re-evaluate the identity.
+			let routePresentedIdentity = presentedIdentity;
+			if (routeSpec.authn != null || routeSpec.role != null) {
+				// Route-level authn overrides group-level: re-evaluate from original authState
+				if (routeSpec.authn != null) {
+					const authnResult = this.#evaluateGroupAuthnFilter(routeSpec.authn, authState);
+					if (authnResult === null) {
+						// @deny-all or no match — skip this route
+						continue;
+					}
+					routePresentedIdentity = authnResult.identity;
+				}
+
+				// Role check: always performed if present; fails if identity is null or suppressed
+				if (routeSpec.role != null) {
+					if (routePresentedIdentity === null) {
+						// No identity (null or suppressed) — skip route (results in 404)
+						continue;
+					}
+					if (!rolesIntersect(routePresentedIdentity.roles, routeSpec.role)) continue;
+				}
+			}
+
 			const match = await route.match(pathname, method);
 			if (match) {
 				// For virtual routes with relative app paths, resolve using appRoot
@@ -797,7 +857,7 @@ class Router {
 					match.app = `${this.config.routing.appRoot}${match.app}`;
 				}
 
-				return { route, match, routeGroup: groupConfig, presentedIdentity };
+				return { route, match, routeGroup: groupConfig, presentedIdentity: routePresentedIdentity };
 			}
 		}
 
@@ -859,16 +919,7 @@ if (typeof self !== 'undefined' && self.postMessage) {
 					id,
 					success: true,
 					result: result ? {
-						route: {
-							pool: result.route.pool,
-							method: result.route.method,
-							response: result.route.response,
-							href: result.route.href, // target href for redirects
-							app: result.route.app, // *route* app, *if present*
-							root: result.route.root, // *route* root, *if present*
-							isFilesystem: result.route.isFilesystem,
-							isVirtual: result.route.isVirtual,
-						},
+						route: result.route.result,
 						match: result.match,
 						routeGroup: result.routeGroup ?? null,
 						presentedIdentity: result.presentedIdentity ?? null,

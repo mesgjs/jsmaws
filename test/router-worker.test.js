@@ -1094,7 +1094,7 @@ Deno.test("Router - findRoute returns routeGroup with scalar authn filter and fi
 	const router = new Router(config);
 
 	// With identity present, @allow-known presents the identity
-	const authState = { identity: { sub: 'user-123', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'user-123', roles: [], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/secure', 'GET', null, authState);
 
 	assertExists(result);
@@ -1121,7 +1121,7 @@ Deno.test("Router - route group @allow-known presents identity when present", as
 	});
 	const router = new Router(config);
 
-	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/known', 'GET', null, authState);
 
 	assertExists(result);
@@ -1143,7 +1143,7 @@ Deno.test("Router - route group @allow-known with implied @allow-all allows null
 	const router = new Router(config);
 
 	// No identity — @allow-known doesn't match, implied @allow-all at end suppresses identity
-	const authState = { identity: null, providerName: null };
+	const authState = { identity: null, provider: null };
 	const result = await router.findRoute('/api/known', 'GET', null, authState);
 
 	// Implied @allow-all at end allows the request with null identity
@@ -1168,7 +1168,7 @@ Deno.test("Router - route group [@allow-known @deny-all] skips group when no ide
 	const router = new Router(config);
 
 	// No identity — @allow-known doesn't match, @deny-all skips the group
-	const authState = { identity: null, providerName: null };
+	const authState = { identity: null, provider: null };
 	const result = await router.findRoute('/api/known', 'GET', null, authState);
 
 	// @deny-all skips the group; falls through to fallback
@@ -1188,7 +1188,7 @@ Deno.test("Router - route group @allow-all suppresses identity", async () => {
 	});
 	const router = new Router(config);
 
-	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/public', 'GET', null, authState);
 
 	assertExists(result);
@@ -1210,7 +1210,7 @@ Deno.test("Router - route group @deny-all skips group", async () => {
 	});
 	const router = new Router(config);
 
-	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/denied', 'GET', null, authState);
 
 	// @deny-all skips the group; falls through to fallback
@@ -1230,7 +1230,7 @@ Deno.test("Router - route group provider name filter presents identity when prov
 	});
 	const router = new Router(config);
 
-	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/jwt-only', 'GET', null, authState);
 
 	assertExists(result);
@@ -1252,7 +1252,7 @@ Deno.test("Router - route group provider name filter with @allow-all allows non-
 	const router = new Router(config);
 
 	// API key user — not @jwt, so group is skipped (implied @allow-all at end suppresses)
-	const authState = { identity: { sub: 'api-user', roles: [], provider: '@api-key' }, providerName: '@api-key' };
+	const authState = { identity: { sub: 'api-user', roles: [], provider: '@api-key' }, provider: '@api-key' };
 	const result = await router.findRoute('/api/jwt-only', 'GET', null, authState);
 
 	// Falls through to fallback (implied @allow-all at end)
@@ -1273,7 +1273,7 @@ Deno.test("Router - route group role check passes when identity has required rol
 	});
 	const router = new Router(config);
 
-	const authState = { identity: { sub: 'alice', roles: ['admin', 'user'], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'alice', roles: ['admin', 'user'], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/admin', 'GET', null, authState);
 
 	assertExists(result);
@@ -1297,7 +1297,7 @@ Deno.test("Router - route group role check skips group when identity lacks requi
 	const router = new Router(config);
 
 	// User without admin role — role check fails, group skipped
-	const authState = { identity: { sub: 'alice', roles: ['user'], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'alice', roles: ['user'], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/admin', 'GET', null, authState);
 
 	assertExists(result);
@@ -1320,7 +1320,7 @@ Deno.test("Router - route group role check skips group when identity is null", a
 	const router = new Router(config);
 
 	// No identity — role check fails (null identity), group skipped
-	const authState = { identity: null, providerName: null };
+	const authState = { identity: null, provider: null };
 	const result = await router.findRoute('/api/admin', 'GET', null, authState);
 
 	assertExists(result);
@@ -1333,7 +1333,7 @@ Deno.test("Router - top-level routes present identity as-is (no filter)", async 
 	});
 	const router = new Router(config);
 
-	const authState = { identity: { sub: 'alice', roles: ['user'], provider: '@jwt' }, providerName: '@jwt' };
+	const authState = { identity: { sub: 'alice', roles: ['user'], provider: '@jwt' }, provider: '@jwt' };
 	const result = await router.findRoute('/api/users', 'GET', null, authState);
 
 	assertExists(result);
@@ -1478,4 +1478,341 @@ Deno.test("Router - findRoute supports group references in hostRoutes", async ()
 	const result = await router.findRoute('/api/users', 'GET', 'api.example.com');
 	assertExists(result);
 	assertEquals(result.match.app, '/users.esm.js');
+});
+
+// ============================================================================
+// Route Class - responseText and headers Tests
+// ============================================================================
+
+Deno.test("Route - parses responseText property", () => {
+	const route = new Route({ path: 'api/auth', response: 401, responseText: 'Unauthorized' });
+
+	assertEquals(route.responseText, 'Unauthorized');
+	assertEquals(route.response, 401);
+});
+
+Deno.test("Route - responseText defaults to null when not specified", () => {
+	const route = new Route({ path: 'api/auth', response: 401 });
+
+	assertEquals(route.responseText, null);
+});
+
+Deno.test("Route - parses headers property for response routes", () => {
+	const route = new Route({
+		path: 'api/auth',
+		response: 401,
+		headers: { 'www-authenticate': 'Basic realm="My App"' },
+	});
+
+	assertEquals(route.headers['www-authenticate'], 'Basic realm="My App"');
+});
+
+Deno.test("Route - headers defaults to empty object when not specified", () => {
+	const route = new Route({ path: 'api/auth', response: 401 });
+
+	assertEquals(typeof route.headers, 'object');
+	assertEquals(Object.keys(route.headers).length, 0);
+});
+
+Deno.test("Route - result getter includes responseText and headers", () => {
+	const route = new Route({
+		path: 'api/auth',
+		response: 401,
+		responseText: 'Unauthorized',
+		headers: { 'www-authenticate': 'Basic realm="My App"' },
+	});
+
+	const result = route.result;
+	assertEquals(result.responseText, 'Unauthorized');
+	assertEquals(result.headers['www-authenticate'], 'Basic realm="My App"');
+	assertEquals(result.response, 401);
+});
+
+Deno.test("Router - findRoute returns responseText and headers for response routes", async () => {
+	const config = new Configuration({
+		routes: [
+			{
+				path: 'api/protected',
+				response: 401,
+				responseText: 'Unauthorized',
+				headers: { 'www-authenticate': 'Basic realm="My App"' },
+			},
+		],
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/protected', 'GET');
+
+	assertExists(result);
+	assertEquals(result.route.response, 401);
+	assertEquals(result.route.responseText, 'Unauthorized');
+	assertEquals(result.route.headers['www-authenticate'], 'Basic realm="My App"');
+});
+
+Deno.test("Router - findRoute returns responseText and headers from route group", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'challengeGroup' }],
+		routeGroups: {
+			challengeGroup: {
+				authn: '@allow-all',
+				routes: [
+					{
+						path: 'api/protected',
+						response: 401,
+						responseText: 'Unauthorized',
+						headers: { 'www-authenticate': 'Basic realm="My App"' },
+					},
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/protected', 'GET');
+
+	assertExists(result);
+	assertEquals(result.route.response, 401);
+	assertEquals(result.route.responseText, 'Unauthorized');
+	assertEquals(result.route.headers['www-authenticate'], 'Basic realm="My App"');
+});
+
+// ============================================================================
+// Router Class - Route-Level authn/role Filtering Tests
+// ============================================================================
+
+Deno.test("Router - route-level @allow-known presents identity when present", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/protected', authn: '@allow-known', app: '/protected.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
+	const result = await router.findRoute('/api/protected', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.presentedIdentity.sub, 'alice');
+});
+
+Deno.test("Router - route-level @allow-known skips route when no identity (implied @allow-all at end)", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/protected', authn: '@allow-known', app: '/protected.esm.js' },
+			{ path: 'api/protected', app: '/fallback.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	// No identity — @allow-known doesn't match, implied @allow-all at end matches without identity
+	const authState = { identity: null, provider: null };
+	const result = await router.findRoute('/api/protected', 'GET', null, authState);
+
+	// Implied @allow-all at end allows the request with null identity
+	assertExists(result);
+	assertEquals(result.match.app, '/protected.esm.js'); // Matches via implied @allow-all
+	assertEquals(result.presentedIdentity, null);
+});
+
+Deno.test("Router - route-level [@allow-known @deny-all] skips route when no identity", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/protected', authn: ['@allow-known', '@deny-all'], app: '/protected.esm.js' },
+			{ path: 'api/protected', app: '/fallback.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	// No identity — @allow-known doesn't match, @deny-all skips the route
+	const authState = { identity: null, provider: null };
+	const result = await router.findRoute('/api/protected', 'GET', null, authState);
+
+	// @deny-all skips the route; falls through to fallback
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - route-level @allow-all suppresses identity", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/public', authn: '@allow-all', app: '/public.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
+	const result = await router.findRoute('/api/public', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.presentedIdentity, null); // Identity suppressed by @allow-all
+});
+
+Deno.test("Router - route-level @deny-all skips route", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/denied', authn: '@deny-all', app: '/denied.esm.js' },
+			{ path: 'api/denied', app: '/fallback.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
+	const result = await router.findRoute('/api/denied', 'GET', null, authState);
+
+	// @deny-all skips the route; falls through to fallback
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - route-level authn overrides group-level authn", async () => {
+	// Group has @allow-all (suppresses identity), but route has @allow-known (presents identity)
+	const config = new Configuration({
+		routes: [{ group: 'publicGroup' }],
+		routeGroups: {
+			publicGroup: {
+				authn: '@allow-all', // Group suppresses identity
+				routes: [
+					// Route overrides with @allow-known — presents identity if present
+					{ path: 'api/mixed', authn: '@allow-known', app: '/mixed.esm.js' },
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
+	const result = await router.findRoute('/api/mixed', 'GET', null, authState);
+
+	assertExists(result);
+	// Route-level @allow-known overrides group-level @allow-all; identity is presented
+	assertEquals(result.presentedIdentity.sub, 'alice');
+});
+
+Deno.test("Router - route-level role check passes when identity has required role", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/admin', role: 'admin', app: '/admin.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: ['admin', 'user'], provider: '@jwt' }, provider: '@jwt' };
+	const result = await router.findRoute('/api/admin', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.match.app, '/admin.esm.js');
+	assertEquals(result.presentedIdentity.sub, 'alice');
+});
+
+Deno.test("Router - route-level role check skips route when identity lacks required role", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/admin', role: 'admin', app: '/admin.esm.js' },
+			{ path: 'api/admin', app: '/fallback.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	// User without admin role — role check fails, route skipped
+	const authState = { identity: { sub: 'alice', roles: ['user'], provider: '@jwt' }, provider: '@jwt' };
+	const result = await router.findRoute('/api/admin', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - route-level role check skips route when identity is null", async () => {
+	const config = new Configuration({
+		routes: [
+			{ path: 'api/admin', role: 'admin', app: '/admin.esm.js' },
+			{ path: 'api/admin', app: '/fallback.esm.js' },
+		],
+	});
+	const router = new Router(config);
+
+	// No identity — role check fails (null identity), route skipped
+	const authState = { identity: null, provider: null };
+	const result = await router.findRoute('/api/admin', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - route-level authn/role on response route (WWW-Authenticate challenge pattern)", async () => {
+	// Pattern from auth-revisions-20260510.md 2026-05-14-A:
+	// Route 1: @allow-known @deny-all — dispatches to mod-app when authenticated
+	// Route 2: @allow-all — returns 401 with WWW-Authenticate when not authenticated
+	const config = new Configuration({
+		routes: [
+			{
+				path: 'api/protected',
+				authn: ['@allow-known', '@deny-all'],
+				app: '/api.esm.js',
+			},
+			{
+				path: 'api/protected',
+				authn: '@allow-all',
+				response: 401,
+				responseText: 'Unauthorized',
+				headers: { 'www-authenticate': 'Basic realm="My App"' },
+			},
+		],
+	});
+	const router = new Router(config);
+
+	// Authenticated request — dispatches to mod-app
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
+	const authedResult = await router.findRoute('/api/protected', 'GET', null, authState);
+	assertExists(authedResult);
+	assertEquals(authedResult.match.app, '/api.esm.js');
+	assertEquals(authedResult.presentedIdentity.sub, 'alice');
+
+	// Unauthenticated request — returns 401 challenge
+	const unauthState = { identity: null, provider: null };
+	const unauthResult = await router.findRoute('/api/protected', 'GET', null, unauthState);
+	assertExists(unauthResult);
+	assertEquals(unauthResult.route.response, 401);
+	assertEquals(unauthResult.route.responseText, 'Unauthorized');
+	assertEquals(unauthResult.route.headers['www-authenticate'], 'Basic realm="My App"');
+	assertEquals(unauthResult.presentedIdentity, null); // Identity suppressed by @allow-all
+});
+
+Deno.test("Router - route-level authn inside group (protected+challenge pair in group)", async () => {
+	// Pattern: protected+challenge route pairs inside a group (groups may not contain other groups)
+	const config = new Configuration({
+		routes: [{ group: 'apiGroup' }],
+		routeGroups: {
+			apiGroup: {
+				incpre: '/api',
+				routes: [
+					{
+						path: 'api/protected',
+						authn: ['@allow-known', '@deny-all'],
+						app: '/api.esm.js',
+					},
+					{
+						path: 'api/protected',
+						authn: '@allow-all',
+						response: 401,
+						responseText: 'Unauthorized',
+						headers: { 'www-authenticate': 'Basic realm="My App"' },
+					},
+				],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// Authenticated request — dispatches to mod-app
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, provider: '@jwt' };
+	const authedResult = await router.findRoute('/api/protected', 'GET', null, authState);
+	assertExists(authedResult);
+	assertEquals(authedResult.match.app, '/api.esm.js');
+
+	// Unauthenticated request — returns 401 challenge
+	const unauthState = { identity: null, provider: null };
+	const unauthResult = await router.findRoute('/api/protected', 'GET', null, unauthState);
+	assertExists(unauthResult);
+	assertEquals(unauthResult.route.response, 401);
+	assertEquals(unauthResult.route.headers['www-authenticate'], 'Basic realm="My App"');
 });

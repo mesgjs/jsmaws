@@ -28,7 +28,7 @@ export class RouterWorkerProxy {
 	 * @param {string} pathname - URL pathname
 	 * @param {string} method - HTTP method
 	 * @param {string|null} [hostname] - Request hostname (for hostRoutes support)
-	 * @param {Object|null} [authState] - Auth state: { identity, providerName } or null
+	 * @param {Object|null} [authState] - Auth state: { identity, provider } or null
 	 * @returns {Promise<Object|null>} Route match result or null
 	 *   Result: { route, match, routeGroup, presentedIdentity }
 	 */
