@@ -1,6 +1,6 @@
 /**
  * JSMAWS Responder Process
- * Unprivileged service process for executing mod-apps and handling requests
+ * Unprivileged sub-process for executing mod-apps and handling requests
  *
  * This process:
  * - Runs with dropped privileges (unprivileged uid/gid)
@@ -23,14 +23,14 @@
  */
 
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
-import { ServiceProcess } from './service-process.esm.js';
+import { SubProcess } from './sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
 
 /**
  * Responder process class
  * Spawns mod-app workers on-demand to handle requests
  */
-class ResponderProcess extends ServiceProcess {
+export class ResponderProcess extends SubProcess {
 	constructor (processId, poolName) {
 		super('responder', processId);
 		if (typeof poolName !== 'string' || !poolName) throw new Error('ResponderProcess missing required pool name');
@@ -83,7 +83,7 @@ class ResponderProcess extends ServiceProcess {
 
 	/**
 	 * Handle configuration update from operator.
-	 * Called after this.config has been updated by the ServiceProcess base class.
+	 * Called after this.config has been updated by the SubProcess base class.
 	 */
 	async handleConfigUpdate () {
 		console.debug(`[${this.processId}] Received configuration update`);
@@ -585,7 +585,7 @@ class ResponderProcess extends ServiceProcess {
 			gateway: worker,
 			c2cSymbol,
 			maxChunkBytes: this.chunkingConfig.chunkSize,
-			bufferPool: this._bufferPool, // Use shared buffer pool from ServiceProcess base class
+			bufferPool: this._bufferPool, // Use shared buffer pool from SubProcess base class
 		});
 
 		// Accept all channels (responder initiates)
@@ -758,7 +758,7 @@ async function main () {
 	Deno.stderr.writeSync(new TextEncoder().encode(
 		`Responder main pid ${processId} pool ${poolName}\n`
 	));
-	await ServiceProcess.run(ResponderProcess, processId, poolName);
+	await SubProcess.run(ResponderProcess, processId, poolName);
 }
 
 // Run if this is the main module
@@ -768,6 +768,3 @@ if (import.meta.main) {
 		Deno.exit(1);
 	});
 }
-
-// Export for testing
-export { ResponderProcess };

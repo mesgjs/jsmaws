@@ -16,7 +16,7 @@
 - dataSize is a top-level value (like type and id), not a field, and defaults to 0 if omitted
 - In the operator, a line that is not an IPC message is content to be logged
   - To be clear: both stdout and stderr from child processes will contain a mix of IPC messages and log content
-- In service processses, intercept console reporting methods to send a logging level message before calling the original method.
+- In sub-processses, intercept console reporting methods to send a logging level message before calling the original method.
   - Prefix console messages with `\1[(log debug)]\n` or `info` or `log` (to stdout)
   - Prefix console messages with `\1[(log warn)]\n` or `error` (to stderr)
 - In the operator's child stdout and stderr processing, track the most recently received logging level for forwarding console (non-IPC) messages to the logger at the correct level.

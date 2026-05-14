@@ -10,7 +10,7 @@
 import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { makePipeTransportPair } from '@poly-transport-test/transport-pipe-helpers.js';
 import { ResponderProcess } from '../src/responder-process.esm.js';
-import { CONTROL_MESSAGE_TYPES } from '../src/service-process.esm.js';
+import { CONTROL_MESSAGE_TYPES } from '../src/sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from '../src/request-channel-pool.esm.js';
 import { Configuration } from '../src/configuration.esm.js';
 
@@ -315,7 +315,7 @@ Deno.test('ResponderProcess - sendCapacityUpdate sends capacity-update message',
 		const initMsg = await operatorControlChannel.read({ only: 'capacity-update', decode: true });
 		await initMsg.process(() => {});
 
-		// Send a specific capacity update from service process
+		// Send a specific capacity update from sub-process
 		await proc.sendCapacityUpdate(5, 10);
 
 		// Read it on the operator side

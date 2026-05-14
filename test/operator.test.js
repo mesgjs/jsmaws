@@ -4,8 +4,8 @@
  * The operator is the privileged process that:
  * - Binds to HTTP/HTTPS ports
  * - Manages configuration and SSL certificates
- * - Spawns and manages service processes (responders and routers)
- * - Routes requests to appropriate service processes via IPC
+ * - Spawns and manages sub-processes (responders and routers)
+ * - Routes requests to appropriate sub-processes via IPC
  * - Never executes user code directly
  */
 
@@ -352,7 +352,7 @@ Deno.test("OperatorProcess - reload sets flag during reload", async () => {
 // Process Pool Initialization Tests
 // ============================================================================
 
-Deno.test("OperatorProcess - initializeProcessPools with no pools config", async () => {
+Deno.test("OperatorProcess - initializeResponderPools with no pools config", async () => {
 	const operator = new OperatorProcess({ noSSL: true });
 	operator.initializeLogger();
 	operator.initializeProcessManager();
@@ -384,7 +384,7 @@ Deno.test("OperatorProcess - initializeProcessPools with no pools config", async
 
 	try {
 		// Should create default pool when none configured
-		await operator.initializeProcessPools();
+		await operator.initializeResponderPools();
 
 		// Verify default pool was created
 		assert(createCalled, 'Expected createProcess to be called for default pool');
@@ -404,11 +404,11 @@ Deno.test("OperatorProcess - initializeProcessPools with no pools config", async
 	}
 });
 
-Deno.test("OperatorProcess - initializeProcessPools with empty pools config", async () => {
+Deno.test("OperatorProcess - initializeResponderPools with empty pools config", async () => {
 	const operator = new OperatorProcess({ noSSL: true, pools: {} });
 	operator.initializeLogger();
 	operator.initializeProcessManager();
 
 	// Should not throw with empty pools
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 });

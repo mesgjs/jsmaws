@@ -3,7 +3,7 @@
  * Runs stateless auth providers inline in the operator process.
  *
  * This module handles authn for stateless methods (JWT, API key, Basic) that
- * run directly in the operator without an external auth service process.
+ * run directly in the operator without an external auth sub-process.
  * Results are cached in an OperatorAuthnCache for server-lifetime efficiency.
  *
  * Auth chain resolution (per auth-revisions-20260510.md):

@@ -734,10 +734,10 @@ import {
 Delete these methods:
 - `handleWebResponse()` - ❌ Remove (replaced by unified frame handling)
 
-### 5.3 Update `forwardToServiceProcess()` Method
+### 5.3 Update `forwardToResponder()` Method
 
 ```javascript
-async forwardToServiceProcess (req, route, match, remote) {
+async forwardToResponder (req, route, match, remote) {
 	// ... existing code to prepare request ...
 	
 	try {

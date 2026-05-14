@@ -14,7 +14,7 @@ The current operator request handling uses handler swapping to manage different 
 ## Current Flow (Problematic)
 
 ```
-forwardToServiceProcess()
+forwardToResponder()
   ├─> Register handler #1 (capture first frame)
   ├─> Send request
   ├─> Wait for first frame
@@ -284,7 +284,7 @@ function handleError(context, error, operator) {
 ### Main Request Flow
 
 ```javascript
-async forwardToServiceProcess(req, route, match, remote) {
+async forwardToResponder(req, route, match, remote) {
   const requestId = generateMessageId('WREQ');
   
   // Create context with initial state
@@ -380,7 +380,7 @@ class OperatorProcess {
 
 1. **Phase 1**: Create RequestContext class and state constants
 2. **Phase 2**: Implement state handler functions
-3. **Phase 3**: Refactor forwardToServiceProcess to use context
+3. **Phase 3**: Refactor forwardToResponder to use context
 4. **Phase 4**: Remove old handler-swapping code
 5. **Phase 5**: Add state transition logging
 6. **Phase 6**: Add comprehensive tests

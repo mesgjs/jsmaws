@@ -50,10 +50,10 @@ Operator Process (privileged)
   │  Advantages: zero IPC overhead; operator cache; enables role-based routing
   │  Disadvantages: auth code runs in privileged process
   │
-  │  [OPTION C] Auth service process (unprivileged, external) with operator caching
+  │  [OPTION C] Auth sub-process (unprivileged, external) with operator caching
   │  Advantages: unprivileged auth code; operator cache; enables role-based routing
   │  Supports: network-dependent auth (OAuth, LDAP, session stores)
-  │  Disadvantages: IPC round-trip on cache miss; requires auth service process
+  │  Disadvantages: IPC round-trip on cache miss; requires auth sub-process
   │
   │  Both options above run BEFORE routing — identity is available for pool selection
   ▼
@@ -74,7 +74,7 @@ Mod-App Worker (sandboxed)
 
 The original design recommended responder-side auth as the primary approach. However, the analysis in Section 3a identifies significant performance and capability limitations of this approach. See Section 3a for a revised assessment.
 
-**Revised recommendation: Option C (auth service process + operator cache) for full-featured deployments; Option D (operator-embedded) for stateless-only auth.**
+**Revised recommendation: Option C (auth sub-process + operator cache) for full-featured deployments; Option D (operator-embedded) for stateless-only auth.**
 
 - Both Options C and D run *before* routing, enabling role-based pool selection
 - Option C keeps auth code unprivileged while achieving operator-level cache efficiency
@@ -180,11 +180,11 @@ The only auth methods that genuinely require the responder (due to network calls
 
 **Proposed revised framing**: Operator-side auth should be the *default* for stateless auth methods (JWT, API key, Basic), with responder-side auth reserved for methods that genuinely require network calls or mutable state. The operator's single-instance, server-lifetime cache makes it significantly more efficient for stateless auth.
 
-### Auth Service Process with Operator Caching: A Third Path
+### Auth Sub-Process with Operator Caching: A Third Path
 
 The JSMAWS architecture already uses external processes for routing (the `router-process` when `fsRouting` is enabled) and for request handling (responders). This pattern suggests a third option that combines the best properties of operator-side and responder-side auth:
 
-**An auth service process (unprivileged, external) with operator-side result caching.**
+**An auth sub-process (unprivileged, external) with operator-side result caching.**
 
 ```
 Client
@@ -192,9 +192,9 @@ Client
   ▼
 Operator Process (privileged)
   │  1. Check operator auth cache (hit → use cached identity, proceed to routing)
-  │  2. Cache miss → IPC to auth service process
+  │  2. Cache miss → IPC to auth sub-process
   │                    ↓
-  │              Auth Service Process (unprivileged)
+  │              Auth Sub-Process (unprivileged)
   │              - Runs auth provider modules
   │              - Can make network calls (OAuth, LDAP)
   │              - Returns AuthResult to operator
@@ -209,8 +209,8 @@ Mod-App Worker
 
 **Why this is architecturally consistent:**
 
-- The `router-process` is already an external process that the operator communicates with via IPC for filesystem-based routing. An auth service process follows the same pattern.
-- Responders are already external processes managed by the operator. An auth service process is just another managed process type.
+- The `router-process` is already an external process that the operator communicates with via IPC for filesystem-based routing. An auth sub-process follows the same pattern.
+- Responders are already external processes managed by the operator. An auth sub-process is just another managed process type.
 - The operator already manages process pools; an auth service pool is a natural extension.
 
 **Properties of this approach:**
@@ -220,19 +220,19 @@ Mod-App Worker
 | Auth code privilege | Unprivileged (external process) |
 | Cache location | Operator (server lifetime, single instance) |
 | Cache efficiency | Maximum: same as operator-embedded auth |
-| Network calls | Fully supported (in auth service process) |
+| Network calls | Fully supported (in auth sub-process) |
 | Role-based routing | **Possible** (operator has identity before routing) |
-| Module loading | Once per auth service process lifetime |
+| Module loading | Once per auth sub-process lifetime |
 | Complexity | Higher than embedded auth, lower than full IPC redesign |
 
-**Cache invalidation:** The operator caches `AuthResult` objects keyed by token/credential, with TTL derived from the auth result (e.g., JWT `exp` claim, OAuth introspection `exp`). Cache misses trigger an IPC call to the auth service. The auth service process can be long-lived (like a router process) or pooled.
+**Cache invalidation:** The operator caches `AuthResult` objects keyed by token/credential, with TTL derived from the auth result (e.g., JWT `exp` claim, OAuth introspection `exp`). Cache misses trigger an IPC call to the auth service. The auth sub-process can be long-lived (like a router process) or pooled.
 
 **Comparison with operator-embedded auth:**
 
 - *Security*: Auth code runs unprivileged (better than operator-embedded)
 - *Efficiency*: Identical cache efficiency (operator holds the cache)
 - *Capability*: Supports network calls (better than operator-embedded for OAuth/LDAP)
-- *Complexity*: Requires auth service process management (more complex than operator-embedded)
+- *Complexity*: Requires auth sub-process management (more complex than operator-embedded)
 
 This approach resolves the tension between "auth code should be unprivileged" and "auth results should be cached at the operator level for routing and efficiency." It is the recommended architecture for deployments that need both role-based routing and network-dependent auth (OAuth, LDAP, session stores).
 
@@ -254,7 +254,7 @@ This approach resolves the tension between "auth code should be unprivileged" an
 
 1. **Operator-embedded auth** (stateless only): Best for simple deployments with JWT/API key auth. Low complexity, maximum efficiency, enables role-based routing. Not suitable for OAuth introspection or session stores.
 
-2. **Auth service process + operator cache** (recommended for full-featured deployments): Combines operator-level cache efficiency and role-based routing capability with unprivileged auth code and full network access. Architecturally consistent with the existing router-process pattern. Higher implementation complexity.
+2. **Auth sub-process + operator cache** (recommended for full-featured deployments): Combines operator-level cache efficiency and role-based routing capability with unprivileged auth code and full network access. Architecturally consistent with the existing router-process pattern. Higher implementation complexity.
 
 3. **Responder-side auth** (current design): Simplest to implement. Suitable when role-based routing is not needed and cache efficiency is not a concern. Degrades with more responder processes and more frequent recycling.
 
@@ -442,27 +442,27 @@ Auth is implemented as a special "wrapper mod-app" that runs before the real mod
 
 ---
 
-### Option C: Auth Service Process with Operator Caching (Pre-routing)
+### Option C: Auth Sub-Process with Operator Caching (Pre-routing)
 
-A separate auth service process (unprivileged, external) handles auth decisions. The operator caches results and uses them for routing decisions — before dispatching to a responder pool. This is architecturally consistent with the existing `router-process` pattern.
+A separate auth sub-process (unprivileged, external) handles auth decisions. The operator caches results and uses them for routing decisions — before dispatching to a responder pool. This is architecturally consistent with the existing `router-process` pattern.
 
 **Architecture:**
 
 ```
-Operator → [IPC] → Auth Service Process → [AuthResult] → Operator cache → routing → Responder → Mod-app
+Operator → [IPC] → Auth Sub-Process → [AuthResult] → Operator cache → routing → Responder → Mod-app
 ```
 
 **How it works:**
 
 1. Operator matches route and checks its auth result cache (keyed by token/credential)
 2. Cache hit: operator uses cached identity for routing and forwards to responder with identity attached
-3. Cache miss: operator sends auth request to auth service process via IPC
+3. Cache miss: operator sends auth request to auth sub-process via IPC
 4. Auth service runs configured providers (can make network calls: OAuth, LDAP, session store)
 5. Auth service returns `AuthResult` to operator
 6. Operator caches result (TTL from auth result), uses identity for routing, forwards to responder
 
 **Advantages:**
-- Auth code runs unprivileged (auth service process, not operator)
+- Auth code runs unprivileged (auth sub-process, not operator)
 - Operator cache provides server-lifetime efficiency (single cache, no cold-start on responder restart)
 - Supports network-dependent auth (OAuth introspection, LDAP, session stores)
 - Enables role-based routing (operator has identity before pool dispatch)
@@ -471,7 +471,7 @@ Operator → [IPC] → Auth Service Process → [AuthResult] → Operator cache 
 
 **Disadvantages:**
 - IPC round-trip latency on cache miss (mitigated by operator cache hit rate)
-- Requires auth service process management (new process type)
+- Requires auth sub-process management (new process type)
 - Higher implementation complexity than responder-side auth
 
 **Verdict: Recommended for full-featured deployments** that need both role-based routing and network-dependent auth. The operator cache makes this significantly more efficient than the original Option C framing (responder → auth service), which added IPC latency to every request. See Section 3a for detailed analysis.
@@ -745,7 +745,7 @@ Implement stateless auth in the operator for JWT, API key, and Basic auth:
    - Add `routeCondition` field support (evaluated after auth, before pool dispatch)
    - Support `requireRoles`, `requireIdentity`, `denyRoles` conditions
 
-### Phase 4: Option C — Auth Service Process with Operator Caching
+### Phase 4: Option C — Auth Sub-Process with Operator Caching
 
 Implement the auth sub-process for network-dependent auth:
 
@@ -817,7 +817,7 @@ Implement the auth sub-process for network-dependent auth:
 
 ## 11. Security Considerations
 
-- **Auth provider privilege depends on option**: Option A (responder-side) and Option C (auth service process) run auth code unprivileged. Option D (operator-embedded) runs auth code in the privileged operator process — only trusted, audited providers should be used there.
+- **Auth provider privilege depends on option**: Option A (responder-side) and Option C (auth sub-process) run auth code unprivileged. Option D (operator-embedded) runs auth code in the privileged operator process — only trusted, audited providers should be used there.
 - **Provider modules must be trusted** — they are loaded from the filesystem and run with the permissions of the process that loads them. Administrators should audit provider code.
 - **Secrets should not appear in config files** — use `:env:VAR_NAME` to load from environment variables.
 - **Header filtering prevents header injection** — mod-apps cannot forge request headers that were filtered out inbound, and cannot set response headers that are filtered outbound.
@@ -839,17 +839,17 @@ Implement the auth sub-process for network-dependent auth:
    - **Resolved** Auth failures should be logged at `warn` level with request ID and denial reason (but not the token/credential itself).
 5. **Should there be a way for mod-apps to trigger re-authentication?** (e.g., return a 401 that causes the client to re-authenticate)
    - **Resolved** Mod-apps can already return 401; no special server support needed.
-6. **Which option(s) should be implemented first?** — Option A (responder-side) is simplest and provides immediate value. Options C and D require more design work but are architecturally superior. Recommend implementing Option A first, then Option D (operator-embedded stateless auth), then Option C (auth service process).
+6. **Which option(s) should be implemented first?** — Option A (responder-side) is simplest and provides immediate value. Options C and D require more design work but are architecturally superior. Recommend implementing Option A first, then Option D (operator-embedded stateless auth), then Option C (auth sub-process).
    - **Resolved** Option D, then Option C (do not invest resources implementing option A)
-7. **Should the auth service process (Option C) use the same pool manager as responders?**
+7. **Should the auth sub-process (Option C) use the same pool manager as responders?**
    - **Resolved** Yes, use the generic pool manager. The auth service pool would be a small, long-lived pool (similar to the router-process pool).
 8. **How should the operator cache auth results for Option C?**
    - **Resolved** Cache keyed by token/credential string, with TTL from the auth result. LRU eviction for memory management. Cache size configurable. Invalidation on config reload.
 9. **Should role-based routing use a separate `routeCondition` field, or extend the existing `auth` field?** — A separate `routeCondition` field (evaluated after auth, before pool dispatch) would be cleaner and more composable than embedding role checks in the auth chain.
    - **Resolved** Defer for future development.
-10. **Should the auth service process be a single process or a pool?**
+10. **Should the auth sub-process be a single process or a pool?**
     - **Resolved** A pool is more resilient (one process failure doesn't block all auth). A small static pool (2–4 processes) is likely sufficient for most deployments.
 
 ---
 
-[supplemental keywords: authentication, authorization, JWT, OAuth, API key, session, cookie, header filtering, middleware, auth provider, identity, access control, security, pluggable, modular, responder, pre-flight, rate limiting, RBAC, role-based access control, auth service process, operator cache, pre-routing auth, role-based routing, pool selection, process lifetime, cache efficiency, responder recycling]
+[supplemental keywords: authentication, authorization, JWT, OAuth, API key, session, cookie, header filtering, middleware, auth provider, identity, access control, security, pluggable, modular, responder, pre-flight, rate limiting, RBAC, role-based access control, auth sub-process, operator cache, pre-routing auth, role-based routing, pool selection, process lifetime, cache efficiency, responder recycling]

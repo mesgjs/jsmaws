@@ -8,7 +8,7 @@ This document assesses potential risks for fatal server component errors and def
 
 ### 1. Process Spawn Thrashing
 
-**Risk**: Service processes crash immediately after spawn, causing rapid respawn loops that exhaust system resources.
+**Risk**: Sub-processes crash immediately after spawn, causing rapid respawn loops that exhaust system resources.
 
 **Potential Causes**:
 - Configuration errors (invalid paths, permissions)
@@ -198,7 +198,7 @@ This document assesses potential risks for fatal server component errors and def
        this.queueTimeout = 30000; // 30 seconds
      }
      
-     async forwardToServiceProcess(req, route, match, remote) {
+     async forwardToResponder(req, route, match, remote) {
        const process = this.processManager.findProcessForRequest(poolName, appletPath);
        
        if (!process) {

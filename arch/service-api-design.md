@@ -979,13 +979,8 @@ Custom adapters must implement the adapter interface (see Section 7 — Service 
 
 ### Phase 1: Core Infrastructure
 
-0. **Fix class names and related references (including file names)**
-   - `ServiceProcess` seems like it should be the name for the new class for server service processes
-   - In hindsight, the current `ServiceProcess` (common base class for all sub-processes) was probably non-optimally named and needs to be renamed to something else (e.g. `SubProcess`)
-   - References to be updated include things like `forwardToServiceProcess`, which refer to the previous meaning, not the new meaning
-
 1. **Service process** in `src/service-api-process.esm.js`
-   - Extends `ServiceProcess` base class (like `ResponderProcess`, `RouterProcess`)
+   - Extends `SubProcess` base class (like `ResponderProcess`, `RouterProcess`)
    - JSMAWS calls `Deno.listen()` (Unix domain socket or TCP loopback) and passes accepted connections to `SocketTransport`
    - Loads and initializes service adapters on startup (all adapters for its assigned pool)
    - Manages connection pools for each configured service

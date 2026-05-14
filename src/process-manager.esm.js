@@ -1,9 +1,9 @@
 /**
  * JSMAWS Process Manager
- * Factory for creating and managing service processes (responders and routers)
+ * Factory for creating and managing sub-processes (responders and routers)
  *
  * Responsibilities:
- * - Create service processes with privilege dropping (factory for PoolManager)
+ * - Create sub-processes with privilege dropping (factory for PoolManager)
  * - Monitor process health and lifecycle
  * - Manage PipeTransport connections and C2C console output
  * - Manage RequestChannelPool per process
@@ -18,10 +18,10 @@
 import { PipeTransport } from '@poly-transport/transport/pipe.esm.js';
 import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
 import { RequestChannelPool } from './request-channel-pool.esm.js';
-import { CONTROL_MESSAGE_TYPES } from './service-process.esm.js';
+import { CONTROL_MESSAGE_TYPES } from './sub-process.esm.js';
 
 /**
- * Service process types and associated script paths
+ * Sub-process types and associated script paths
  */
 export const ProcessType = {
 	AUTH: 'auth',
@@ -58,8 +58,8 @@ const C2C_LEVEL_MAP = {
 };
 
 /**
- * Managed service process.
- * Holds all state for a single spawned service process.
+ * Managed sub-process.
+ * Holds all state for a single spawned sub-process.
  */
 class ManagedProcess {
 	/**
@@ -153,7 +153,7 @@ class ManagedProcess {
 
 /**
  * Process Manager
- * Manages all service processes (responders and routers)
+ * Manages all sub-processes (responders and routers)
  */
 export class ProcessManager {
 	constructor (config, logger) {
@@ -186,7 +186,7 @@ export class ProcessManager {
 	}
 
 	/**
-	 * Create a new service process (factory method for PoolManager)
+	 * Create a new sub-process (factory method for PoolManager)
 	 * @param {string} processId Process ID (provided by PoolManager)
 	 * @param {string} type Process type (responder or router)
 	 * @param {string} poolName Pool name
@@ -228,7 +228,7 @@ export class ProcessManager {
 			...(uid && gid && { uid, gid }),
 			stdin: 'piped',
 			stdout: 'piped',
-			// stderr is inherited (not piped): service process console output goes via C2C
+			// stderr is inherited (not piped): sub-process console output goes via C2C
 			// channel on the PipeTransport. Any pre-transport stderr output (e.g. fatal
 			// startup errors before C2C is established) flows to the operator's own stderr.
 			env: {
@@ -484,7 +484,7 @@ export class ProcessManager {
 	}
 
 	/**
-	 * Shutdown a service process (for PoolManager).
+	 * Shutdown a sub-process (for PoolManager).
 	 * @param {ManagedProcess} managedProc Process to shutdown
 	 * @param {number} timeout Shutdown timeout in seconds
 	 */

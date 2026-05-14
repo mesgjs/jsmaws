@@ -389,7 +389,7 @@ const c2c = transport.getChannel(c2cSymbol);
 })();
 ```
 
-**Responder side (in [`src/service-process.esm.js`](../src/service-process.esm.js)):**
+**Responder side (in [`src/sub-process.esm.js`](../src/sub-process.esm.js)):**
 
 ```javascript
 import { PipeTransport } from '@poly-transport/transport/pipe.esm.js';
@@ -972,12 +972,12 @@ NestedTransport — this is completely opaque to JSMAWS.
 | [`src/ipc-protocol.esm.js`](../src/ipc-protocol.esm.js) | **Delete** — replaced by PolyTransport channels and message types |
 | [`src/serializer.esm.js`](../src/serializer.esm.js) | **Delete** — PolyTransport handles write serialization internally |
 | [`src/console-intercept.esm.js`](../src/console-intercept.esm.js) | **Repurpose** — intercept console and write to C2C channel instead of encoding SOH prefixes |
-| [`src/service-process.esm.js`](../src/service-process.esm.js) | **Rewrite** — replace `createIPCConnection()` with `PipeTransport` setup; replace `startMonitoring()` with channel read loops |
+| [`src/sub-process.esm.js`](../src/sub-process.esm.js) | **Rewrite** — replace `createIPCConnection()` with `PipeTransport` setup; replace `startMonitoring()` with channel read loops |
 | [`src/process-manager.esm.js`](../src/process-manager.esm.js) | **Rewrite** — replace `IPCConnection` with `PipeTransport`; replace `sendConfigUpdate()` etc. with channel writes; manage request channel pool |
 | [`src/responder-process.esm.js`](../src/responder-process.esm.js) | **Rewrite** — replace `postMessage` protocol with `PostMessageTransport`; remove bidi flow control (handled by PolyTransport) |
 | [`src/applets/bootstrap.esm.js`](../src/applets/bootstrap.esm.js) | **Rewrite** — replace raw `postMessage` with `PostMessageTransport`; use C2C for console output |
 | [`src/operator-request-state.esm.js`](../src/operator-request-state.esm.js) | **Rewrite** — replace hand-rolled bidi flow control with `WebSocketTransport` |
-| [`src/operator-process.esm.js`](../src/operator-process.esm.js) | **Update** — update `forwardToServiceProcess()` and `handleClientBidiMessage()` to use PolyTransport channels |
+| [`src/operator-process.esm.js`](../src/operator-process.esm.js) | **Update** — update `forwardToResponder()` and `handleClientBidiMessage()` to use PolyTransport channels |
 
 ### 6.3 Files Unchanged or Minimally Changed
 
@@ -1214,7 +1214,7 @@ These applets (e.g. `static-content.esm.js`) will be refactored to use PolyTrans
 
 | Test File | Change |
 |-----------|--------|
-| [`test/service-process.test.js`](../test/service-process.test.js) | Update to use `PipeTransport` mock |
+| [`test/sub-process.test.js`](../test/sub-process.test.js) | Update to use `PipeTransport` mock |
 | [`test/responder-process.test.js`](../test/responder-process.test.js) | Update to use `PostMessageTransport` mock |
 | [`test/request-state-machine.test.js`](../test/request-state-machine.test.js) | Update bidi tests to use `WebSocketTransport` |
 | [`test/applet-bootstrap.test.js`](../test/applet-bootstrap.test.js) | Update to use `PostMessageTransport` |
@@ -1259,13 +1259,13 @@ This refactoring aligns with the clean-slate rewrite strategy approved in [`arch
 
 ### Phase 3: Operator ↔ Responder (PipeTransport)
 
-1. **Rewrite `src/service-process.esm.js`** — use `PipeTransport` instead of `IPCConnection`
+1. **Rewrite `src/sub-process.esm.js`** — use `PipeTransport` instead of `IPCConnection`
 2. **Rewrite `src/process-manager.esm.js`** — use `PipeTransport` for process communication; manage request channel pool with immediate reopening
 3. **Update `src/router-process.esm.js`** — use `PipeTransport` (same pattern as responder)
 4. **Delete `src/ipc-protocol.esm.js`** and `src/serializer.esm.js`
 5. **Delete `src/console-intercept.esm.js`** — replaced by C2C channel
 6. **Update `src/operator-process.esm.js`** — update process communication calls
-7. **Update unit tests** for service process and process manager
+7. **Update unit tests** for sub-process and process manager
 
 ### Phase 4: Operator ↔ Client Bidi (WebSocketTransport + NestedTransport relay)
 
@@ -1439,8 +1439,8 @@ globalThis.JSMAWS = Object.freeze(jsmawsNamespace);
 - No special handling required
 
 **Rationale:**
-- Router process is a service process with identical IPC requirements
-- Consistent implementation across all service processes
+- Router process is a sub-process with identical IPC requirements
+- Consistent implementation across all sub-processes
 
 ### 12.6 Bidi Relay Architecture
 

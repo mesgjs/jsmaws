@@ -183,18 +183,18 @@ Phase 4 represents a fundamental architectural transformation from the single-pr
 
 **Key Architectural Concepts**:
 
-- **Operator Process** (privileged): Accepts HTTP/HTTPS requests, manages routing, coordinates service process pools
-- **Service Processes** (unprivileged sub-processes): Execute applets and send responses via IPC
+- **Operator Process** (privileged): Accepts HTTP/HTTPS requests, manages routing, coordinates sub-process pools
+- **Sub-Processes** (unprivileged sub-processes): Execute applets and send responses via IPC
   - **Responder Processes**: Execute applets and handle requests
   - **Router Processes** (semi-privileged, when `fsRouting` enabled): Perform filesystem-based route resolution
 - **Workers** (implementation detail within processes):
   - **Responder Workers**: Run within responder processes to execute applets
   - **Router Workers**: Single implementation that runs in different contexts to perform route resolution
     - When `fsRouting` disabled: Router workers run within the operator process
-    - When `fsRouting` enabled: Router workers run within router service processes
+    - When `fsRouting` enabled: Router workers run within router sub-processes
 - **Routing**: Route resolution always occurs using the same router-worker implementation, but the execution context varies:
   - **Internal Routing** (when `fsRouting` disabled): Router workers execute within the operator process
-  - **Delegated Routing** (when `fsRouting` enabled): Router workers execute within router service processes
+  - **Delegated Routing** (when `fsRouting` enabled): Router workers execute within router sub-processes
 - **User-Configurable Pools**: Named pools with flexible configuration (inspired by PHP-FPM)
   - **Responder Pools**: `fast`, `standard`, `stream` (and user-defined) - manage responder processes and their workers
   - **Router Pool**: `@router` - manages router workers (and router processes when `fsRouting` enabled)
@@ -316,7 +316,7 @@ Routing always occurs, but the implementation location varies based on `fsRoutin
    - Enables security isolation and scalability for filesystem-based routing
 
 **Process Types**:
-- **Operator** (privileged process): Accepts HTTP/HTTPS requests, manages routing (internal or delegated), coordinates responder and router service process pools
+- **Operator** (privileged process): Accepts HTTP/HTTPS requests, manages routing (internal or delegated), coordinates responder and router sub-process pools
 - **Router Processes** (when `fsRouting` enabled): Semi-privileged processes that host router workers for filesystem-based route resolution
   - Router workers run within these processes to isolate routing logic from execution environment
   - Retain read access for filesystem traversal
@@ -366,17 +366,17 @@ Routing always occurs, but the implementation location varies based on `fsRoutin
 
 #### Phase 4.4: Operator Process Implementation
 
-**Goal**: Implement the operator (privileged process) that manages configuration, ports, and service sub-processes.
+**Goal**: Implement the operator (privileged process) that manages configuration, ports, and sub-processes.
 
 **Components**:
 - `src/operator.esm.js` - Operator process (privileged, runs as root)
-- `src/process-manager.esm.js` - Service process lifecycle management (responders and optional routers)
+- `src/process-manager.esm.js` - Sub-process lifecycle management (responders and optional routers)
 - `src/ipc-protocol.esm.js` - IPC message handling
 
 **Features**:
 1. Configuration file loading
 2. Port binding (80, 443)
-3. Service process spawning (responders and optional routers)
+3. Sub-process spawning (responders and optional routers)
 4. Request forwarding via IPC
 5. Route resolution delegation (when `fsRouting` enabled)
 6. Process health monitoring
@@ -389,7 +389,7 @@ Routing always occurs, but the implementation location varies based on `fsRoutin
 2. Implement configuration loading
 3. Implement port binding
 4. Create IPC protocol handler
-5. Implement service process spawning with privilege dropping
+5. Implement sub-process spawning with privilege dropping
 6. Implement router process pool management (when `fsRouting` enabled) and router worker pool management (when `fsRouting` disabled)
 7. Implement responder process pool management
 8. Add health monitoring
@@ -399,9 +399,9 @@ Routing always occurs, but the implementation location varies based on `fsRoutin
 
 **Security Considerations**:
 - Operator process (privileged) MUST NOT handle requests directly
-- All request data forwarded via IPC to service processes
+- All request data forwarded via IPC to sub-processes
 - No user code execution in operator process
-- Validate all IPC messages from service processes (routers and responders)
+- Validate all IPC messages from sub-processes (routers and responders)
 - Router processes retain read access only (unprivileged uid/gid, no write/execute/network)
 
 **Testing**:
@@ -418,16 +418,16 @@ Routing always occurs, but the implementation location varies based on `fsRoutin
 
 #### Phase 4.5: Router Worker and Process Implementation
 
-**Goal**: Implement the single router-worker implementation that can run in either the operator process or dedicated router service processes.
+**Goal**: Implement the single router-worker implementation that can run in either the operator process or dedicated router sub-processes.
 
 **Components**:
 - `src/router-worker.esm.js` - **Single router worker implementation** for hybrid route resolution
   - Handles both virtual routes (always) and filesystem-based routes (when `fsRouting` enabled)
   - Same implementation runs in two different contexts:
     - Within operator process (when `fsRouting` disabled)
-    - Within router service processes (when `fsRouting` enabled)
+    - Within router sub-processes (when `fsRouting` enabled)
   - `fsRouting` is an operational control parameter that determines if filesystem-based routes are processed or skipped with a warning
-- `src/router-process.esm.js` - Router service process entry point (only used when `fsRouting` enabled)
+- `src/router-process.esm.js` - Router sub-process entry point (only used when `fsRouting` enabled)
   - Hosts router workers in a separate process for security isolation
   - Semi-privileged: retains read access for filesystem traversal
 
@@ -590,7 +590,7 @@ async function sendResponse(ipcSocket, response) {
 
 #### Phase 4.7: Pool and Process Manager Implementation
 
-**Goal**: Implement a generic pool manager that handles both process pools and worker pools, plus a process manager for service process lifecycle.
+**Goal**: Implement a generic pool manager that handles both process pools and worker pools, plus a process manager for sub-process lifecycle.
 
 **Components**:
 - `src/pool-manager.esm.js` - **Generic pool manager** supporting all pool types
@@ -599,7 +599,7 @@ async function sendResponse(ipcSocket, response) {
   - Manages router process pools (when `fsRouting` enabled)
   - Single implementation handles both process-level and worker-level pooling
   - Adapts behavior based on pool configuration parameters
-- `src/process-manager.esm.js` - Service process lifecycle management
+- `src/process-manager.esm.js` - Sub-process lifecycle management
   - Uses pool manager for all pool operations
   - Handles process spawning, monitoring, and recycling
 
@@ -607,7 +607,7 @@ async function sendResponse(ipcSocket, response) {
 1. Spawn responder processes according to pool configuration
 2. Spawn router processes when `fsRouting` enabled
 3. Manage router workers within operator when `fsRouting` disabled
-4. Track which pool each service process serves
+4. Track which pool each sub-process serves
 5. Monitor process health and restart on failure
 6. Implement scaling strategies (static, dynamic, ondemand)
 7. Handle process recycling based on `maxReqs`
@@ -665,7 +665,7 @@ async function sendResponse(ipcSocket, response) {
   - `minWorkers` and `maxWorkers` control worker pool size
   - `minProcs` and `maxProcs` ignored (no separate processes)
   - Workers execute directly in operator context
-- **When `fsRouting` enabled**: Manages router service processes and their workers
+- **When `fsRouting` enabled**: Manages router sub-processes and their workers
   - `minProcs` and `maxProcs` control process pool size
   - `minWorkers` and `maxWorkers` control workers per process
   - Semi-privileged processes retain read access for filesystem traversal
@@ -750,7 +750,7 @@ class ProcessManager {
    - Single implementation adapts based on pool configuration
    - Handles `@router` pool in both internal and delegated modes
 2. **Implement process manager**:
-   - Service process lifecycle management
+   - Sub-process lifecycle management
    - Uses pool manager for all pool operations
    - Process health monitoring and restart
    - Process recycling based on `maxReqs`
@@ -1102,7 +1102,7 @@ class ProcessManager {
 - Configuration reload triggering route updates
 - SSL certificate updates triggering server reload
 - IPC request/response round-trip
-- Service process spawning and lifecycle
+- Sub-process spawning and lifecycle
 - Pool scaling under load
 - Affinity tracking accuracy
 - Flow-control under various response sizes
@@ -1229,7 +1229,7 @@ class ProcessManager {
 ### Phase 4 Tests
 - Logging (all backends)
 - IPC protocol
-- Service process spawning
+- Sub-process spawning
 - Privilege dropping
 - Pool management
 - Router process pool management (when `fsRouting` enabled)
@@ -1365,6 +1365,6 @@ class ProcessManager {
 - [`arch/pool-configuration-design.md`](pool-configuration-design.md) - Pool configuration specification
 - [`arch/requirements.md`](requirements.md) - Configuration and requirements (including flow-control answer)
 - [`arch/worker-module-caching.md`](worker-module-caching.md) - Worker module caching and affinity architecture
-- [`arch/service-class-research.md`](service-class-research.md) - Research on servlet container patterns
+- [`arch/service-class-research.md`](service-class-research.md) - Research on servlet container patterns \[archived\]
 - [`arch/configuration.md`](configuration.md) - Configuration specification
 - [`.kilocode/rules/memory-bank/architecture.md`](../.kilocode/rules/memory-bank/architecture.md) - System architecture overview

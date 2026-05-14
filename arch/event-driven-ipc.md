@@ -11,7 +11,7 @@ The current IPC architecture has a critical flaw: the operator only reads from r
 
 1. **Lost console output**: Responder startup logging sits in stdout buffer unread
 2. **Blocking architecture**: Request handlers block waiting for responses
-3. **No asynchronous events**: Cannot handle unsolicited messages from service processes
+3. **No asynchronous events**: Cannot handle unsolicited messages from sub-processes
 4. **Competing readers**: Cannot have both console monitoring and request/response flows
 
 ### Current Flow (Broken)
@@ -441,11 +441,11 @@ process.ipcConn.registerStreamHandler(
 );
 ```
 
-### Phase 4: Service Process Updates
+### Phase 4: Sub-Process Updates
 
-**File:** [`src/service-process.esm.js`](../src/service-process.esm.js)
+**File:** [`src/sub-process.esm.js`](../src/sub-process.esm.js)
 
-No changes needed - service processes continue to use `readMessage()` loop as they only receive messages (don't need to monitor for unsolicited events).
+No changes needed - sub-processes continue to use `readMessage()` loop as they only receive messages (don't need to monitor for unsolicited events).
 
 ### Phase 5: Testing Strategy
 

@@ -12,7 +12,7 @@ Currently, configuration parameters are passed through method calls throughout t
 This is not just a router issue - it affects:
 - **Router workers**: Need root, extensions, fsRouting, appRoot
 - **Responder workers**: Need pool config, timeouts, chunking settings
-- **Service processes**: Need IPC config, logging config, pool settings
+- **Sub-processes**: Need IPC config, logging config, pool settings
 - **Pool managers**: Need scaling config, timeout settings
 
 ## Solution: Process-Wide Configuration
@@ -205,9 +205,9 @@ class PoolManager {
 }
 ```
 
-**ServiceProcess Base Class:**
+**SubProcess Base Class:**
 ```javascript
-class ServiceProcess {
+class SubProcess {
   constructor (processType, processId) {
     this.processType = processType;
     this.processId = processId;
@@ -327,7 +327,7 @@ Configuration lives in Configuration, not scattered across:
 3. Add update mechanism
 4. Write unit tests
 
-### Phase 2: Update ServiceProcess Base Class
+### Phase 2: Update SubProcess Base Class
 1. Add context property
 2. Update handleConfigUpdate to create/update context
 3. Add onConfigUpdate hook for subclasses
@@ -358,9 +358,9 @@ This allows testing at each step and ensures no breaking changes until we're rea
 
 ### Router Process
 ```javascript
-class RouterProcess extends ServiceProcess {
+class RouterProcess extends SubProcess {
   async onStarted () {
-    // Context is already set by ServiceProcess base class
+    // Context is already set by SubProcess base class
     
     // Create router with context
     this.router = new Router(this.context.config, this.context.routing.fsRouting);
@@ -386,7 +386,7 @@ class RouterProcess extends ServiceProcess {
 
 ### Responder Process
 ```javascript
-class ResponderProcess extends ServiceProcess {
+class ResponderProcess extends SubProcess {
   async handleRequest (id, fields) {
     // Access chunking config via context
     const bodySize = fields.at('bodySize', 0);
@@ -412,7 +412,7 @@ class ResponderProcess extends ServiceProcess {
 - Test scoped access
 
 ### Integration Tests
-- Test ServiceProcess with context
+- Test SubProcess with context
 - Test configuration propagation
 - Test component updates on config change
 

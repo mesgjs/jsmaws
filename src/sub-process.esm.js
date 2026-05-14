@@ -1,6 +1,6 @@
 /**
- * JSMAWS Service Process Base Class
- * Common functionality for all service processes (router, responder)
+ * JSMAWS Sub-Process Base Class
+ * Common functionality for all sub-processes (router, responder)
  *
  * This base class provides:
  * - PipeTransport setup and management (operator ↔ responder IPC)
@@ -36,9 +36,9 @@ export const CONTROL_MESSAGE_TYPES = [
 ];
 
 /**
- * Base class for service processes
+ * Base class for sub-processes
  */
-export class ServiceProcess {
+export class SubProcess {
 	constructor (processType, processId) {
 		this.processType = processType;
 		this.processId = processId || Deno.env.get('JSMAWS_PID') || `${processType}-${Date.now()}`;
@@ -234,7 +234,7 @@ export class ServiceProcess {
 	}
 
 	/**
-	 * Create and run a service process with signal handlers.
+	 * Create and run a sub-process with signal handlers.
 	 * Static factory method for consistent process creation.
 	 */
 	static async run (processClass, ...args) {
@@ -268,7 +268,7 @@ export class ServiceProcess {
 	}
 
 	/**
-	 * Start the service process.
+	 * Start the sub-process.
 	 * Template method that orchestrates the startup sequence.
 	 */
 	async start () {

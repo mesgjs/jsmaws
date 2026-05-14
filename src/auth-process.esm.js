@@ -1,5 +1,5 @@
 /**
- * JSMAWS Auth Service Process (Option C)
+ * JSMAWS Auth Sub-Process (Option C)
  * Unprivileged external process for network-dependent auth (OAuth, LDAP, session stores).
  *
  * This process:
@@ -19,7 +19,7 @@
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { ServiceProcess } from './service-process.esm.js';
+import { SubProcess } from './sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
 import { runAuthChain, buildAuthContext } from './auth-middleware.esm.js';
 import { AuthProviderLoader } from './auth-provider-loader.esm.js';
@@ -34,10 +34,10 @@ const AUTH_REQ_MESSAGE_TYPES = [
 ];
 
 /**
- * Auth service process class
+ * Auth sub-process class
  * Handles auth requests from the operator
  */
-class AuthServiceProcess extends ServiceProcess {
+export class AuthProcess extends SubProcess {
 	constructor (processId) {
 		super('auth', processId);
 		this._loader = new AuthProviderLoader();
@@ -108,7 +108,7 @@ class AuthServiceProcess extends ServiceProcess {
 
 	/**
 	 * Handle configuration update from operator.
-	 * Called after this.config has been updated by the ServiceProcess base class.
+	 * Called after this.config has been updated by the SubProcess base class.
 	 */
 	async handleConfigUpdate () {
 		console.debug(`[${this.processId}] Received configuration update`);
@@ -186,7 +186,7 @@ async function main () {
 	Deno.stderr.writeSync(new TextEncoder().encode(
 		`Auth service main pid ${processId}\n`
 	));
-	await ServiceProcess.run(AuthServiceProcess, processId);
+	await SubProcess.run(AuthProcess, processId);
 }
 
 // Run if this is the main module
@@ -196,6 +196,3 @@ if (import.meta.main) {
 		Deno.exit(1);
 	});
 }
-
-// Export for testing
-export { AuthServiceProcess };

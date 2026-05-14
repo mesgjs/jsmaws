@@ -93,7 +93,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section missing", asy
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize with default pools (no pools in config → defaults applied)
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 
 	// Verify default pool was created
 	assertExists(operator.poolManagers.get('standard'));
@@ -127,7 +127,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section is omitted", 
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize with default pools
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 
 	// Create new config with pools section explicitly null
 	const newConfig = new NANOS({
@@ -156,7 +156,7 @@ Deno.test("Pool Reconfig - uses provided pools config when present", async () =>
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize with default pools
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 
 	// Create new config with custom pools
 	const newConfig = parseSLID(`[(
@@ -203,7 +203,7 @@ Deno.test("Pool Reconfig - adds new pools in parallel", async () => {
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize with poolA
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 	assertExists(operator.poolManagers.get('poolA'));
 	assertEquals(operator.poolManagers.size, 1);
 
@@ -244,7 +244,7 @@ Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize with three pools
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 	assertEquals(operator.poolManagers.size, 3);
 
 	// Remove poolB and poolC, keep poolA
@@ -276,7 +276,7 @@ Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () 
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize with poolA
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 	const originalPoolManager = operator.poolManagers.get('poolA');
 	assertExists(originalPoolManager);
 	assertEquals(originalPoolManager.config.minProcs, 1);
@@ -316,7 +316,7 @@ Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize with poolA and poolB
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 	assertEquals(operator.poolManagers.size, 2);
 	const originalPoolA = operator.poolManagers.get('poolA');
 
@@ -361,7 +361,7 @@ Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () =
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize pools
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 
 	// Get pool managers
 	const poolA = operator.poolManagers.get('poolA');
@@ -438,7 +438,7 @@ Deno.test("Pool Reconfig - respects shutdown timeout", async () => {
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize pool
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 
 	// Remove pool (should timeout after shutdownDelay + 5s grace)
 	const newConfig = parseSLID(`[(
@@ -473,7 +473,7 @@ Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async ()
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize pools (should skip @router)
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 	assertEquals(operator.poolManagers.get('@router'), undefined);
 	assertExists(operator.poolManagers.get('poolA'));
 
@@ -522,7 +522,7 @@ Deno.test("Pool Reconfig - continues on pool creation failure", async () => {
 	operator.processManager = mockProcessManager;
 
 	// Initialize with poolA
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 
 	// Try to add poolB (will fail) and poolC (should succeed)
 	const newConfig = parseSLID(`[(
@@ -559,7 +559,7 @@ Deno.test("Pool Reconfig - continues on pool reconfiguration failure", async () 
 	operator.processManager = createMockProcessManager(operator);
 
 	// Initialize pools
-	await operator.initializeProcessPools();
+	await operator.initializeResponderPools();
 
 	// Mock poolA.updateConfig to throw error
 	const poolA = operator.poolManagers.get('poolA');

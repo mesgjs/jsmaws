@@ -1,5 +1,5 @@
 /**
- * Tests for ServiceProcess base class
+ * Tests for SubProcess base class
  *
  * Uses real PipeTransport with in-memory backing (makePipeTransportPair)
  * to test the PolyTransport-based control channel message loop.
@@ -9,14 +9,14 @@
 
 import { assertEquals, assertRejects } from 'https://deno.land/std@0.208.0/assert/mod.ts';
 import { makePipeTransportPair } from '@poly-transport-test/transport-pipe-helpers.js';
-import { ServiceProcess, CONTROL_MESSAGE_TYPES } from '../src/service-process.esm.js';
+import { SubProcess, CONTROL_MESSAGE_TYPES } from '../src/sub-process.esm.js';
 import { Configuration } from '../src/configuration.esm.js';
 
 /**
- * Concrete subclass of ServiceProcess for testing.
+ * Concrete subclass of SubProcess for testing.
  * Overrides abstract methods to record calls and allow test control.
  */
-class TestServiceProcess extends ServiceProcess {
+class TestSubProcess extends SubProcess {
 	constructor (processId) {
 		super('test', processId ?? 'test-proc-1');
 		this.configUpdates = [];
@@ -51,7 +51,7 @@ class TestServiceProcess extends ServiceProcess {
 }
 
 /**
- * Helper: create a connected transport pair and set up a TestServiceProcess
+ * Helper: create a connected transport pair and set up a TestSubProcess
  * with the service-side transport and control channel already open.
  *
  * Both sides call requestChannel('control') simultaneously — PolyTransport
@@ -59,14 +59,14 @@ class TestServiceProcess extends ServiceProcess {
  *
  * Returns { proc, operatorTransport, serviceTransport, operatorControlChannel, cleanup }
  */
-async function setupServiceProcess (processId) {
+async function setupSubProcess (processId) {
 	const [operatorTransport, serviceTransport] = await makePipeTransportPair();
 
 	// Accept all channels on both sides
 	operatorTransport.addEventListener('newChannel', (event) => { event.accept(); });
 	serviceTransport.addEventListener('newChannel', (event) => { event.accept(); });
 
-	const proc = new TestServiceProcess(processId);
+	const proc = new TestSubProcess(processId);
 
 	// Inject the pre-started transport (bypass createTransport() which uses stdin/stdout)
 	proc.transport = serviceTransport;
@@ -99,28 +99,28 @@ async function setupServiceProcess (processId) {
 
 // --- Constructor Tests --------------------------------------------------------
 
-Deno.test('ServiceProcess - constructor sets process type and ID', () => {
-	const proc = new TestServiceProcess('test-123');
+Deno.test('SubProcess - constructor sets process type and ID', () => {
+	const proc = new TestSubProcess('test-123');
 	assertEquals(proc.processType, 'test');
 	assertEquals(proc.processId, 'test-123');
 	assertEquals(proc.isShuttingDown, false);
 });
 
-Deno.test('ServiceProcess - constructor uses provided ID', () => {
-	const proc = new TestServiceProcess('my-proc');
+Deno.test('SubProcess - constructor uses provided ID', () => {
+	const proc = new TestSubProcess('my-proc');
 	assertEquals(proc.processId, 'my-proc');
 });
 
-Deno.test('ServiceProcess - constructor generates ID if not provided', () => {
-	const proc = new TestServiceProcess();
+Deno.test('SubProcess - constructor generates ID if not provided', () => {
+	const proc = new TestSubProcess();
 	assertEquals(proc.processType, 'test');
 	assertEquals(proc.processId.startsWith('test-'), true);
 });
 
 // --- Abstract Method Tests ----------------------------------------------------
 
-Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async () => {
-	class IncompleteProcess extends ServiceProcess {
+Deno.test('SubProcess - subclass must implement handleConfigUpdate', async () => {
+	class IncompleteProcess extends SubProcess {
 		constructor () { super('incomplete', 'test-123'); }
 		async handleHealthCheck () {}
 		async handleShutdown () {}
@@ -135,8 +135,8 @@ Deno.test('ServiceProcess - subclass must implement handleConfigUpdate', async (
 	);
 });
 
-Deno.test('ServiceProcess - subclass must implement handleHealthCheck', async () => {
-	class IncompleteProcess extends ServiceProcess {
+Deno.test('SubProcess - subclass must implement handleHealthCheck', async () => {
+	class IncompleteProcess extends SubProcess {
 		constructor () { super('incomplete', 'test-123'); }
 		async handleConfigUpdate () {}
 		async handleShutdown () {}
@@ -151,8 +151,8 @@ Deno.test('ServiceProcess - subclass must implement handleHealthCheck', async ()
 	);
 });
 
-Deno.test('ServiceProcess - subclass must implement handleShutdown', async () => {
-	class IncompleteProcess extends ServiceProcess {
+Deno.test('SubProcess - subclass must implement handleShutdown', async () => {
+	class IncompleteProcess extends SubProcess {
 		constructor () { super('incomplete', 'test-123'); }
 		async handleConfigUpdate () {}
 		async handleHealthCheck () {}
@@ -167,8 +167,8 @@ Deno.test('ServiceProcess - subclass must implement handleShutdown', async () =>
 	);
 });
 
-Deno.test('ServiceProcess - subclass must implement handleReqChannel', async () => {
-	class IncompleteProcess extends ServiceProcess {
+Deno.test('SubProcess - subclass must implement handleReqChannel', async () => {
+	class IncompleteProcess extends SubProcess {
 		constructor () { super('incomplete', 'test-123'); }
 		async handleConfigUpdate () {}
 		async handleHealthCheck () {}
@@ -185,16 +185,16 @@ Deno.test('ServiceProcess - subclass must implement handleReqChannel', async () 
 
 // --- onStarted Hook -----------------------------------------------------------
 
-Deno.test('ServiceProcess - onStarted hook is called', async () => {
-	const proc = new TestServiceProcess('test-123');
+Deno.test('SubProcess - onStarted hook is called', async () => {
+	const proc = new TestSubProcess('test-123');
 	await proc.onStarted();
 	assertEquals(proc.onStartedCalled, true);
 });
 
 // --- Control Channel Message Handling ----------------------------------------
 
-Deno.test('ServiceProcess - handles config-update message', async () => {
-	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('cfg-test');
+Deno.test('SubProcess - handles config-update message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupSubProcess('cfg-test');
 
 	try {
 		// Start a single-message read loop on the service side
@@ -233,8 +233,8 @@ Deno.test('ServiceProcess - handles config-update message', async () => {
 	}
 });
 
-Deno.test('ServiceProcess - handles health-check message', async () => {
-	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('hc-test');
+Deno.test('SubProcess - handles health-check message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupSubProcess('hc-test');
 
 	try {
 		// Start a single-message read loop on the service side
@@ -275,8 +275,8 @@ Deno.test('ServiceProcess - handles health-check message', async () => {
 	}
 });
 
-Deno.test('ServiceProcess - handles shutdown message', async () => {
-	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('shutdown-test');
+Deno.test('SubProcess - handles shutdown message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupSubProcess('shutdown-test');
 
 	try {
 		// Start a single-message read loop on the service side
@@ -312,11 +312,11 @@ Deno.test('ServiceProcess - handles shutdown message', async () => {
 
 // --- sendCapacityUpdate -------------------------------------------------------
 
-Deno.test('ServiceProcess - sendCapacityUpdate sends capacity-update message', async () => {
-	const { proc, operatorControlChannel, cleanup } = await setupServiceProcess('cap-test');
+Deno.test('SubProcess - sendCapacityUpdate sends capacity-update message', async () => {
+	const { proc, operatorControlChannel, cleanup } = await setupSubProcess('cap-test');
 
 	try {
-		// Send capacity update from service process
+		// Send capacity update from sub-process
 		await proc.sendCapacityUpdate(5, 10);
 
 		// Read it on the operator side
@@ -333,8 +333,8 @@ Deno.test('ServiceProcess - sendCapacityUpdate sends capacity-update message', a
 	}
 });
 
-Deno.test('ServiceProcess - sendCapacityUpdate is no-op when no controlChannel', async () => {
-	const proc = new TestServiceProcess('no-channel');
+Deno.test('SubProcess - sendCapacityUpdate is no-op when no controlChannel', async () => {
+	const proc = new TestSubProcess('no-channel');
 	// controlChannel is null — should not throw
 	await proc.sendCapacityUpdate(1, 2);
 	// No assertion needed — just verifying no error is thrown
@@ -342,7 +342,7 @@ Deno.test('ServiceProcess - sendCapacityUpdate is no-op when no controlChannel',
 
 // --- CONTROL_MESSAGE_TYPES export --------------------------------------------
 
-Deno.test('ServiceProcess - CONTROL_MESSAGE_TYPES includes expected types', () => {
+Deno.test('SubProcess - CONTROL_MESSAGE_TYPES includes expected types', () => {
 	assertEquals(CONTROL_MESSAGE_TYPES.includes('config-update'), true);
 	assertEquals(CONTROL_MESSAGE_TYPES.includes('health-check'), true);
 	assertEquals(CONTROL_MESSAGE_TYPES.includes('health-response'), true);

@@ -39,7 +39,7 @@ Deno maintains a **process-level module cache** that persists across worker inst
 
 ### Affinity Benefit
 
-If a service process has already loaded applet `@api/users`, subsequent requests for the same applet in that process will:
+If a sub-process has already loaded applet `@api/users`, subsequent requests for the same applet in that process will:
 - Skip disk I/O
 - Skip parsing
 - Use cached module from process memory
@@ -58,12 +58,12 @@ If a service process has already loaded applet `@api/users`, subsequent requests
 
 ### Implementation Strategy
 
-#### 1. Service Process Tracks Loaded Modules
+#### 1. Sub-Process Tracks Loaded Modules
 
-Each service process maintains a set of loaded applet modules:
+Each sub-process maintains a set of loaded applet modules:
 
 ```javascript
-class ServiceProcess {
+class SubProcess {
   constructor() {
     this.loadedModules = new Set();  // Track loaded applet paths
     this.workers = [];
@@ -99,7 +99,7 @@ class ServiceProcess {
 
 #### 2. Privileged Process Tracks Module Affinity
 
-The privileged process maintains affinity information for each service process:
+The privileged process maintains affinity information for each sub-process:
 
 ```javascript
 class PoolManager {
@@ -244,7 +244,7 @@ Add `loadedModules` to heartbeat message:
 ## Implementation Timeline
 
 ### Phase 4.6 (Pool Management)
-- Add `loadedModules` tracking to service processes
+- Add `loadedModules` tracking to sub-processes
 - Add `loadedModules` to heartbeat IPC message
 - Implement affinity tracking in pool manager
 - Implement affinity-aware request routing

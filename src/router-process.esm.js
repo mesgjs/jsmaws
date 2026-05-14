@@ -1,6 +1,6 @@
 /**
  * JSMAWS Router Process
- * Semi-privileged service process for filesystem-based route resolution
+ * Semi-privileged sub-process for filesystem-based route resolution
  *
  * This process:
  * - Runs with reduced privileges (read-only filesystem access, non-root uid/gid)
@@ -12,7 +12,7 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { ServiceProcess } from './service-process.esm.js';
+import { SubProcess } from './sub-process.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
 import { RouterWorkerProxy } from './router-worker-proxy.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
@@ -31,7 +31,7 @@ const ROUTER_REQ_MESSAGE_TYPES = [
  * Router process class
  * Hosts router workers in a pool for filesystem-based route resolution
  */
-class RouterProcess extends ServiceProcess {
+export class RouterProcess extends SubProcess {
 	constructor (processId) {
 		super('router', processId);
 		this.poolManager = null;
@@ -40,7 +40,7 @@ class RouterProcess extends ServiceProcess {
 
 	/**
 	 * Handle configuration update from operator.
-	 * Called after this.config has been updated by the ServiceProcess base class.
+	 * Called after this.config has been updated by the SubProcess base class.
 	 */
 	async handleConfigUpdate () {
 		console.debug(`[${this.processId}] Received configuration update`);
@@ -218,7 +218,7 @@ class RouterProcess extends ServiceProcess {
  */
 async function main () {
 	const processId = Deno.env.get('JSMAWS_PID'); // process id string
-	await ServiceProcess.run(RouterProcess, processId);
+	await SubProcess.run(RouterProcess, processId);
 }
 
 // Run if this is the main module
@@ -228,6 +228,3 @@ if (import.meta.main) {
 		Deno.exit(1);
 	});
 }
-
-// Export for testing
-export { RouterProcess };

@@ -18,9 +18,9 @@ This document provides a detailed implementation plan for properly integrating t
 2. **Console Interception** ([`src/console-intercept.esm.js`](../src/console-intercept.esm.js)):
    - Intercepts all console methods (debug, info, log, warn, error)
    - Prefixes with `\x01[(log level)]\n` before calling original method
-   - Applied in service processes via `ServiceProcess.start()`
+   - Applied in sub-processes via `SubProcess.start()`
 
-3. **Service Process Base** ([`src/service-process.esm.js`](../src/service-process.esm.js)):
+3. **Sub-Process Base** ([`src/sub-process.esm.js`](../src/sub-process.esm.js)):
    - Calls `interceptConsole()` at startup (line 139)
    - IPC connection established via stdin/stdout
 
@@ -450,18 +450,18 @@ monitorStderr (managedProc, stderrConn) {
 
 **No changes needed** - operator correctly delegates to `ProcessManager`.
 
-### Phase 4: Verify Service Processes
+### Phase 4: Verify Sub-Processes
 
 **Files**: 
 - [`src/responder-process.esm.js`](../src/responder-process.esm.js)
 - [`src/router-process.esm.js`](../src/router-process.esm.js)
 
 **Verification Points**:
-- Console interception happens before any logging ✅ (line 139 in service-process.esm.js)
+- Console interception happens before any logging ✅ (line 139 in sub-process.esm.js)
 - All console.* calls will be prefixed with log level ✅
 - IPC messages are sent via `ipcConn.writeMessage()` ✅
 
-**No changes needed** - service processes are correctly configured.
+**No changes needed** - sub-processes are correctly configured.
 
 ### Phase 5: Testing and Validation
 
@@ -477,23 +477,23 @@ monitorStderr (managedProc, stderrConn) {
    - Multi-line console output
 
 2. **Console Output Levels**:
-   - Service process calls `console.debug()`, `console.info()`, `console.log()`
+   - Sub-process calls `console.debug()`, `console.info()`, `console.log()`
    - Verify operator logs at correct levels (debug, info, log)
-   - Service process calls `console.warn()`, `console.error()`
+   - Sub-process calls `console.warn()`, `console.error()`
    - Verify operator logs at correct levels (warn, error)
 
 3. **IPC Message Handling**:
-   - Service process sends IPC message via `ipcConn.writeMessage()`
+   - Sub-process sends IPC message via `ipcConn.writeMessage()`
    - Verify message is NOT logged as console output
    - Verify message is properly received by operator
 
 4. **Interleaved Output**:
-   - Service process alternates console.log() and IPC messages
+   - Sub-process alternates console.log() and IPC messages
    - Verify both are handled correctly
    - Verify log levels persist across IPC messages
 
 5. **Binary Data**:
-   - Service process sends IPC message with binary data
+   - Sub-process sends IPC message with binary data
    - Verify binary data doesn't corrupt console output
    - Verify console output after binary data is logged correctly
 
@@ -552,7 +552,7 @@ Create integration test in `test/ipc-logging-integration.test.js`:
    - Review delegation to ProcessManager
    - Confirm no direct stream access
 
-4. **Phase 4**: Verify Service Processes (30 minutes)
+4. **Phase 4**: Verify Sub-Processes (30 minutes)
    - Confirm console interception
    - Confirm IPC usage
 
@@ -588,7 +588,7 @@ This update is **fully backward compatible**:
 
 ## Success Criteria
 
-1. ✅ All console.* calls from service processes appear in operator logs
+1. ✅ All console.* calls from sub-processes appear in operator logs
 2. ✅ Log levels are correctly tracked and applied
 3. ✅ IPC messages are not logged as console output
 4. ✅ Both stdout and stderr are monitored
@@ -607,7 +607,7 @@ This update is **fully backward compatible**:
 - [`src/ipc-protocol.esm.js`](../src/ipc-protocol.esm.js) - IPC protocol implementation
 - [`src/console-intercept.esm.js`](../src/console-intercept.esm.js) - Console interception
 - [`src/process-manager.esm.js`](../src/process-manager.esm.js) - Process management
-- [`src/service-process.esm.js`](../src/service-process.esm.js) - Service process base class
+- [`src/sub-process.esm.js`](../src/sub-process.esm.js) - Sub-process base class
 
 ## Notes
 

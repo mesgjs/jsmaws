@@ -5,8 +5,8 @@
  * This is the privileged operator process that:
  * - Binds to HTTP/HTTPS ports (80, 443)
  * - Manages configuration and SSL certificates
- * - Spawns and manages service processes (responders and routers)
- * - Routes requests to appropriate service processes via IPC
+ * - Spawns and manages sub-processes (responders and routers)
+ * - Routes requests to appropriate sub-processes via IPC
  * - Never executes user code directly
  *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
@@ -98,7 +98,7 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Forward request to service process via PipeTransport using state machine.
+	 * Forward request to responder via PipeTransport using state machine.
 	 *
 	 * @param {Request} req - HTTP request
 	 * @param {Object} route - Matched route object
@@ -108,7 +108,7 @@ export class OperatorProcess {
 	 * @param {Object|null} [requestFilter] - Effective requestFilter spec (route-group or top-level)
 	 * @param {Object|null} [responseFilter] - Effective responseFilter spec (route-group or top-level)
 	 */
-	async forwardToServiceProcess (req, route, match, remote, { identity = null, requestFilter = null, responseFilter = null } = {}) {
+	async forwardToResponder (req, route, match, remote, { identity = null, requestFilter = null, responseFilter = null } = {}) {
 		const poolName = route.spec?.pool ?? 'standard';
 		const appPath = match.app || route.app;
 		const root = match.root;
@@ -125,7 +125,7 @@ export class OperatorProcess {
 
 		// Get available (reserved) process from pool
 		const poolItem = await poolManager.serialize(async () => await this.getProcessWithAffinity(poolManager, appPath)).catch((error) => {
-			this.logger.error(`Service process selection error: ${error.message}`);
+			this.logger.error(`Sub-process selection error: ${error.message}`);
 			return null;
 		});
 
@@ -226,7 +226,7 @@ export class OperatorProcess {
 			// Mark idle on error
 			await poolItem.decrementUsage();
 			return new Response(
-				JSON.stringify({ error: '502 Bad Gateway', message: 'Service process error' }),
+				JSON.stringify({ error: '502 Bad Gateway', message: 'Sub-process error' }),
 				{
 					status: 502,
 					headers: { 'content-type': 'application/json' },
@@ -270,7 +270,7 @@ export class OperatorProcess {
 	/**
 	 * Handle configuration update from config monitor (or initial load).
 	 * Resolves value references, updates Configuration, and propagates changes
-	 * to the router, process pools, and service processes (if initialized).
+	 * to the router, responder pools, and sub-processes (if initialized).
 	 *
 	 * Safe to call before the logger is initialized (uses console fallback).
 	 * Accepts NANOS objects (converted internally by resolveConfig).
@@ -299,12 +299,12 @@ export class OperatorProcess {
 			this.logger.debug(`Router updated with ${this.router.routes.length} route(s)`);
 		}
 
-		// Update process pools (no-op if pools not yet initialized)
+		// Update responder pools (no-op if pools not yet initialized)
 		if (this.poolManagers.size > 0) {
-			await this.updateProcessPools();
+			await this.updateResponderPools();
 		}
 
-		// Broadcast config update to all service processes via their control channels
+		// Broadcast config update to all sub-processes via their control channels
 		if (this.processManager) {
 			await this.processManager.broadcastConfigUpdate();
 		}
@@ -445,10 +445,10 @@ export class OperatorProcess {
 						? routeGroup.responseFilter
 						: (this.config.config.responseFilter ?? null);
 
-					// Route matched - forward to service process with presented identity and filters
+					// Route matched - forward to sub-process with presented identity and filters
 					// presentedIdentity is the identity after route-group authn filter evaluation
 					// (may be null if suppressed by @allow-all, or the original identity if presented)
-					const response = await this.forwardToServiceProcess(req, route, match, remote, {
+					const response = await this.forwardToResponder(req, route, match, remote, {
 						identity: presentedIdentity ?? null,
 						requestFilter,
 						responseFilter,
@@ -512,9 +512,9 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Initialize service process pools
+	 * Initialize responder pools
 	 */
-	async initializeProcessPools () {
+	async initializeResponderPools () {
 		// config.pools always returns the effective pools (defaults applied by updateConfig).
 		// An explicitly empty pools object ({}) is respected as-is (no pools configured).
 		const poolsConfig = this.config.pools;
@@ -657,7 +657,7 @@ export class OperatorProcess {
 		this.validatePrivilegeConfiguration();
 		this.initializeRouter();
 		this.initializeProcessManager();
-		await this.initializeProcessPools();
+		await this.initializeResponderPools();
 		await this.startHttpServer();
 
 		if (!this.config.noSSL) {
@@ -781,10 +781,10 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Update process pools based on new configuration
+	 * Update responder pools based on new configuration
 	 */
-	async updateProcessPools () {
-		this.logger.info('Updating process pools');
+	async updateResponderPools () {
+		this.logger.info('Updating responder pools');
 		const newPoolsConfig = this.config.pools;
 
 		const stopTime = this.config.config.shutdownDelay ?? 30;
@@ -910,7 +910,7 @@ export class OperatorProcess {
 
 		if (isRoot) {
 			if (!uid || !gid) {
-				const message = 'Fatal: uid and gid must be configured when running as root. Service processes require privilege dropping for security.';
+				const message = 'Fatal: uid and gid must be configured when running as root. Sub-processes require privilege dropping for security.';
 				this.logger.error(message);
 				throw new Error(message);
 			}
