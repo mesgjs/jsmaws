@@ -1,8 +1,8 @@
 /**
- * JSMAWS Auth Middleware
- * Runs an auth provider chain for a request and returns an AuthResult.
+ * JSMAWS Authentication Chain Runner
+ * Runs an auth provider chain for a request and returns an AuthnResult.
  *
- * The chain runs providers in order; the first denial short-circuits the chain.
+ * The chain runs providers in order; the first success stops the chain.
  * Provider errors are treated as 500 Internal Server Error.
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
@@ -22,22 +22,19 @@ import { authProviderLoader } from './auth-provider-loader.esm.js';
  * @param {string} ctx.url - Full request URL
  * @param {Object} ctx.headers - Raw request headers (plain object)
  * @param {Object} ctx.cookies - Parsed cookies (plain object)
- * @param {Object|null} ctx.routeSpec - Matched route specification
- * @param {string} ctx.poolName - Pool name
  * @param {Object} [ctx.config] - Auth provider configuration (from route/pool config)
  * @param {Array} authChain - Array of auth provider config objects
  *   Each entry: { provider: '@jwt' | './path.esm.js', ...providerConfig }
  * @param {AuthProviderLoader} [loader] - Optional loader instance (for testing)
- * @returns {Promise<AuthResult>} Auth result
+ * @returns {Promise<AuthnResult>} Authn result
  *
- * AuthResult (allow):
- *   { allow: true, identity: Object|null, addHeaders: Object }
+ * AuthnResult (allow):
+ *   { allow: true, identity: Object|null, providerName: string|null }
  *   - identity: populated by the first successful auth provider (sub, roles, claims, provider)
- *   - addHeaders: headers to inject into the forwarded request (e.g. x-user-id)
- *     Applied post-filtering in the responder.
+ *   - providerName: the provider spec string that succeeded (e.g. '@jwt'), or null if no auth
  *
- * AuthResult (deny):
- *   { allow: false, identity: null, denyStatus: number, denyMessage: string }
+ * AuthnResult (deny):
+ *   { allow: false, denyStatus: number, denyMessage: string }
  *
  * Chain semantics:
  *   - Provider returns null/undefined → did not authenticate; try next provider
@@ -45,10 +42,10 @@ import { authProviderLoader } from './auth-provider-loader.esm.js';
  *   - Provider returns { allow: false, ... } → explicit denial; stop chain immediately
  *   - All providers exhausted without success → allow with null identity (no auth configured)
  */
-export async function runAuthChain (ctx, authChain, loader = authProviderLoader) {
+export async function runAuthnChain (ctx, authChain, loader = authProviderLoader) {
 	if (!authChain || !Array.isArray(authChain) || authChain.length === 0) {
 		// No auth configured — allow with null identity
-		return { allow: true, identity: null, addHeaders: {} };
+		return { allow: true, identity: null, providerName: null };
 	}
 
 	for (const providerConfig of authChain) {
@@ -64,7 +61,6 @@ export async function runAuthChain (ctx, authChain, loader = authProviderLoader)
 			// Provider load failure → 500
 			return {
 				allow: false,
-				identity: null,
 				denyStatus: 500,
 				denyMessage: `Auth provider load error: ${error.message}`,
 			};
@@ -80,9 +76,8 @@ export async function runAuthChain (ctx, authChain, loader = authProviderLoader)
 			// Provider runtime error → 500
 			return {
 				allow: false,
-				identity: null,
 				denyStatus: 500,
-				denyMessage: 'Auth provider error',
+				denyMessage: `Auth provider error: ${error.message}`,
 			};
 		}
 
@@ -92,10 +87,9 @@ export async function runAuthChain (ctx, authChain, loader = authProviderLoader)
 		}
 
 		if (!result.allow) {
-			// Explicit denial — short-circuit (no addHeaders on deny)
+			// Explicit denial — short-circuit
 			return {
 				allow: false,
-				identity: null,
 				denyStatus: result.denyStatus ?? 401,
 				denyMessage: result.denyMessage ?? 'Unauthorized',
 			};
@@ -105,14 +99,12 @@ export async function runAuthChain (ctx, authChain, loader = authProviderLoader)
 		return {
 			allow: true,
 			identity: result.identity ?? null,
-			addHeaders: (result.addHeaders && typeof result.addHeaders === 'object')
-				? result.addHeaders
-				: {},
+			providerName: providerSpec,
 		};
 	}
 
 	// All providers exhausted without success — allow with null identity
-	return { allow: true, identity: null, addHeaders: {} };
+	return { allow: true, identity: null, providerName: null };
 }
 
 /**
@@ -134,17 +126,18 @@ export function parseCookies (cookieHeader) {
 }
 
 /**
- * Build an AuthContext from a request and route information.
+ * Build an AuthContext from a request.
+ *
+ * The auth context is for authn providers (identification) only.
+ * Authorization (role checks) is a routing-layer concern handled after route matching.
  *
  * @param {Object} opts
  * @param {string} opts.method - HTTP method
  * @param {string} opts.url - Full request URL
  * @param {Object} opts.headers - Raw request headers (plain object)
- * @param {Object|null} opts.routeSpec - Matched route specification
- * @param {string} opts.poolName - Pool name
  * @returns {Object} AuthContext
  */
-export function buildAuthContext ({ method, url, headers, routeSpec, poolName }) {
+export function buildAuthContext ({ method, url, headers }) {
 	const cookieHeader = headers?.cookie ?? headers?.Cookie ?? '';
 	const cookies = parseCookies(cookieHeader);
 
@@ -153,7 +146,5 @@ export function buildAuthContext ({ method, url, headers, routeSpec, poolName })
 		url,
 		headers: headers ?? {},
 		cookies,
-		routeSpec: routeSpec ?? null,
-		poolName: poolName ?? 'standard',
 	};
 }

@@ -5,7 +5,7 @@
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";
 
 // ============================================================================
 // JWT Test Helpers
@@ -77,37 +77,34 @@ Deno.test("@jwt - allows valid HS256 JWT", async () => {
 	assertEquals(result.identity.roles, []);
 });
 
-Deno.test("@jwt - denies when no Authorization header", async () => {
+Deno.test("@jwt - returns null when no Authorization header", async () => {
 	const result = await jwtProvider.authCheck({
 		headers: {},
 		config: { secret: JWT_SECRET },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
-Deno.test("@jwt - denies when Authorization is not Bearer", async () => {
+Deno.test("@jwt - returns null when Authorization is not Bearer", async () => {
 	const result = await jwtProvider.authCheck({
 		headers: { authorization: 'Basic dXNlcjpwYXNz' },
 		config: { secret: JWT_SECRET },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
-Deno.test("@jwt - denies when Bearer token is empty", async () => {
+Deno.test("@jwt - returns null when Bearer token is empty", async () => {
 	const result = await jwtProvider.authCheck({
 		headers: { authorization: 'Bearer ' },
 		config: { secret: JWT_SECRET },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
-Deno.test("@jwt - denies when signature is invalid", async () => {
+Deno.test("@jwt - returns allow: false when signature is invalid (malicious credential)", async () => {
 	const token = await createTestJwt(
 		{ sub: 'user-123', iat: NOW, exp: NOW + 3600 },
 		'wrong-secret'
@@ -122,7 +119,7 @@ Deno.test("@jwt - denies when signature is invalid", async () => {
 	assertEquals(result.denyStatus, 401);
 });
 
-Deno.test("@jwt - denies expired token", async () => {
+Deno.test("@jwt - returns null for expired token (not malicious)", async () => {
 	const token = await createTestJwt(
 		{ sub: 'user-123', iat: NOW - 7200, exp: NOW - 3600 }, // Expired 1 hour ago
 		JWT_SECRET
@@ -133,11 +130,10 @@ Deno.test("@jwt - denies expired token", async () => {
 		config: { secret: JWT_SECRET },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
-Deno.test("@jwt - denies not-yet-valid token (nbf in future)", async () => {
+Deno.test("@jwt - returns null for not-yet-valid token (nbf in future)", async () => {
 	const token = await createTestJwt(
 		{ sub: 'user-123', iat: NOW, nbf: NOW + 3600, exp: NOW + 7200 },
 		JWT_SECRET
@@ -148,8 +144,7 @@ Deno.test("@jwt - denies not-yet-valid token (nbf in future)", async () => {
 		config: { secret: JWT_SECRET },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
 Deno.test("@jwt - allows token without exp (no expiration)", async () => {
@@ -197,51 +192,6 @@ Deno.test("@jwt - extracts roles from custom claimsField", async () => {
 	assertEquals(result.identity.roles, ['read', 'write']);
 });
 
-Deno.test("@jwt - allows when required role is present", async () => {
-	const token = await createTestJwt(
-		{ sub: 'user-123', roles: ['admin', 'user'], iat: NOW, exp: NOW + 3600 },
-		JWT_SECRET
-	);
-
-	const result = await jwtProvider.authCheck({
-		headers: { authorization: `Bearer ${token}` },
-		config: { secret: JWT_SECRET, roles: ['admin'] },
-	});
-
-	assertEquals(result.allow, true);
-	assertEquals(result.identity.sub, 'user-123');
-});
-
-Deno.test("@jwt - denies when required role is missing (403)", async () => {
-	const token = await createTestJwt(
-		{ sub: 'user-123', roles: ['user'], iat: NOW, exp: NOW + 3600 },
-		JWT_SECRET
-	);
-
-	const result = await jwtProvider.authCheck({
-		headers: { authorization: `Bearer ${token}` },
-		config: { secret: JWT_SECRET, roles: ['admin'] },
-	});
-
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 403);
-	assertEquals(result.denyMessage, 'Forbidden');
-});
-
-Deno.test("@jwt - allows when any of multiple required roles is present", async () => {
-	const token = await createTestJwt(
-		{ sub: 'user-123', roles: ['moderator'], iat: NOW, exp: NOW + 3600 },
-		JWT_SECRET
-	);
-
-	const result = await jwtProvider.authCheck({
-		headers: { authorization: `Bearer ${token}` },
-		config: { secret: JWT_SECRET, roles: ['admin', 'moderator'] },
-	});
-
-	assertEquals(result.allow, true);
-});
-
 Deno.test("@jwt - includes other claims in identity.claims", async () => {
 	const token = await createTestJwt(
 		{ sub: 'user-123', iss: 'test-issuer', custom: 'value', iat: NOW, exp: NOW + 3600 },
@@ -274,7 +224,7 @@ Deno.test("@jwt - handles Authorization header case-insensitively", async () => 
 	assertEquals(result.identity.sub, 'user-123');
 });
 
-Deno.test("@jwt - denies malformed JWT (wrong number of parts)", async () => {
+Deno.test("@jwt - returns allow: false for malformed JWT (wrong number of parts)", async () => {
 	const result = await jwtProvider.authCheck({
 		headers: { authorization: 'Bearer not.a.valid.jwt.token' },
 		config: { secret: JWT_SECRET },
@@ -302,24 +252,22 @@ Deno.test("@api-key - allows valid key from keys list", () => {
 	assertEquals(result.identity.roles, []);
 });
 
-Deno.test("@api-key - denies invalid key", () => {
+Deno.test("@api-key - returns null for invalid key (try next provider)", () => {
 	const result = apiKeyProvider.authCheck({
 		headers: { 'x-api-key': 'invalid-key' },
 		config: { keys: 'secret-key-1,secret-key-2' },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
-Deno.test("@api-key - denies when header is missing", () => {
+Deno.test("@api-key - returns null when header is missing (provider did not recognize request)", () => {
 	const result = apiKeyProvider.authCheck({
 		headers: {},
 		config: { keys: 'secret-key-1' },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
 Deno.test("@api-key - uses custom header name", () => {
@@ -351,14 +299,13 @@ Deno.test("@api-key - uses keyMap to resolve subject", () => {
 	assertEquals(result.identity.sub, 'alice');
 });
 
-Deno.test("@api-key - denies key not in keyMap", () => {
+Deno.test("@api-key - returns null for key not in keyMap", () => {
 	const result = apiKeyProvider.authCheck({
 		headers: { 'x-api-key': 'unknown-key' },
 		config: { keyMap: { 'key-abc': 'alice' } },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
 Deno.test("@api-key - accepts keys as array", () => {
@@ -381,14 +328,13 @@ Deno.test("@api-key - accepts keyMap as JSON string", () => {
 	assertEquals(result.identity.sub, 'alice');
 });
 
-Deno.test("@api-key - denies when no keys or keyMap configured", () => {
+Deno.test("@api-key - returns null when no keys or keyMap configured", () => {
 	const result = apiKeyProvider.authCheck({
 		headers: { 'x-api-key': 'any-key' },
 		config: {},
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
 // ============================================================================
@@ -416,51 +362,45 @@ Deno.test("@basic - allows valid credentials", () => {
 	assertEquals(result.identity.roles, []);
 });
 
-Deno.test("@basic - denies wrong password", () => {
+Deno.test("@basic - returns null for wrong password (try next provider)", () => {
 	const result = basicProvider.authCheck({
 		headers: { authorization: makeBasicAuth('alice', 'wrong') },
 		config: { users: { alice: 'secret' } },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
-Deno.test("@basic - denies unknown username", () => {
+Deno.test("@basic - returns null for unknown username (try next provider)", () => {
 	const result = basicProvider.authCheck({
 		headers: { authorization: makeBasicAuth('unknown', 'secret') },
 		config: { users: { alice: 'secret' } },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
-Deno.test("@basic - denies when no Authorization header (returns WWW-Authenticate)", () => {
+Deno.test("@basic - returns null when no Authorization header (provider did not recognize request)", () => {
 	const result = basicProvider.authCheck({
 		headers: {},
 		config: { users: { alice: 'secret' }, realm: 'TestApp' },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
-	assertExists(result.addHeaders);
-	assertEquals(result.addHeaders['www-authenticate'], 'Basic realm="TestApp"');
+	assertEquals(result, null);
 });
 
-Deno.test("@basic - uses default realm 'Protected' when not configured", () => {
+Deno.test("@basic - returns null when Authorization is not Basic (provider did not recognize request)", () => {
 	const result = basicProvider.authCheck({
-		headers: {},
+		headers: { authorization: 'Bearer some-token' },
 		config: { users: { alice: 'secret' } },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.addHeaders['www-authenticate'], 'Basic realm="Protected"');
+	assertEquals(result, null);
 });
 
-Deno.test("@basic - denies when Authorization is not Basic", () => {
+Deno.test("@basic - returns allow: false for malformed base64 (structurally invalid credential)", () => {
 	const result = basicProvider.authCheck({
-		headers: { authorization: 'Bearer some-token' },
+		headers: { authorization: 'Basic not-valid-base64!!!' },
 		config: { users: { alice: 'secret' } },
 	});
 
@@ -518,14 +458,13 @@ Deno.test("@basic - supports base64=true (boolean)", () => {
 	assertEquals(result.allow, true);
 });
 
-Deno.test("@basic - denies when base64 password doesn't match", () => {
+Deno.test("@basic - returns null when base64 password doesn't match (try next provider)", () => {
 	const result = basicProvider.authCheck({
 		headers: { authorization: makeBasicAuth('alice', 'wrong') },
 		config: { users: { alice: btoa('secret') }, base64: '@t' },
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });
 
 Deno.test("@basic - handles password with colon (base64 encoding)", () => {
@@ -539,12 +478,11 @@ Deno.test("@basic - handles password with colon (base64 encoding)", () => {
 	assertEquals(result.identity.sub, 'alice');
 });
 
-Deno.test("@basic - denies when no users configured", () => {
+Deno.test("@basic - returns null when no users configured", () => {
 	const result = basicProvider.authCheck({
 		headers: { authorization: makeBasicAuth('alice', 'secret') },
 		config: {},
 	});
 
-	assertEquals(result.allow, false);
-	assertEquals(result.denyStatus, 401);
+	assertEquals(result, null);
 });

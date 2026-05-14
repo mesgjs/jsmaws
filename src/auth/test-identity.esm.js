@@ -1,10 +1,14 @@
 /**
- * JSMAWS Built-in Auth Provider: @allow-all
- * Always allows the request, injecting a configurable identity.
- * Useful for development and testing.
+ * JSMAWS Built-in Auth Provider: @test-identity
+ * Always succeeds, injecting a configurable identity.
+ * Intended for development and testing only.
+ *
+ * This provider replaces the former @allow-all provider. The name change avoids
+ * confusion with the routing-layer @allow-all construct (which is a scalar filter
+ * in route-group authn, not a provider module).
  *
  * Configuration:
- *   provider=@allow-all
+ *   provider=@test-identity
  *   identity=[sub=dev-user  roles=[admin]]
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
@@ -12,7 +16,7 @@
 
 export default {
 	/**
-	 * Always allows the request.
+	 * Always succeeds, injecting a configurable identity.
 	 * @param {Object} ctx - AuthContext
 	 * @param {Object} ctx.config - Provider configuration
 	 * @param {Object} [ctx.config.identity] - Identity to inject (optional)
@@ -26,12 +30,12 @@ export default {
 			// Build identity from config spec
 			const roles = identitySpec.roles;
 			identity = {
-				sub: identitySpec.sub ?? 'allow-all',
+				sub: identitySpec.sub ?? 'test-identity',
 				roles: Array.isArray(roles)
 					? roles
 					: (roles ? Object.values(roles) : []),
 				claims: {},
-				provider: '@allow-all',
+				provider: '@test-identity',
 			};
 		}
 

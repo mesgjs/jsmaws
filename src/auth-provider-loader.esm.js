@@ -3,13 +3,15 @@
  * Loads and caches auth provider modules, resolves built-in provider aliases.
  *
  * Built-in provider aliases:
- *   @allow-all       → src/auth/allow-all.esm.js
- *   @deny-all        → src/auth/deny-all.esm.js
+ *   @test-identity   → src/auth/test-identity.esm.js
  *   @jwt             → src/auth/jwt.esm.js
  *   @api-key         → src/auth/api-key.esm.js
  *   @basic           → src/auth/basic.esm.js
  *   @session         → src/auth/session.esm.js
  *   @oauth-introspect → src/auth/oauth-introspect.esm.js
+ *
+ * Note: @allow-all and @deny-all are routing-layer constructs (scalar filters in
+ * route-group authn), not provider modules. They are not loadable via this loader.
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -18,13 +20,14 @@
  * Map of built-in provider aliases to their module paths (relative to this file).
  */
 const BUILTIN_PROVIDERS = {
-	'@allow-all': './auth/allow-all.esm.js',
-	'@deny-all': './auth/deny-all.esm.js',
+	'@test-identity': './auth/test-identity.esm.js',
 	'@jwt': './auth/jwt.esm.js',
 	'@api-key': './auth/api-key.esm.js',
 	'@basic': './auth/basic.esm.js',
 	'@session': './auth/session.esm.js',
 	'@oauth-introspect': './auth/oauth-introspect.esm.js',
+	// Can we support an alias (like @rfc7662)?
+	// And report whichever name was used in the provider field?
 };
 
 /**
@@ -57,7 +60,7 @@ export class AuthProviderLoader {
 	 *
 	 * @param {string} providerSpec - Provider path or built-in alias (e.g. '@jwt', './auth/my-provider.esm.js')
 	 * @param {string} [baseUrl] - Base URL for resolving relative paths (defaults to import.meta.url)
-	 * @returns {Promise<Object>} Auth provider module (with authCheck, optionally filterRequest/filterResponse)
+	 * @returns {Promise<Object>} Auth provider module (with authCheck method)
 	 */
 	async load (providerSpec, baseUrl = import.meta.url) {
 		// Resolve built-in alias to module path

@@ -24,6 +24,29 @@ export class RouterWorkerProxy {
 	}
 
 	/**
+	 * Find route using worker
+	 * @param {string} pathname - URL pathname
+	 * @param {string} method - HTTP method
+	 * @param {string|null} [hostname] - Request hostname (for hostRoutes support)
+	 * @param {Object|null} [authState] - Auth state: { identity, providerName } or null
+	 * @returns {Promise<Object|null>} Route match result or null
+	 *   Result: { route, match, routeGroup, presentedIdentity }
+	 */
+	async findRoute (pathname, method, hostname = null, authState = null) {
+		if (!this.isInitialized) {
+			throw new Error('Worker not initialized');
+		}
+
+		this.isAvailable = false;
+		try {
+			const result = await this.sendMessage('route', { pathname, method, hostname, authState });
+			return result;
+		} finally {
+			this.isAvailable = true;
+		}
+	}
+
+	/**
 	 * Generate unique message ID
 	 */
 	generateMessageId () {
@@ -31,24 +54,20 @@ export class RouterWorkerProxy {
 	}
 
 	/**
-	 * Send message to worker and wait for response
+	 * Handle worker error
 	 */
-	async sendMessage (type, data, timeoutMs = 30000) {
-		const id = this.generateMessageId();
+	handleWorkerError (error) {
+		console.error(`[RouterWorkerProxy:${this.id}] Worker error:`, error);
 
-		return new Promise((resolve, reject) => {
-			// Set up timeout
-			const timeout = setTimeout(() => {
-				this.pendingMessages.delete(id);
-				reject(new Error(`Worker message timeout: ${type}`));
-			}, timeoutMs);
+		// Reject all pending messages
+		for (const [id, pending] of this.pendingMessages.entries()) {
+			clearTimeout(pending.timeout);
+			pending.reject(new Error('Worker crashed'));
+		}
+		this.pendingMessages.clear();
 
-			// Store pending message
-			this.pendingMessages.set(id, { resolve, reject, timeout });
-
-			// Send message to worker
-			this.worker.postMessage({ type, id, data });
-		});
+		this.isAvailable = false;
+		this.isInitialized = false;
 	}
 
 	/**
@@ -76,23 +95,6 @@ export class RouterWorkerProxy {
 	}
 
 	/**
-	 * Handle worker error
-	 */
-	handleWorkerError (error) {
-		console.error(`[RouterWorkerProxy:${this.id}] Worker error:`, error);
-
-		// Reject all pending messages
-		for (const [id, pending] of this.pendingMessages.entries()) {
-			clearTimeout(pending.timeout);
-			pending.reject(new Error('Worker crashed'));
-		}
-		this.pendingMessages.clear();
-
-		this.isAvailable = false;
-		this.isInitialized = false;
-	}
-
-	/**
 	 * Initialize worker with configuration
 	 * @param {Configuration} config Configuration instance
 	 */
@@ -105,35 +107,24 @@ export class RouterWorkerProxy {
 	}
 
 	/**
-	 * Update worker configuration
-	 * @param {Configuration} config Configuration instance
+	 * Send message to worker and wait for response
 	 */
-	async updateConfig (config) {
-		// Serialize configuration as JSON (plain objects) for transmission
-		const configJson = JSON.stringify(config.config);
-		await this.sendMessage('config', { config: configJson });
-	}
+	async sendMessage (type, data, timeoutMs = 30000) {
+		const id = this.generateMessageId();
 
-	/**
-	 * Find route using worker
-	 * @param {string} pathname - URL pathname
-	 * @param {string} method - HTTP method
-	 * @param {string|null} [hostname] - Request hostname (for hostRoutes support)
-	 * @returns {Promise<Object|null>} Route match result or null
-	 *   Result: { route, match, routeGroup } where routeGroup is the matched group config (or null)
-	 */
-	async findRoute (pathname, method, hostname = null) {
-		if (!this.isInitialized) {
-			throw new Error('Worker not initialized');
-		}
+		return new Promise((resolve, reject) => {
+			// Set up timeout
+			const timeout = setTimeout(() => {
+				this.pendingMessages.delete(id);
+				reject(new Error(`Worker message timeout: ${type}`));
+			}, timeoutMs);
 
-		this.isAvailable = false;
-		try {
-			const result = await this.sendMessage('route', { pathname, method, hostname });
-			return result;
-		} finally {
-			this.isAvailable = true;
-		}
+			// Store pending message
+			this.pendingMessages.set(id, { resolve, reject, timeout });
+
+			// Send message to worker
+			this.worker.postMessage({ type, id, data });
+		});
 	}
 
 	/**
@@ -150,5 +141,15 @@ export class RouterWorkerProxy {
 		this.worker.terminate();
 		this.isAvailable = false;
 		this.isInitialized = false;
+	}
+
+	/**
+	 * Update worker configuration
+	 * @param {Configuration} config Configuration instance
+	 */
+	async updateConfig (config) {
+		// Serialize configuration as JSON (plain objects) for transmission
+		const configJson = JSON.stringify(config.config);
+		await this.sendMessage('config', { config: configJson });
 	}
 }

@@ -9,8 +9,12 @@
  *   secret=:env:JWT_SECRET        (for HMAC algorithms)
  *   publicKey=:env:JWT_PUBLIC_KEY  (for RSA algorithms, PEM format)
  *   algorithm=HS256                (default: HS256)
- *   roles=[user admin]             (optional: require at least one of these roles)
  *   claimsField=roles              (optional: JWT claim field containing roles, default: 'roles')
+ *
+ * Return values (per auth-revisions-20260510.md 2026-05-11-B):
+ *   null                          — no Bearer header, empty token, expired, or not-yet-valid
+ *   { allow: true, identity }     — valid JWT; identity includes sub, roles, claims, provider
+ *   { allow: false, ... }         — structurally invalid or bad signature (malicious credential)
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -78,16 +82,24 @@ async function importRsaPublicKey (pem, algorithm) {
 }
 
 /**
- * Verify a JWT token and return its payload.
+ * Verify a JWT token and return a status object.
+ *
+ * Configuration errors (missing secret/key, unsupported algorithm) are thrown as
+ * exceptions — they indicate server misconfiguration that should have been caught
+ * at config load time, not normal token verification outcomes.
+ *
  * @param {string} token - JWT token string
  * @param {Object} config - Provider configuration
- * @returns {Promise<Object>} Decoded payload
- * @throws {Error} If verification fails
+ * @returns {Promise<Object>} Status object:
+ *   { ok: true, payload }          — valid JWT
+ *   { ok: false, reason: 'expired' }  — expired or not-yet-valid (not malicious)
+ *   { ok: false, reason: 'invalid' }  — bad format or bad signature (malicious/invalid)
+ * @throws {Error} If provider configuration is invalid (missing secret/key, unsupported algorithm)
  */
 async function verifyJwt (token, config) {
 	const parts = token.split('.');
 	if (parts.length !== 3) {
-		throw new Error('Invalid JWT format');
+		return { ok: false, reason: 'invalid' };
 	}
 
 	const [headerB64, payloadB64, signatureB64] = parts;
@@ -97,17 +109,17 @@ async function verifyJwt (token, config) {
 	try {
 		header = JSON.parse(decodeBase64Url(headerB64).string);
 	} catch (_) {
-		throw new Error('Invalid JWT header');
+		return { ok: false, reason: 'invalid' };
 	}
 
-	// Determine algorithm
+	// Determine algorithm — unsupported algorithm is a config error
 	const algorithmName = config.algorithm ?? header.alg ?? 'HS256';
 	const algorithm = ALGORITHM_MAP[algorithmName];
 	if (!algorithm) {
 		throw new Error(`Unsupported JWT algorithm: ${algorithmName}`);
 	}
 
-	// Import key
+	// Import key — missing key is a config error
 	let cryptoKey;
 	if (algorithm.name === 'HMAC') {
 		const secret = config.secret;
@@ -119,19 +131,18 @@ async function verifyJwt (token, config) {
 		cryptoKey = await importRsaPublicKey(publicKey, algorithm);
 	}
 
-	// Verify signature
-	const signingInput = enc.encode(`${headerB64}.${payloadB64}`);
-	const signature = decodeBase64Url(signatureB64).bytes;
-
-	const valid = await crypto.subtle.verify(
-		algorithm,
-		cryptoKey,
-		signature,
-		signingInput
-	);
+	// Verify signature — bad signature is a client/credential problem
+	let valid;
+	try {
+		const signingInput = enc.encode(`${headerB64}.${payloadB64}`);
+		const signature = decodeBase64Url(signatureB64).bytes;
+		valid = await crypto.subtle.verify(algorithm, cryptoKey, signature, signingInput);
+	} catch (_) {
+		return { ok: false, reason: 'invalid' };
+	}
 
 	if (!valid) {
-		throw new Error('JWT signature verification failed');
+		return { ok: false, reason: 'invalid' };
 	}
 
 	// Decode payload
@@ -139,30 +150,41 @@ async function verifyJwt (token, config) {
 	try {
 		payload = JSON.parse(decodeBase64Url(payloadB64).string);
 	} catch (_) {
-		throw new Error('Invalid JWT payload');
+		return { ok: false, reason: 'invalid' };
 	}
 
-	// Check expiration
+	// Check expiration — expired/not-yet-valid is not malicious
 	const now = Math.floor(Date.now() / 1000);
 	if (payload.exp && payload.exp < now) {
-		throw new Error('JWT token expired');
+		return { ok: false, reason: 'expired' };
 	}
 
 	// Check not-before
 	if (payload.nbf && payload.nbf > now) {
-		throw new Error('JWT token not yet valid');
+		return { ok: false, reason: 'expired' };
 	}
 
-	return payload;
+	return { ok: true, payload };
 }
 
 export default {
 	/**
 	 * Verify JWT in Authorization: Bearer header.
+	 *
+	 * Per auth-revisions-20260510.md 2026-05-11-B:
+	 *   - No Bearer header → null (provider did not recognize this request)
+	 *   - Empty token → null
+	 *   - Expired/not-yet-valid → null (not malicious; try next provider)
+	 *   - Invalid format/bad signature → { allow: false } (structurally invalid/malicious)
+	 *   - Config error → propagated as Error (server misconfiguration)
+	 *   - Valid JWT → { allow: true, identity }
+	 *
+	 * Role checks are removed from this provider; role is a routing-layer concern.
+	 *
 	 * @param {Object} ctx - AuthContext
 	 * @param {Object} ctx.headers - Request headers
 	 * @param {Object} ctx.config - Provider configuration
-	 * @returns {Promise<Object>} AuthResult
+	 * @returns {Promise<Object|null>} AuthResult or null
 	 */
 	async authCheck (ctx) {
 		const { headers, config } = ctx;
@@ -170,36 +192,33 @@ export default {
 		// Extract Bearer token from Authorization header
 		const authHeader = headers?.authorization ?? headers?.Authorization ?? '';
 		if (!authHeader.startsWith('Bearer ')) {
-			return {
-				allow: false,
-				identity: null,
-				denyStatus: 401,
-				denyMessage: 'Unauthorized',
-			};
+			// No Bearer header — provider did not recognize this request
+			return null;
 		}
 
 		const token = authHeader.slice(7).trim();
 		if (!token) {
+			// Empty token — provider did not recognize this request
+			return null;
+		}
+
+		// verifyJwt() throws on config errors; returns status object for token outcomes
+		const result = await verifyJwt(token, config);
+
+		if (!result.ok) {
+			if (result.reason === 'expired') {
+				// Expired or not-yet-valid — not malicious; try next provider
+				return null;
+			}
+			// Structural error or bad signature — malicious/invalid credential
 			return {
 				allow: false,
-				identity: null,
 				denyStatus: 401,
 				denyMessage: 'Unauthorized',
 			};
 		}
 
-		let payload;
-		try {
-			payload = await verifyJwt(token, config);
-		} catch (_error) {
-			// Do not leak verification error details to client
-			return {
-				allow: false,
-				identity: null,
-				denyStatus: 401,
-				denyMessage: 'Unauthorized',
-			};
-		}
+		const { payload } = result;
 
 		// Extract roles from configured claim field (default: 'roles')
 		const claimsField = config?.claimsField ?? 'roles';
@@ -207,24 +226,6 @@ export default {
 		const roles = Array.isArray(rawRoles)
 			? rawRoles
 			: (rawRoles ? [rawRoles] : []);
-
-		// Check required roles (if configured)
-		const requiredRoles = config?.roles;
-		if (requiredRoles) {
-			const required = Array.isArray(requiredRoles)
-				? requiredRoles
-				: Object.values(requiredRoles);
-
-			const hasRole = required.some(r => roles.includes(r));
-			if (!hasRole) {
-				return {
-					allow: false,
-					identity: null,
-					denyStatus: 403,
-					denyMessage: 'Forbidden',
-				};
-			}
-		}
 
 		// Build identity from JWT claims
 		const { sub, iss, aud, exp, nbf, iat, jti, [claimsField]: _roles, ...otherClaims } = payload;

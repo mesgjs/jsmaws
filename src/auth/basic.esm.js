@@ -4,7 +4,6 @@
  *
  * Configuration:
  *   provider=@basic
- *   realm=MyApp                   (WWW-Authenticate realm, default: 'Protected')
  *   users=:env:BASIC_AUTH_USERS   (JSON object mapping username → password, or
  *                                  comma-separated "user:pass" pairs)
  *   base64=@t                     (optional: passwords in users map are base64-encoded,
@@ -14,6 +13,15 @@
  * string. The decoded value is compared against the submitted password. This is useful
  * when passwords contain special characters (colons, commas) that would interfere with
  * the comma-separated "user:pass" parsing format.
+ *
+ * Return values (per auth-revisions-20260510.md 2026-05-11-B):
+ *   null                          — no Basic header (provider did not recognize request)
+ *   { allow: false, ... }         — malformed base64 (structurally invalid credential)
+ *   null                          — wrong credentials (try next provider)
+ *   { allow: true, identity }     — valid credentials
+ *
+ * Note: The realm config option is retained for documentation purposes but WWW-Authenticate
+ * headers are no longer injected by this provider. Response headers are a mod-app concern.
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -62,26 +70,29 @@ function parseUsers (usersSpec) {
 export default {
 	/**
 	 * Verify HTTP Basic Authentication credentials.
+	 *
+	 * Per auth-revisions-20260510.md 2026-05-11-B:
+	 *   - No Basic header → null (provider did not recognize this request)
+	 *   - Malformed base64 → { allow: false } (structurally invalid credential)
+	 *   - Wrong credentials → null (try next provider)
+	 *   - Valid credentials → { allow: true, identity }
+	 *
+	 * WWW-Authenticate response headers are a mod-app concern, not a provider concern.
+	 *
 	 * @param {Object} ctx - AuthContext
 	 * @param {Object} ctx.headers - Request headers
 	 * @param {Object} ctx.config - Provider configuration
-	 * @returns {Object} AuthResult
+	 * @returns {Object|null} AuthResult or null
 	 */
 	authCheck (ctx) {
 		const { headers, config } = ctx;
-		const realm = config?.realm ?? 'Protected';
 		const useBase64Passwords = config?.base64 === true || config?.base64 === '@t' || config?.base64 === 'true';
 
 		// Extract Basic credentials from Authorization header
 		const authHeader = headers?.authorization ?? headers?.Authorization ?? '';
 		if (!authHeader.startsWith('Basic ')) {
-			return {
-				allow: false,
-				identity: null,
-				denyStatus: 401,
-				denyMessage: 'Unauthorized',
-				addHeaders: { 'www-authenticate': `Basic realm="${realm}"` },
-			};
+			// No Basic header — provider did not recognize this request
+			return null;
 		}
 
 		const encoded = authHeader.slice(6).trim();
@@ -89,9 +100,9 @@ export default {
 		try {
 			decoded = atob(encoded);
 		} catch (_) {
+			// Malformed base64 — structurally invalid credential
 			return {
 				allow: false,
-				identity: null,
 				denyStatus: 401,
 				denyMessage: 'Unauthorized',
 			};
@@ -99,9 +110,9 @@ export default {
 
 		const colonIdx = decoded.indexOf(':');
 		if (colonIdx < 0) {
+			// No colon separator — structurally invalid credential
 			return {
 				allow: false,
-				identity: null,
 				denyStatus: 401,
 				denyMessage: 'Unauthorized',
 			};
@@ -115,12 +126,8 @@ export default {
 		const storedPassword = users[username];
 
 		if (storedPassword === undefined) {
-			return {
-				allow: false,
-				identity: null,
-				denyStatus: 401,
-				denyMessage: 'Unauthorized',
-			};
+			// Unknown username — try next provider
+			return null;
 		}
 
 		// Decode stored password if base64 option is enabled
@@ -129,23 +136,14 @@ export default {
 			try {
 				expectedPassword = atob(storedPassword);
 			} catch (_) {
-				// Invalid base64 in config — treat as auth failure
-				return {
-					allow: false,
-					identity: null,
-					denyStatus: 401,
-					denyMessage: 'Unauthorized',
-				};
+				// Invalid base64 in config — treat as auth failure (try next provider)
+				return null;
 			}
 		}
 
 		if (expectedPassword !== password) {
-			return {
-				allow: false,
-				identity: null,
-				denyStatus: 401,
-				denyMessage: 'Unauthorized',
-			};
+			// Wrong password — try next provider
+			return null;
 		}
 
 		const identity = {

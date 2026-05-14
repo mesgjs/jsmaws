@@ -1,12 +1,12 @@
 /**
- * Tests for JSMAWS Auth Middleware
- * Tests the runAuthChain() function and related helpers
+ * Tests for JSMAWS Authentication Chain Runner
+ * Tests the runAuthnChain() function and related helpers
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";
-import { runAuthChain, parseCookies, buildAuthContext } from "../src/auth-middleware.esm.js";
+import { assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";
+import { runAuthnChain, parseCookies, buildAuthContext } from "../src/authn-chain.esm.js";
 
 // ============================================================================
 // parseCookies Tests
@@ -43,16 +43,12 @@ Deno.test("buildAuthContext - builds context from request info", () => {
 		method: 'GET',
 		url: 'https://example.com/api/users',
 		headers: { authorization: 'Bearer token123', cookie: 'session=abc' },
-		routeSpec: { path: 'api/users', pool: 'standard' },
-		poolName: 'standard',
 	});
 
 	assertEquals(ctx.method, 'GET');
 	assertEquals(ctx.url, 'https://example.com/api/users');
 	assertEquals(ctx.headers.authorization, 'Bearer token123');
 	assertEquals(ctx.cookies.session, 'abc');
-	assertEquals(ctx.poolName, 'standard');
-	assertExists(ctx.routeSpec);
 });
 
 Deno.test("buildAuthContext - handles missing headers", () => {
@@ -60,59 +56,56 @@ Deno.test("buildAuthContext - handles missing headers", () => {
 		method: 'GET',
 		url: 'https://example.com/',
 		headers: null,
-		routeSpec: null,
-		poolName: null,
 	});
 
 	assertEquals(ctx.headers, {});
 	assertEquals(ctx.cookies, {});
-	assertEquals(ctx.poolName, 'standard');
-	assertEquals(ctx.routeSpec, null);
 });
 
 // ============================================================================
-// runAuthChain Tests - No Auth
+// runAuthnChain Tests - No Auth
 // ============================================================================
 
-Deno.test("runAuthChain - allows when no auth chain", async () => {
+Deno.test("runAuthnChain - allows when no auth chain", async () => {
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, []);
+	const result = await runAuthnChain(ctx, []);
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
-	assertEquals(result.addHeaders, {});
+	assertEquals(result.providerName, null);
 });
 
-Deno.test("runAuthChain - allows when auth chain is null", async () => {
+Deno.test("runAuthnChain - allows when auth chain is null", async () => {
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, null);
+	const result = await runAuthnChain(ctx, null);
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
+	assertEquals(result.providerName, null);
 });
 
 // ============================================================================
-// runAuthChain Tests - First Success Stops Chain
+// runAuthnChain Tests - First Success Stops Chain
 // ============================================================================
 
-Deno.test("runAuthChain - stops at first success (does not accumulate identity)", async () => {
+Deno.test("runAuthnChain - stops at first success (does not accumulate identity)", async () => {
 	let callCount = 0;
 	const mockLoader = {
 		async load (spec) {
 			return {
-				async authCheck (ctx) {
+				async authCheck (_ctx) {
 					callCount++;
 					if (spec === 'provider1') {
-						return { allow: true, identity: { sub: 'user-from-provider1' }, addHeaders: {} };
+						return { allow: true, identity: { sub: 'user-from-provider1' } };
 					}
-					return { allow: true, identity: { sub: 'user-from-provider2' }, addHeaders: {} };
+					return { allow: true, identity: { sub: 'user-from-provider2' } };
 				},
 			};
 		},
 	};
 
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [
+	const result = await runAuthnChain(ctx, [
 		{ provider: 'provider1' },
 		{ provider: 'provider2' },
 	], mockLoader);
@@ -120,34 +113,36 @@ Deno.test("runAuthChain - stops at first success (does not accumulate identity)"
 	// First provider succeeded — chain stopped
 	assertEquals(result.allow, true);
 	assertEquals(result.identity.sub, 'user-from-provider1');
+	assertEquals(result.providerName, 'provider1');
 	assertEquals(callCount, 1); // Only first provider called
 });
 
-Deno.test("runAuthChain - tries next provider when first returns null", async () => {
+Deno.test("runAuthnChain - tries next provider when first returns null", async () => {
 	const mockLoader = {
 		async load (spec) {
 			return {
-				async authCheck (ctx) {
+				async authCheck (_ctx) {
 					if (spec === 'provider1') {
 						return null; // Did not authenticate
 					}
-					return { allow: true, identity: { sub: 'user-from-provider2' }, addHeaders: {} };
+					return { allow: true, identity: { sub: 'user-from-provider2' } };
 				},
 			};
 		},
 	};
 
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [
+	const result = await runAuthnChain(ctx, [
 		{ provider: 'provider1' },
 		{ provider: 'provider2' },
 	], mockLoader);
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity.sub, 'user-from-provider2');
+	assertEquals(result.providerName, 'provider2');
 });
 
-Deno.test("runAuthChain - allows with null identity when all providers return null", async () => {
+Deno.test("runAuthnChain - allows with null identity when all providers return null", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			return {
@@ -159,7 +154,7 @@ Deno.test("runAuthChain - allows with null identity when all providers return nu
 	};
 
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [
+	const result = await runAuthnChain(ctx, [
 		{ provider: 'provider1' },
 		{ provider: 'provider2' },
 	], mockLoader);
@@ -167,13 +162,14 @@ Deno.test("runAuthChain - allows with null identity when all providers return nu
 	// All providers exhausted without success — allow with null identity
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
+	assertEquals(result.providerName, null);
 });
 
 // ============================================================================
-// runAuthChain Tests - Denial
+// runAuthnChain Tests - Denial
 // ============================================================================
 
-Deno.test("runAuthChain - short-circuits on explicit denial", async () => {
+Deno.test("runAuthnChain - short-circuits on explicit denial", async () => {
 	let callCount = 0;
 	const mockLoader = {
 		async load (_spec) {
@@ -187,7 +183,7 @@ Deno.test("runAuthChain - short-circuits on explicit denial", async () => {
 	};
 
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [
+	const result = await runAuthnChain(ctx, [
 		{ provider: 'provider1' },
 		{ provider: 'provider2' },
 	], mockLoader);
@@ -197,7 +193,7 @@ Deno.test("runAuthChain - short-circuits on explicit denial", async () => {
 	assertEquals(callCount, 1); // Only first provider called
 });
 
-Deno.test("runAuthChain - returns 500 on provider load error", async () => {
+Deno.test("runAuthnChain - returns 500 on provider load error", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			throw new Error('Module not found');
@@ -205,13 +201,13 @@ Deno.test("runAuthChain - returns 500 on provider load error", async () => {
 	};
 
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [{ provider: 'bad-provider' }], mockLoader);
+	const result = await runAuthnChain(ctx, [{ provider: 'bad-provider' }], mockLoader);
 
 	assertEquals(result.allow, false);
 	assertEquals(result.denyStatus, 500);
 });
 
-Deno.test("runAuthChain - returns 500 on provider runtime error", async () => {
+Deno.test("runAuthnChain - returns 500 on provider runtime error", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			return {
@@ -223,171 +219,113 @@ Deno.test("runAuthChain - returns 500 on provider runtime error", async () => {
 	};
 
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [{ provider: 'error-provider' }], mockLoader);
+	const result = await runAuthnChain(ctx, [{ provider: 'error-provider' }], mockLoader);
 
 	assertEquals(result.allow, false);
 	assertEquals(result.denyStatus, 500);
 });
 
 // ============================================================================
-// runAuthChain Tests - addHeaders
+// runAuthnChain Tests - providerName in result
 // ============================================================================
 
-Deno.test("runAuthChain - returns addHeaders from successful provider", async () => {
+Deno.test("runAuthnChain - includes providerName in success result", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			return {
 				async authCheck (_ctx) {
-					return {
-						allow: true,
-						identity: { sub: 'user-123' },
-						addHeaders: { 'x-user-id': 'user-123', 'x-user-role': 'admin' },
-					};
+					return { allow: true, identity: { sub: 'user-123' } };
 				},
 			};
 		},
 	};
 
 	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [{ provider: 'provider1' }], mockLoader);
+	const result = await runAuthnChain(ctx, [{ provider: '@jwt' }], mockLoader);
 
 	assertEquals(result.allow, true);
-	assertEquals(result.addHeaders['x-user-id'], 'user-123');
-	assertEquals(result.addHeaders['x-user-role'], 'admin');
-});
-
-Deno.test("runAuthChain - returns empty addHeaders when provider returns none", async () => {
-	const mockLoader = {
-		async load (_spec) {
-			return {
-				async authCheck (_ctx) {
-					return { allow: true, identity: { sub: 'user-123' } }; // No addHeaders
-				},
-			};
-		},
-	};
-
-	const ctx = buildAuthContext({ method: 'GET', url: 'https://example.com/', headers: {} });
-	const result = await runAuthChain(ctx, [{ provider: 'provider1' }], mockLoader);
-
-	assertEquals(result.allow, true);
-	assertEquals(result.addHeaders, {});
+	assertEquals(result.providerName, '@jwt');
 });
 
 // ============================================================================
-// OperatorAuth Tests
+// OperatorAuthn Tests
 // ============================================================================
 
-import { OperatorAuth } from "../src/operator-auth.esm.js";
+import { OperatorAuthn } from "../src/operator-authn.esm.js";
 
-Deno.test("OperatorAuth - allows when no authn configured", async () => {
-	const auth = new OperatorAuth();
-	const result = await auth.runAuth({
+Deno.test("OperatorAuthn - allows when no authn configured", async () => {
+	const auth = new OperatorAuthn();
+	const result = await auth.runAuthn({
 		method: 'GET',
 		url: 'https://example.com/',
 		headers: {},
-		routeSpec: null,
-		poolName: 'standard',
-		routeGroup: null,
 		topLevelAuthn: [],
 	});
 
 	assertEquals(result.allow, true);
 	assertEquals(result.identity, null);
+	assertEquals(result.providerName, null);
 });
 
-Deno.test("OperatorAuth - uses route-group authn over top-level authn", async () => {
-	let usedChain = null;
+Deno.test("OperatorAuthn - runs top-level authn chain", async () => {
+	let usedSpec = null;
 	const mockLoader = {
 		async load (spec) {
-			usedChain = spec;
+			usedSpec = spec;
 			return {
 				async authCheck (_ctx) {
-					return { allow: true, identity: { sub: 'user', provider: spec }, addHeaders: {} };
+					return { allow: true, identity: { sub: 'user', provider: spec } };
 				},
 			};
 		},
 	};
 
-	const auth = new OperatorAuth({ loader: mockLoader });
-	const result = await auth.runAuth({
+	const auth = new OperatorAuthn({ loader: mockLoader });
+	const result = await auth.runAuthn({
 		method: 'GET',
 		url: 'https://example.com/',
 		headers: { authorization: 'Bearer token' },
-		routeSpec: null,
-		poolName: 'standard',
-		routeGroup: { authn: [{ provider: 'group-provider' }] },
 		topLevelAuthn: [{ provider: 'top-level-provider' }],
 	});
 
 	assertEquals(result.allow, true);
-	assertEquals(usedChain, 'group-provider'); // Route-group authn was used
+	assertEquals(usedSpec, 'top-level-provider');
+	assertEquals(result.providerName, 'top-level-provider');
 });
 
-Deno.test("OperatorAuth - falls back to top-level authn when no route-group authn", async () => {
-	let usedChain = null;
-	const mockLoader = {
-		async load (spec) {
-			usedChain = spec;
-			return {
-				async authCheck (_ctx) {
-					return { allow: true, identity: { sub: 'user', provider: spec }, addHeaders: {} };
-				},
-			};
-		},
-	};
-
-	const auth = new OperatorAuth({ loader: mockLoader });
-	const result = await auth.runAuth({
-		method: 'GET',
-		url: 'https://example.com/',
-		headers: { authorization: 'Bearer token' },
-		routeSpec: null,
-		poolName: 'standard',
-		routeGroup: { requestFilter: {} }, // Route group without authn
-		topLevelAuthn: [{ provider: 'top-level-provider' }],
-	});
-
-	assertEquals(result.allow, true);
-	assertEquals(usedChain, 'top-level-provider'); // Top-level authn was used
-});
-
-Deno.test("OperatorAuth - caches successful auth results", async () => {
+Deno.test("OperatorAuthn - caches successful authn results", async () => {
 	let callCount = 0;
 	const mockLoader = {
 		async load (_spec) {
 			return {
 				async authCheck (_ctx) {
 					callCount++;
-					return { allow: true, identity: { sub: 'user-123' }, addHeaders: {} };
+					return { allow: true, identity: { sub: 'user-123' } };
 				},
 			};
 		},
 	};
 
-	const auth = new OperatorAuth({ loader: mockLoader });
+	const auth = new OperatorAuthn({ loader: mockLoader });
 	const opts = {
 		method: 'GET',
 		url: 'https://example.com/',
 		headers: { authorization: 'Bearer cached-token' },
-		routeSpec: null,
-		poolName: 'standard',
-		routeGroup: null,
 		topLevelAuthn: [{ provider: 'provider1' }],
 	};
 
-	// First call — runs auth
-	const result1 = await auth.runAuth(opts);
+	// First call — runs authn
+	const result1 = await auth.runAuthn(opts);
 	assertEquals(result1.allow, true);
 	assertEquals(callCount, 1);
 
 	// Second call with same credential — uses cache
-	const result2 = await auth.runAuth(opts);
+	const result2 = await auth.runAuthn(opts);
 	assertEquals(result2.allow, true);
 	assertEquals(callCount, 1); // Not called again
 });
 
-Deno.test("OperatorAuth - does not cache denial results", async () => {
+Deno.test("OperatorAuthn - does not cache denial results", async () => {
 	let callCount = 0;
 	const mockLoader = {
 		async load (_spec) {
@@ -400,58 +338,52 @@ Deno.test("OperatorAuth - does not cache denial results", async () => {
 		},
 	};
 
-	const auth = new OperatorAuth({ loader: mockLoader });
+	const auth = new OperatorAuthn({ loader: mockLoader });
 	const opts = {
 		method: 'GET',
 		url: 'https://example.com/',
 		headers: { authorization: 'Bearer bad-token' },
-		routeSpec: null,
-		poolName: 'standard',
-		routeGroup: null,
 		topLevelAuthn: [{ provider: 'provider1' }],
 	};
 
-	// First call — runs auth
-	await auth.runAuth(opts);
+	// First call — runs authn
+	await auth.runAuthn(opts);
 	assertEquals(callCount, 1);
 
-	// Second call — denial not cached, runs auth again
-	await auth.runAuth(opts);
+	// Second call — denial not cached, runs authn again
+	await auth.runAuthn(opts);
 	assertEquals(callCount, 2);
 });
 
-Deno.test("OperatorAuth - clearCache invalidates cached results", async () => {
+Deno.test("OperatorAuthn - clearCache invalidates cached results", async () => {
 	let callCount = 0;
 	const mockLoader = {
 		async load (_spec) {
 			return {
 				async authCheck (_ctx) {
 					callCount++;
-					return { allow: true, identity: { sub: 'user-123' }, addHeaders: {} };
+					return { allow: true, identity: { sub: 'user-123' } };
 				},
 			};
 		},
 	};
 
-	const auth = new OperatorAuth({ loader: mockLoader });
+	const auth = new OperatorAuthn({ loader: mockLoader });
 	const opts = {
 		method: 'GET',
 		url: 'https://example.com/',
 		headers: { authorization: 'Bearer token' },
-		routeSpec: null,
-		poolName: 'standard',
-		routeGroup: null,
 		topLevelAuthn: [{ provider: 'provider1' }],
 	};
 
-	// First call — runs auth and caches
-	await auth.runAuth(opts);
+	// First call — runs authn and caches
+	await auth.runAuthn(opts);
 	assertEquals(callCount, 1);
 
 	// Clear cache
 	auth.clearCache();
 
-	// Second call — cache cleared, runs auth again
-	await auth.runAuth(opts);
+	// Second call — cache cleared, runs authn again
+	await auth.runAuthn(opts);
 	assertEquals(callCount, 2);
 });

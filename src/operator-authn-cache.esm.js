@@ -1,9 +1,9 @@
 /**
- * JSMAWS Operator Auth Cache
- * LRU cache with TTL-based eviction for auth results.
+ * JSMAWS Operator Authn Cache
+ * LRU cache with TTL-based eviction for authn results.
  *
- * Used by both Option D (operator-embedded auth) and Option C (auth service process)
- * to cache AuthResult objects keyed by credential string.
+ * Used by the operator-embedded authn runner to cache AuthnResult objects
+ * keyed by credential string.
  *
  * Cache properties:
  * - LRU eviction when maxSize is reached

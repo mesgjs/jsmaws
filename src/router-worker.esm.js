@@ -435,8 +435,8 @@ class Route {
 }
 
 /**
-	* Router class for managing routes and matching requests
-	*/
+ * Router class for managing routes and matching requests
+ */
 class Router {
 	constructor (config) {
 		this.config = config; // Configuration instance
@@ -508,21 +508,81 @@ class Router {
 	}
 
 	/**
+	 * Evaluate a qualified route group's scalar authn filter against the current auth state.
+	 * Per auth-revisions-20260510.md 2026-05-11-A.
+	 *
+	 * Values are considered in order until one matches:
+	 *   - A value matching the current identity's providerName → identity is presented
+	 *   - '@allow-known' when a non-empty identity is present → identity is presented
+	 *   - '@allow-all' always matches → identity is suppressed (null to routes)
+	 *   - '@deny-all' always matches → route-group is skipped (return null)
+	 * Implied [@allow-known @allow-all] at end (if no explicit @allow-all or @deny-all).
+	 *
+	 * @param {Array|string} authnSpec - Route-group authn scalar filter (array or single value)
+	 * @param {Object|null} authState - Auth state: { identity, providerName } or null
+	 * @returns {{ presented: boolean, identity: Object|null }|null}
+	 *   null = group is skipped (@deny-all or no match before implied end)
+	 *   { presented: true, identity } = identity is presented
+	 *   { presented: false, identity: null } = identity is suppressed (@allow-all)
+	 */
+	#evaluateGroupAuthnFilter (authnSpec, authState) {
+		const identity = authState?.identity ?? null;
+		const providerName = authState?.providerName ?? null;
+
+		// Normalize to array
+		const values = Array.isArray(authnSpec)
+			? authnSpec
+			: (authnSpec != null ? [authnSpec] : []);
+
+		for (const value of values) {
+			if (value === '@deny-all') {
+				// Always matches; group is skipped
+				return null;
+			}
+			if (value === '@allow-all') {
+				// Always matches; identity is suppressed
+				return { presented: false, identity: null };
+			}
+			if (value === '@allow-known') {
+				if (identity !== null) {
+					// Non-empty identity present; identity is presented
+					return { presented: true, identity };
+				}
+				// No identity; continue to next value
+				continue;
+			}
+			// Provider name match
+			if (value === providerName && identity !== null) {
+				return { presented: true, identity };
+			}
+		}
+
+		// Implied [@allow-known @allow-all] at end
+		if (identity !== null) {
+			return { presented: true, identity };
+		}
+		return { presented: false, identity: null };
+	}
+
+	/**
 	 * Find the first matching route for a request.
 	 * Supports hostRoutes (multi-host SNI routing) and routeGroups (named route groups).
 	 *
 	 * @param {string} pathname URL pathname
 	 * @param {string} method HTTP method
 	 * @param {string} [hostname] Request hostname (for hostRoutes support)
+	 * @param {Object|null} [authState] Auth state from top-level authn: { identity, providerName }
 	 * @returns {Promise<Object|null>} Route match result or null
-	 *   Result: { route, match, routeGroup } where routeGroup is the matched group config (or null)
+	 *   Result: { route, match, routeGroup, presentedIdentity }
+	 *   - routeGroup: the matched group config (or null for top-level routes)
+	 *   - presentedIdentity: the identity to pass to the mod-app (may be suppressed by @allow-all)
 	 */
-	async findRoute (pathname, method = 'GET', hostname = null) {
+	async findRoute (pathname, method = 'GET', hostname = null, authState = null) {
 		// Determine which route array to use (hostRoutes vs top-level routes)
 		const routeArray = this.#resolveRouteArray(hostname);
 
 		// Search through the route array (may include group references)
-		return await this.#searchRouteArray(routeArray, pathname, method);
+		return await this.#searchRouteArray(routeArray, pathname, method, authState);
 	}
 
 	/**
@@ -607,13 +667,14 @@ class Router {
 	 * @param {Array} routeArray - Array of Route objects or group reference objects
 	 * @param {string} pathname - URL pathname
 	 * @param {string} method - HTTP method
+	 * @param {Object|null} authState - Auth state: { identity, providerName } or null
 	 * @returns {Promise<Object|null>} Match result or null
 	 */
-	async #searchRouteArray (routeArray, pathname, method) {
+	async #searchRouteArray (routeArray, pathname, method, authState = null) {
 		for (const item of routeArray) {
 			// Group reference: { group: 'groupName' }
 			if (item && typeof item === 'object' && !(item instanceof Route) && item.group) {
-				const result = await this.#searchRouteGroup(item.group, pathname, method);
+				const result = await this.#searchRouteGroup(item.group, pathname, method, authState);
 				if (result) return result;
 				continue;
 			}
@@ -630,7 +691,9 @@ class Router {
 					match.app = `${this.config.routing.appRoot}${match.app}`;
 				}
 
-				return { route, match, routeGroup: null };
+				// Top-level routes: identity is presented as-is (no group authn filter)
+				const presentedIdentity = authState?.identity ?? null;
+				return { route, match, routeGroup: null, presentedIdentity };
 			}
 		}
 		return null;
@@ -640,12 +703,16 @@ class Router {
 	 * Search a named route group for a matching route.
 	 * Handles both qualified groups (with conditions) and unqualified groups (plain arrays).
 	 *
+	 * For qualified groups, evaluates the scalar authn filter and role check before
+	 * searching routes. If the group is skipped (authn/role mismatch), returns null.
+	 *
 	 * @param {string} groupName - Name of the route group
 	 * @param {string} pathname - URL pathname
 	 * @param {string} method - HTTP method
-	 * @returns {Promise<Object|null>} Match result (with routeGroup set) or null
+	 * @param {Object|null} authState - Auth state: { identity, providerName } or null
+	 * @returns {Promise<Object|null>} Match result (with routeGroup and presentedIdentity set) or null
 	 */
-	async #searchRouteGroup (groupName, pathname, method) {
+	async #searchRouteGroup (groupName, pathname, method, authState = null) {
 		const routeGroups = this.config.routeGroups;
 		const groupDef = routeGroups[groupName];
 		if (!groupDef) {
@@ -656,18 +723,46 @@ class Router {
 		// Determine if this is a qualified group (has a 'routes' property) or unqualified (plain array)
 		let routesArray;
 		let groupConfig = null;
+		let presentedIdentity = authState?.identity ?? null;
 
 		if (Array.isArray(groupDef)) {
-			// Unqualified group: plain array of routes
+			// Unqualified group: plain array of routes; top-level authn applies; identity presented as-is
 			routesArray = groupDef;
 		} else if (groupDef && typeof groupDef === 'object' && groupDef.routes) {
 			// Qualified group: object with routes + optional conditions
 			groupConfig = groupDef;
 			routesArray = Array.isArray(groupDef.routes) ? groupDef.routes : Object.values(groupDef.routes);
 
-			// Check conditions (incpre, excpre, method)
+			// Check path/method conditions (incpre, excpre, method)
 			if (!this.#checkGroupConditions(groupConfig, pathname, method)) {
 				return null;
+			}
+
+			// Evaluate scalar authn filter (if present on qualified group)
+			if (groupConfig.authn != null) {
+				const authnResult = this.#evaluateGroupAuthnFilter(groupConfig.authn, authState);
+				if (authnResult === null) {
+					// @deny-all or no match — skip this group
+					return null;
+				}
+				presentedIdentity = authnResult.identity;
+			}
+
+			// Role check: always performed if present; fails if identity is null or suppressed
+			if (groupConfig.role != null) {
+				if (presentedIdentity === null) {
+					// No identity (null or suppressed) — skip group (results in 404)
+					return null;
+				}
+				const requiredRoles = Array.isArray(groupConfig.role)
+					? groupConfig.role
+					: [groupConfig.role];
+				const identityRoles = presentedIdentity.roles ?? [];
+				const hasRole = requiredRoles.some(r => identityRoles.includes(r));
+				if (!hasRole) {
+					// Role check failed — skip group (results in 404)
+					return null;
+				}
 			}
 		} else {
 			console.warn(`Invalid route group definition: ${groupName}`);
@@ -702,7 +797,7 @@ class Router {
 					match.app = `${this.config.routing.appRoot}${match.app}`;
 				}
 
-				return { route, match, routeGroup: groupConfig };
+				return { route, match, routeGroup: groupConfig, presentedIdentity };
 			}
 		}
 
@@ -753,12 +848,12 @@ if (typeof self !== 'undefined' && self.postMessage) {
 
 			case 'route': {
 				// Find matching route
-				const { pathname, method, hostname } = data;
+				const { pathname, method, hostname, authState } = data;
 				if (!router) {
 					throw new Error('Router not initialized');
 				}
 
-				const result = await router.findRoute(pathname, method, hostname ?? null);
+				const result = await router.findRoute(pathname, method, hostname ?? null, authState ?? null);
 				self.postMessage({
 					type: 'route-res',
 					id,
@@ -776,6 +871,7 @@ if (typeof self !== 'undefined' && self.postMessage) {
 						},
 						match: result.match,
 						routeGroup: result.routeGroup ?? null,
+						presentedIdentity: result.presentedIdentity ?? null,
 					} : null,
 				});
 				break;

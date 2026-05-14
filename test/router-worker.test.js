@@ -1077,12 +1077,12 @@ Deno.test("Router - findRoute warns about nested group references", async () => 
 	assertEquals(result.match.app, '/users.esm.js');
 });
 
-Deno.test("Router - findRoute returns routeGroup with authn and filters", async () => {
+Deno.test("Router - findRoute returns routeGroup with scalar authn filter and filters", async () => {
 	const config = new Configuration({
 		routes: [{ group: 'secureGroup' }],
 		routeGroups: {
 			secureGroup: {
-				authn: [{ provider: '@jwt', secret: 'test-secret' }],
+				authn: '@allow-known', // Scalar authn filter (not config objects)
 				requestFilter: { allowHeaders: ['authorization', 'content-type'] },
 				responseFilter: { denyHeaders: ['x-internal-*'] },
 				routes: [
@@ -1093,13 +1093,264 @@ Deno.test("Router - findRoute returns routeGroup with authn and filters", async 
 	});
 	const router = new Router(config);
 
-	const result = await router.findRoute('/api/secure', 'GET');
+	// With identity present, @allow-known presents the identity
+	const authState = { identity: { sub: 'user-123', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/secure', 'GET', null, authState);
 
 	assertExists(result);
 	assertExists(result.routeGroup);
-	assertExists(result.routeGroup.authn);
+	assertEquals(result.routeGroup.authn, '@allow-known');
 	assertExists(result.routeGroup.requestFilter);
 	assertExists(result.routeGroup.responseFilter);
+	assertEquals(result.presentedIdentity.sub, 'user-123');
+});
+
+// ============================================================================
+// Router Class - Route Group Authn Filter Tests
+// ============================================================================
+
+Deno.test("Router - route group @allow-known presents identity when present", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'knownGroup' }],
+		routeGroups: {
+			knownGroup: {
+				authn: '@allow-known',
+				routes: [{ path: 'api/known', app: '/known.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/known', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.presentedIdentity.sub, 'alice');
+});
+
+Deno.test("Router - route group @allow-known with implied @allow-all allows null identity (suppressed)", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'knownGroup' },
+		],
+		routeGroups: {
+			knownGroup: {
+				authn: '@allow-known',
+				routes: [{ path: 'api/known', app: '/known.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// No identity — @allow-known doesn't match, implied @allow-all at end suppresses identity
+	const authState = { identity: null, providerName: null };
+	const result = await router.findRoute('/api/known', 'GET', null, authState);
+
+	// Implied @allow-all at end allows the request with null identity
+	assertExists(result);
+	assertEquals(result.match.app, '/known.esm.js'); // Matches via implied @allow-all
+	assertEquals(result.presentedIdentity, null); // Identity suppressed
+});
+
+Deno.test("Router - route group [@allow-known @deny-all] skips group when no identity", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'knownGroup' },
+			{ path: 'api/known', app: '/fallback.esm.js' },
+		],
+		routeGroups: {
+			knownGroup: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [{ path: 'api/known', app: '/known.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// No identity — @allow-known doesn't match, @deny-all skips the group
+	const authState = { identity: null, providerName: null };
+	const result = await router.findRoute('/api/known', 'GET', null, authState);
+
+	// @deny-all skips the group; falls through to fallback
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - route group @allow-all suppresses identity", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'publicGroup' }],
+		routeGroups: {
+			publicGroup: {
+				authn: '@allow-all',
+				routes: [{ path: 'api/public', app: '/public.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/public', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.presentedIdentity, null); // Identity suppressed by @allow-all
+});
+
+Deno.test("Router - route group @deny-all skips group", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'deniedGroup' },
+			{ path: 'api/denied', app: '/fallback.esm.js' },
+		],
+		routeGroups: {
+			deniedGroup: {
+				authn: '@deny-all',
+				routes: [{ path: 'api/denied', app: '/denied.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/denied', 'GET', null, authState);
+
+	// @deny-all skips the group; falls through to fallback
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - route group provider name filter presents identity when provider matches", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'jwtGroup' }],
+		routeGroups: {
+			jwtGroup: {
+				authn: '@jwt', // Only allow @jwt-authenticated users
+				routes: [{ path: 'api/jwt-only', app: '/jwt-only.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: [], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/jwt-only', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.presentedIdentity.sub, 'alice');
+});
+
+Deno.test("Router - route group provider name filter with @allow-all allows non-matching provider (suppressed)", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'jwtGroup' },
+		],
+		routeGroups: {
+			jwtGroup: {
+				authn: ['@jwt', '@allow-all'], // Skip implied @allow-known; only present identity if @jwt
+				routes: [{ path: 'api/jwt-only', app: '/jwt-only.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// API key user — not @jwt, so group is skipped (implied @allow-all at end suppresses)
+	const authState = { identity: { sub: 'api-user', roles: [], provider: '@api-key' }, providerName: '@api-key' };
+	const result = await router.findRoute('/api/jwt-only', 'GET', null, authState);
+
+	// Falls through to fallback (implied @allow-all at end)
+	assertExists(result);
+	assertEquals(result.match.app, '/jwt-only.esm.js'); // Matches via implied @allow-all
+	assertEquals(result.presentedIdentity, null); // Identity suppressed
+});
+
+Deno.test("Router - route group role check passes when identity has required role", async () => {
+	const config = new Configuration({
+		routes: [{ group: 'adminGroup' }],
+		routeGroups: {
+			adminGroup: {
+				role: 'admin',
+				routes: [{ path: 'api/admin', app: '/admin.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: ['admin', 'user'], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/admin', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.match.app, '/admin.esm.js');
+	assertEquals(result.presentedIdentity.sub, 'alice');
+});
+
+Deno.test("Router - route group role check skips group when identity lacks required role", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'adminGroup' },
+			{ path: 'api/admin', app: '/fallback.esm.js' },
+		],
+		routeGroups: {
+			adminGroup: {
+				role: 'admin',
+				routes: [{ path: 'api/admin', app: '/admin.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// User without admin role — role check fails, group skipped
+	const authState = { identity: { sub: 'alice', roles: ['user'], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/admin', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - route group role check skips group when identity is null", async () => {
+	const config = new Configuration({
+		routes: [
+			{ group: 'adminGroup' },
+			{ path: 'api/admin', app: '/fallback.esm.js' },
+		],
+		routeGroups: {
+			adminGroup: {
+				role: 'admin',
+				routes: [{ path: 'api/admin', app: '/admin.esm.js' }],
+			},
+		},
+	});
+	const router = new Router(config);
+
+	// No identity — role check fails (null identity), group skipped
+	const authState = { identity: null, providerName: null };
+	const result = await router.findRoute('/api/admin', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.match.app, '/fallback.esm.js');
+});
+
+Deno.test("Router - top-level routes present identity as-is (no filter)", async () => {
+	const config = new Configuration({
+		routes: [{ path: 'api/users', app: '/users.esm.js' }],
+	});
+	const router = new Router(config);
+
+	const authState = { identity: { sub: 'alice', roles: ['user'], provider: '@jwt' }, providerName: '@jwt' };
+	const result = await router.findRoute('/api/users', 'GET', null, authState);
+
+	assertExists(result);
+	assertEquals(result.presentedIdentity.sub, 'alice'); // Identity presented as-is
+	assertEquals(result.routeGroup, null); // No route group
+});
+
+Deno.test("Router - findRoute with no authState returns null presentedIdentity", async () => {
+	const config = new Configuration({
+		routes: [{ path: 'api/users', app: '/users.esm.js' }],
+	});
+	const router = new Router(config);
+
+	const result = await router.findRoute('/api/users', 'GET');
+
+	assertExists(result);
+	assertEquals(result.presentedIdentity, null); // No authState provided
 });
 
 // ============================================================================

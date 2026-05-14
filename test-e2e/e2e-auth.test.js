@@ -1,13 +1,16 @@
 /**
  * E2E Tests for Authentication Integration
  *
- * Tests the complete authentication flow through the actual server:
- * - API key authentication
- * - HTTP Basic authentication
- * - JWT authentication
- * - Identity pass-through to mod-apps
- * - Route group authn overrides
- * - No auth (unauthenticated allowed)
+ * Tests the complete authentication flow through the actual server.
+ *
+ * Architecture (per auth-revisions-20260510.md 2026-05-11-A/B):
+ * - Top-level authn runs before routing; stops at first successful identification
+ * - Route-group authn is a scalar filter on the already-computed identity
+ * - @allow-known: allows if identity is present (presents identity)
+ * - @allow-all: always allows (suppresses identity)
+ * - @deny-all: always skips the group (results in 404)
+ * - Provider name (e.g. '@jwt'): allows if identity came from that provider
+ * - Implied [@allow-known @allow-all] at end of filter
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -109,12 +112,21 @@ Deno.test("E2E Auth - unauthenticated request allowed when no authn configured",
 // ============================================================================
 
 Deno.test("E2E Auth - API key: valid key allows request and passes identity", async () => {
+	// Route group with @allow-known filter: only allows if identity is present
 	const { operator } = await createTestServer({
 		authn: [
 			{ provider: '@api-key', keys: 'valid-key-1,valid-key-2' },
 		],
+		routeGroups: {
+			apiKeyRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'apiKeyRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -138,13 +150,23 @@ Deno.test("E2E Auth - API key: valid key allows request and passes identity", as
 	}
 });
 
-Deno.test("E2E Auth - API key: invalid key returns 401", async () => {
+Deno.test("E2E Auth - API key: invalid key results in 404 (group skipped, no identity)", async () => {
+	// Route group with @allow-known filter: skips group when no identity
+	// Invalid key → null (try next) → all exhausted → null identity → @allow-known skips group → 404
 	const { operator } = await createTestServer({
 		authn: [
 			{ provider: '@api-key', keys: 'valid-key-1' },
 		],
+		routeGroups: {
+			apiKeyRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'apiKeyRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -156,21 +178,30 @@ Deno.test("E2E Auth - API key: invalid key returns 401", async () => {
 			headers: { 'x-api-key': 'invalid-key' },
 		});
 
-		assertEquals(response.status, 401);
-		await response.body?.cancel(); // Consume body to avoid leak
+		// Invalid key → null identity → @allow-known skips group → 404
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
 	}
 });
 
-Deno.test("E2E Auth - API key: missing key returns 401", async () => {
+Deno.test("E2E Auth - API key: missing key results in 404 (no identity)", async () => {
 	const { operator } = await createTestServer({
 		authn: [
 			{ provider: '@api-key', keys: 'valid-key-1' },
 		],
+		routeGroups: {
+			apiKeyRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'apiKeyRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -178,11 +209,11 @@ Deno.test("E2E Auth - API key: missing key returns 401", async () => {
 	try {
 		const baseUrl = await startTestServer(operator);
 
-		// No x-api-key header
+		// No x-api-key header → null identity → @allow-known skips → @deny-all skips group → 404
 		const response = await fetchWithTimeout(`${baseUrl}/echo`);
 
-		assertEquals(response.status, 401);
-		await response.body?.cancel(); // Consume body to avoid leak
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
@@ -194,8 +225,16 @@ Deno.test("E2E Auth - API key: keyMap resolves subject", async () => {
 		authn: [
 			{ provider: '@api-key', keyMap: { 'key-abc': 'alice', 'key-def': 'bob' } },
 		],
+		routeGroups: {
+			apiKeyRequired: {
+				authn: '@allow-known',
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'apiKeyRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -225,8 +264,16 @@ Deno.test("E2E Auth - Basic: valid credentials allow request and pass identity",
 		authn: [
 			{ provider: '@basic', users: { alice: 'secret', bob: 'pass' }, realm: 'TestApp' },
 		],
+		routeGroups: {
+			basicRequired: {
+				authn: '@allow-known',
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'basicRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -251,13 +298,22 @@ Deno.test("E2E Auth - Basic: valid credentials allow request and pass identity",
 	}
 });
 
-Deno.test("E2E Auth - Basic: wrong password returns 401", async () => {
+Deno.test("E2E Auth - Basic: wrong password results in 404 (null identity)", async () => {
+	// Wrong password → null (try next) → all exhausted → null identity → @allow-known skips → @deny-all skips → 404
 	const { operator } = await createTestServer({
 		authn: [
 			{ provider: '@basic', users: { alice: 'secret' } },
 		],
+		routeGroups: {
+			basicRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'basicRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -271,21 +327,29 @@ Deno.test("E2E Auth - Basic: wrong password returns 401", async () => {
 			},
 		});
 
-		assertEquals(response.status, 401);
-		await response.body?.cancel(); // Consume body to avoid leak
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
 	}
 });
 
-Deno.test("E2E Auth - Basic: missing Authorization returns 401", async () => {
+Deno.test("E2E Auth - Basic: missing Authorization results in 404 (null identity)", async () => {
 	const { operator } = await createTestServer({
 		authn: [
 			{ provider: '@basic', users: { alice: 'secret' }, realm: 'MyApp' },
 		],
+		routeGroups: {
+			basicRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'basicRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -295,8 +359,8 @@ Deno.test("E2E Auth - Basic: missing Authorization returns 401", async () => {
 
 		const response = await fetchWithTimeout(`${baseUrl}/echo`);
 
-		assertEquals(response.status, 401);
-		await response.body?.cancel(); // Consume body to avoid leak
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
@@ -317,8 +381,16 @@ Deno.test("E2E Auth - JWT: valid token allows request and passes identity", asyn
 		authn: [
 			{ provider: '@jwt', secret: JWT_SECRET, algorithm: 'HS256' },
 		],
+		routeGroups: {
+			jwtRequired: {
+				authn: '@allow-known',
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'jwtRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -344,7 +416,8 @@ Deno.test("E2E Auth - JWT: valid token allows request and passes identity", asyn
 	}
 });
 
-Deno.test("E2E Auth - JWT: invalid token returns 401", async () => {
+Deno.test("E2E Auth - JWT: invalid token (bad signature) returns 401 (explicit denial)", async () => {
+	// Bad signature → allow: false → 401 (explicit denial, not null)
 	const { operator } = await createTestServer({
 		authn: [
 			{ provider: '@jwt', secret: JWT_SECRET },
@@ -364,21 +437,30 @@ Deno.test("E2E Auth - JWT: invalid token returns 401", async () => {
 			},
 		});
 
+		// Bad signature → allow: false → 401 (explicit denial before routing)
 		assertEquals(response.status, 401);
-		await response.body?.cancel(); // Consume body to avoid leak
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
 	}
 });
 
-Deno.test("E2E Auth - JWT: missing token returns 401", async () => {
+Deno.test("E2E Auth - JWT: missing token results in 404 (null identity, group skipped)", async () => {
 	const { operator } = await createTestServer({
 		authn: [
 			{ provider: '@jwt', secret: JWT_SECRET },
 		],
+		routeGroups: {
+			jwtRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'jwtRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -388,15 +470,16 @@ Deno.test("E2E Auth - JWT: missing token returns 401", async () => {
 
 		const response = await fetchWithTimeout(`${baseUrl}/echo`);
 
-		assertEquals(response.status, 401);
-		await response.body?.cancel(); // Consume body to avoid leak
+		// No token → null identity → @allow-known skips group → 404
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
 	}
 });
 
-Deno.test("E2E Auth - JWT: expired token returns 401", async () => {
+Deno.test("E2E Auth - JWT: expired token results in 404 (null identity, not malicious)", async () => {
 	const token = await createTestJwt(
 		{ sub: 'user-123', iat: NOW - 7200, exp: NOW - 3600 }, // Expired 1 hour ago
 		JWT_SECRET
@@ -406,8 +489,16 @@ Deno.test("E2E Auth - JWT: expired token returns 401", async () => {
 		authn: [
 			{ provider: '@jwt', secret: JWT_SECRET },
 		],
+		routeGroups: {
+			jwtRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'jwtRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -421,26 +512,37 @@ Deno.test("E2E Auth - JWT: expired token returns 401", async () => {
 			},
 		});
 
-		assertEquals(response.status, 401);
-		await response.body?.cancel(); // Consume body to avoid leak
+		// Expired → null (not malicious) → null identity → @allow-known skips → 404
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
 	}
 });
 
-Deno.test("E2E Auth - JWT: role check passes when user has required role", async () => {
-	const token = await createTestJwt(
-		{ sub: 'admin-user', roles: ['admin', 'user'], iat: NOW, exp: NOW + 3600 },
-		JWT_SECRET
-	);
+// ============================================================================
+// Route Group authn Filter Tests
+// ============================================================================
 
+Deno.test("E2E Auth - route group @allow-known requires identity", async () => {
+	// Top-level: API key auth
+	// Route group 'protectedGroup': @allow-known (only allows if identity present)
+	// /protected uses route group authn (@allow-known, key required)
 	const { operator } = await createTestServer({
 		authn: [
-			{ provider: '@jwt', secret: JWT_SECRET, roles: ['admin'] },
+			{ provider: '@api-key', keys: 'required-key' },
 		],
+		routeGroups: {
+			protectedGroup: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/protected', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'protectedGroup' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -448,7 +550,127 @@ Deno.test("E2E Auth - JWT: role check passes when user has required role", async
 	try {
 		const baseUrl = await startTestServer(operator);
 
-		const response = await fetchWithTimeout(`${baseUrl}/echo`, {
+		// Without key — null identity → @allow-known skips group → 404
+		const noKeyResponse = await fetchWithTimeout(`${baseUrl}/protected`);
+		assertEquals(noKeyResponse.status, 404);
+		await noKeyResponse.body?.cancel();
+
+		// With valid key — identity present → @allow-known presents identity → 200
+		const withKeyResponse = await fetchWithTimeout(`${baseUrl}/protected`, {
+			headers: { 'x-api-key': 'required-key' },
+		});
+		assertEquals(withKeyResponse.status, 200);
+		const body = await withKeyResponse.json();
+		assertEquals(body.identity.sub, 'required-key');
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - route group @allow-all allows all (suppresses identity)", async () => {
+	// Top-level: API key auth
+	// Route group 'publicGroup': @allow-all (allows all, suppresses identity)
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@api-key', keys: 'required-key' },
+		],
+		routeGroups: {
+			publicGroup: {
+				authn: '@allow-all',
+				routes: [
+					{ path: '/public', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
+		routes: [
+			{ group: 'publicGroup' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		// Without key — @allow-all allows, identity suppressed
+		const noKeyResponse = await fetchWithTimeout(`${baseUrl}/public`);
+		assertEquals(noKeyResponse.status, 200);
+		const noKeyBody = await noKeyResponse.json();
+		assertEquals(noKeyBody.authenticated, false); // Identity suppressed
+		assertEquals(noKeyBody.identity, null);
+
+		// With valid key — @allow-all still suppresses identity
+		const withKeyResponse = await fetchWithTimeout(`${baseUrl}/public`, {
+			headers: { 'x-api-key': 'required-key' },
+		});
+		assertEquals(withKeyResponse.status, 200);
+		const withKeyBody = await withKeyResponse.json();
+		assertEquals(withKeyBody.authenticated, false); // Identity suppressed by @allow-all
+		assertEquals(withKeyBody.identity, null);
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - route group @deny-all skips group (results in 404)", async () => {
+	const { operator } = await createTestServer({
+		routeGroups: {
+			deniedGroup: {
+				authn: '@deny-all',
+				routes: [
+					{ path: '/denied', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
+		routes: [
+			{ group: 'deniedGroup' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		const response = await fetchWithTimeout(`${baseUrl}/denied`);
+
+		// @deny-all skips the group → 404 (no other routes)
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+Deno.test("E2E Auth - route group role check passes when user has required role", async () => {
+	const token = await createTestJwt(
+		{ sub: 'admin-user', roles: ['admin', 'user'], iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@jwt', secret: JWT_SECRET, algorithm: 'HS256' },
+		],
+		routeGroups: {
+			adminGroup: {
+				role: 'admin',
+				routes: [
+					{ path: '/admin', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
+		routes: [
+			{ group: 'adminGroup' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		const response = await fetchWithTimeout(`${baseUrl}/admin`, {
 			headers: {
 				authorization: `Bearer ${token}`,
 			},
@@ -463,7 +685,7 @@ Deno.test("E2E Auth - JWT: role check passes when user has required role", async
 	}
 });
 
-Deno.test("E2E Auth - JWT: role check fails when user lacks required role (403)", async () => {
+Deno.test("E2E Auth - route group role check skips group when user lacks required role", async () => {
 	const token = await createTestJwt(
 		{ sub: 'regular-user', roles: ['user'], iat: NOW, exp: NOW + 3600 },
 		JWT_SECRET
@@ -471,10 +693,18 @@ Deno.test("E2E Auth - JWT: role check fails when user lacks required role (403)"
 
 	const { operator } = await createTestServer({
 		authn: [
-			{ provider: '@jwt', secret: JWT_SECRET, roles: ['admin'] },
+			{ provider: '@jwt', secret: JWT_SECRET, algorithm: 'HS256' },
 		],
+		routeGroups: {
+			adminGroup: {
+				role: 'admin',
+				routes: [
+					{ path: '/admin', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'adminGroup' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -482,99 +712,15 @@ Deno.test("E2E Auth - JWT: role check fails when user lacks required role (403)"
 	try {
 		const baseUrl = await startTestServer(operator);
 
-		const response = await fetchWithTimeout(`${baseUrl}/echo`, {
+		const response = await fetchWithTimeout(`${baseUrl}/admin`, {
 			headers: {
 				authorization: `Bearer ${token}`,
 			},
 		});
 
-		assertEquals(response.status, 403);
-		await response.body?.cancel(); // Consume body to avoid leak
-
-	} finally {
-		await stopTestServer(operator);
-	}
-});
-
-// ============================================================================
-// Route Group authn Override Tests
-// ============================================================================
-
-Deno.test("E2E Auth - route group authn overrides top-level authn", async () => {
-	// Top-level: API key auth
-	// Route group 'publicGroup': @allow-all (overrides top-level for /public)
-	// /protected uses top-level authn (API key required)
-	// /public uses route group authn (@allow-all, no key needed)
-	const { operator } = await createTestServer({
-		authn: [
-			{ provider: '@api-key', keys: 'required-key' },
-		],
-		routeGroups: {
-			publicGroup: {
-				authn: [
-					{ provider: '@allow-all' },
-				],
-				routes: [
-					{ path: '/public', app: AUTH_ECHO_APP, pool: 'fast' },
-				],
-			},
-		},
-		routes: [
-			{ group: 'publicGroup' },
-			{ path: '/protected', app: AUTH_ECHO_APP, pool: 'fast' },
-		],
-		pools: POOL_CONFIG,
-	});
-
-	try {
-		const baseUrl = await startTestServer(operator);
-
-		// /public uses route group authn (@allow-all) — no key needed
-		const publicResponse = await fetchWithTimeout(`${baseUrl}/public`);
-		assertEquals(publicResponse.status, 200);
-		const publicBody = await publicResponse.json();
-		assertEquals(publicBody.authenticated, false); // @allow-all returns null identity
-
-		// /protected uses top-level authn (@api-key) — key required
-		const protectedResponse = await fetchWithTimeout(`${baseUrl}/protected`);
-		assertEquals(protectedResponse.status, 401);
-		await protectedResponse.body?.cancel(); // Consume body to avoid leak
-
-		// /protected with valid key — allowed
-		const protectedWithKeyResponse = await fetchWithTimeout(`${baseUrl}/protected`, {
-			headers: { 'x-api-key': 'required-key' },
-		});
-		assertEquals(protectedWithKeyResponse.status, 200);
-		const protectedBody = await protectedWithKeyResponse.json();
-		assertEquals(protectedBody.identity.sub, 'required-key');
-
-	} finally {
-		await stopTestServer(operator);
-	}
-});
-
-// ============================================================================
-// @deny-all Tests
-// ============================================================================
-
-Deno.test("E2E Auth - @deny-all blocks all requests", async () => {
-	const { operator } = await createTestServer({
-		authn: [
-			{ provider: '@deny-all', status: 403, message: 'Access Denied' },
-		],
-		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
-		],
-		pools: POOL_CONFIG,
-	});
-
-	try {
-		const baseUrl = await startTestServer(operator);
-
-		const response = await fetchWithTimeout(`${baseUrl}/echo`);
-
-		assertEquals(response.status, 403);
-		await response.body?.cancel(); // Consume body to avoid leak
+		// User lacks 'admin' role → group skipped → 404
+		assertEquals(response.status, 404);
+		await response.body?.cancel();
 
 	} finally {
 		await stopTestServer(operator);
@@ -591,8 +737,16 @@ Deno.test("E2E Auth - auth result is cached for repeated requests", async () => 
 		authn: [
 			{ provider: '@api-key', keys: 'cached-key' },
 		],
+		routeGroups: {
+			apiKeyRequired: {
+				authn: ['@allow-known', '@deny-all'],
+				routes: [
+					{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+				],
+			},
+		},
 		routes: [
-			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+			{ group: 'apiKeyRequired' },
 		],
 		pools: POOL_CONFIG,
 	});
@@ -609,6 +763,37 @@ Deno.test("E2E Auth - auth result is cached for repeated requests", async () => 
 			const body = await response.json();
 			assertEquals(body.identity.sub, 'cached-key');
 		}
+
+	} finally {
+		await stopTestServer(operator);
+	}
+});
+
+// ============================================================================
+// @test-identity Provider Tests
+// ============================================================================
+
+Deno.test("E2E Auth - @test-identity always succeeds with configurable identity", async () => {
+	const { operator } = await createTestServer({
+		authn: [
+			{ provider: '@test-identity', identity: { sub: 'test-user', roles: ['tester'] } },
+		],
+		routes: [
+			{ path: '/echo', app: AUTH_ECHO_APP, pool: 'fast' },
+		],
+		pools: POOL_CONFIG,
+	});
+
+	try {
+		const baseUrl = await startTestServer(operator);
+
+		const response = await fetchWithTimeout(`${baseUrl}/echo`);
+
+		assertEquals(response.status, 200);
+		const body = await response.json();
+		assertEquals(body.authenticated, true);
+		assertEquals(body.identity.sub, 'test-user');
+		assertEquals(body.identity.provider, '@test-identity');
 
 	} finally {
 		await stopTestServer(operator);

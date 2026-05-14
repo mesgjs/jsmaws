@@ -9,7 +9,12 @@
  *   keyMap=:env:API_KEY_MAP        (JSON object mapping key → subject, optional)
  *
  * If keyMap is provided, the subject is looked up from the map.
- * If only keys is provided, the subject is the key itself (or 'api-key-user' if anonymous).
+ * If only keys is provided, the subject is the key itself.
+ *
+ * Return values (per auth-revisions-20260510.md 2026-05-11-B):
+ *   null                          — no key header present (provider did not recognize request)
+ *   null                          — key present but not valid (wrong key; try next provider)
+ *   { allow: true, identity }     — valid key; identity includes sub, roles, claims, provider
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
@@ -65,10 +70,16 @@ function parseKeyMap (keyMapSpec) {
 export default {
 	/**
 	 * Verify API key from request header.
+	 *
+	 * Per auth-revisions-20260510.md 2026-05-11-B:
+	 *   - No key header → null (provider did not recognize this request)
+	 *   - Key present but invalid → null (wrong key; try next provider)
+	 *   - Valid key → { allow: true, identity }
+	 *
 	 * @param {Object} ctx - AuthContext
 	 * @param {Object} ctx.headers - Request headers
 	 * @param {Object} ctx.config - Provider configuration
-	 * @returns {Object} AuthResult
+	 * @returns {Object|null} AuthResult or null
 	 */
 	authCheck (ctx) {
 		const { headers, config } = ctx;
@@ -85,12 +96,8 @@ export default {
 		}
 
 		if (!apiKey) {
-			return {
-				allow: false,
-				identity: null,
-				denyStatus: 401,
-				denyMessage: 'Unauthorized',
-			};
+			// No key header — provider did not recognize this request
+			return null;
 		}
 
 		// Parse valid keys
@@ -103,12 +110,8 @@ export default {
 			: validKeys.has(apiKey);
 
 		if (!isValid) {
-			return {
-				allow: false,
-				identity: null,
-				denyStatus: 401,
-				denyMessage: 'Unauthorized',
-			};
+			// Key present but not valid — try next provider
+			return null;
 		}
 
 		// Determine subject
