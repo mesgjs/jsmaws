@@ -24,6 +24,7 @@ import { PoolManager } from './pool-manager.esm.js';
 import { RequestContext, RequestState } from './operator-request-state.esm.js';
 import { ValueResolver } from './value-resolver.esm.js';
 import { OperatorAuthn } from './operator-authn.esm.js';
+import { OperatorAuthDelegate } from './operator-auth-delegate.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
 import { applyRequestFilter, applyResponseFilter } from './header-filter.esm.js';
 
@@ -48,7 +49,8 @@ export class OperatorProcess {
 		this.router = null;
 		this.configMonitor = null;
 		this.processManager = null;
-		this.poolManagers = new Map(); // poolName -> PoolManager
+		this.poolManagers = new Map(); // poolName -> PoolManager (responders)
+		this.authPoolManager = null;   // Auth sub-process PoolManager (optional)
 		this.affinityMap = new Map(); // appPath -> Set<processIds>
 		this.logger = null;
 		this.isShuttingDown = false;
@@ -63,7 +65,7 @@ export class OperatorProcess {
 		});
 		// Value resolver for :scheme: references in configuration
 		this.valueResolver = new ValueResolver();
-		// Operator-embedded stateless authn runner (JWT, API key, Basic)
+		// Operator-resident authn runner (JWT, API key, Basic) with optional auth sub-process delegation
 		this.operatorAuthn = new OperatorAuthn();
 	}
 
@@ -299,14 +301,18 @@ export class OperatorProcess {
 			this.logger.debug(`Router updated with ${this.router.routes.length} route(s)`);
 		}
 
-		// Update responder pools (no-op if pools not yet initialized)
+		// Update responder pools, auth pool, and broadcast config to sub-processes in parallel.
+		// These are independent of each other and can run concurrently.
+		const updateTasks = [];
 		if (this.poolManagers.size > 0) {
-			await this.updateResponderPools();
+			updateTasks.push(this.updateResponderPools());
 		}
-
-		// Broadcast config update to all sub-processes via their control channels
 		if (this.processManager) {
-			await this.processManager.broadcastConfigUpdate();
+			updateTasks.push(this.updateAuthPool());
+			updateTasks.push(this.processManager.broadcastConfigUpdate());
+		}
+		if (updateTasks.length > 0) {
+			await Promise.all(updateTasks);
 		}
 	}
 
@@ -520,6 +526,42 @@ export class OperatorProcess {
 	}
 
 	/**
+	 * Initialize the auth sub-process pool (if authPool is configured).
+	 * Creates a PoolManager for auth processes and sets up the auth delegate
+	 * on the operatorAuthn instance.
+	 *
+	 * The auth pool is optional. When not configured, authn runs inline in the
+	 * operator (operator-resident providers only, or inline fallback for external ones).
+	 */
+	async initializeAuthPool () {
+		const authPoolConfig = this.config.config.authPool;
+		if (!authPoolConfig) {
+			this.logger.debug('No authPool configured; auth sub-process disabled');
+			return;
+		}
+
+		this.logger.info('Initializing auth sub-process pool');
+
+		const itemFactory = async (itemId) => {
+			return await this.processManager.createProcess(
+				itemId,
+				ProcessType.AUTH,
+				'@auth',
+				authPoolConfig
+			);
+		};
+
+		this.authPoolManager = new PoolManager('@auth', authPoolConfig, itemFactory, this.logger);
+		await this.authPoolManager.initialize();
+
+		// Wire up the auth delegate so OperatorAuthn can delegate external providers
+		const authDelegate = new OperatorAuthDelegate(this.authPoolManager, this.logger);
+		this.operatorAuthn.setAuthDelegate(authDelegate);
+
+		this.logger.debug('Auth sub-process pool initialized');
+	}
+
+	/**
 	 * Initialize logger
 	 */
 	initializeLogger () {
@@ -652,6 +694,11 @@ export class OperatorProcess {
 			}
 		}
 
+		if (this.authPoolManager) {
+			this.logger.info('Shutting down auth pool');
+			tasks.push(this.authPoolManager.shutdown(stopTime));
+		}
+
 		if (this.processManager) {
 			tasks.push(this.processManager.shutdown(stopTime));
 		}
@@ -685,7 +732,10 @@ export class OperatorProcess {
 		this.validatePrivilegeConfiguration();
 		this.initializeRouter();
 		this.initializeProcessManager();
-		await this.initializeResponderPools();
+		await Promise.all([
+			this.initializeResponderPools(),
+			this.initializeAuthPool(),
+		]);
 		await this.startHttpServer();
 
 		if (!this.config.noSSL) {
@@ -805,6 +855,42 @@ export class OperatorProcess {
 				//console.debug(`Removing affinity ${item.id} for ${appPath}`);
 				appMap.delete(item.id);
 			});
+		}
+	}
+
+	/**
+	 * Update the auth sub-process pool based on new configuration.
+	 * - If authPool was not configured and is now configured → initialize it.
+	 * - If authPool was configured and is still configured → reconfigure it.
+	 * - If authPool was configured and is now removed → shut it down and clear the delegate.
+	 * No-op if processManager is not yet initialized.
+	 */
+	async updateAuthPool () {
+		const authPoolConfig = this.config.config.authPool;
+
+		if (!authPoolConfig) {
+			// authPool removed from config — shut down if running
+			if (this.authPoolManager) {
+				this.logger.info('authPool removed from config; shutting down auth pool');
+				const stopTime = this.config.config.shutdownDelay ?? 30;
+				await this.authPoolManager.shutdown(stopTime);
+				this.authPoolManager = null;
+				this.operatorAuthn.setAuthDelegate(null);
+			}
+			return;
+		}
+
+		if (!this.authPoolManager) {
+			// authPool newly added to config — initialize it
+			await this.initializeAuthPool();
+		} else {
+			// authPool already running — reconfigure it
+			try {
+				this.authPoolManager.updateConfig(authPoolConfig);
+				this.logger.debug('Auth pool reconfigured');
+			} catch (error) {
+				this.logger.error(`Failed to reconfigure auth pool: ${error.message}`);
+			}
 		}
 	}
 

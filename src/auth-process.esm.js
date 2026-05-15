@@ -13,15 +13,15 @@
  * This process is only called on cache misses.
  *
  * Auth request/response protocol (on req-N channels):
- *   auth-req  (operator → auth service): JSON { id, method, url, headers, routeSpec, poolName }
- *   auth-res (auth service → operator): JSON { id, allow, identity, denyStatus, denyMessage, addHeaders, ttlSeconds }
+ *   auth-req  (operator → auth process): JSON { id, method, url, headers, authChain }
+ *   auth-res  (auth process → operator): JSON { id, allow, identity, provider, denyStatus, denyMessage, ttlSeconds }
  *
  * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { SubProcess } from './sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
-import { runAuthChain, buildAuthContext } from './auth-middleware.esm.js';
+import { runAuthnChain, buildAuthContext } from './authn-chain.esm.js';
 import { AuthProviderLoader } from './auth-provider-loader.esm.js';
 
 /**
@@ -29,13 +29,13 @@ import { AuthProviderLoader } from './auth-provider-loader.esm.js';
  */
 const AUTH_REQ_MESSAGE_TYPES = [
 	...REQ_CHANNEL_MESSAGE_TYPES,
-	'auth-req',   // operator → auth service: auth request (JSON text)
-	'auth-res',  // auth service → operator: auth response (JSON text)
+	'auth-req',   // operator → auth process: auth request (JSON text)
+	'auth-res',   // auth process → operator: auth response (JSON text)
 ];
 
 /**
  * Auth sub-process class
- * Handles auth requests from the operator
+ * Handles auth requests from the operator for network-dependent providers.
  */
 export class AuthProcess extends SubProcess {
 	constructor (processId) {
@@ -58,39 +58,28 @@ export class AuthProcess extends SubProcess {
 				id: null,
 				allow: false,
 				identity: null,
+				provider: null,
 				denyStatus: 400,
 				denyMessage: 'Bad Request',
 			}));
 			return;
 		}
 
-		const { id, method, url, headers, routeSpec, poolName } = requestData;
+		const { id, method, url, headers, authChain } = requestData;
 
 		try {
 			console.debug(`[${this.processId}] Auth request: ${method?.toUpperCase()} ${url}`);
 
-			const authChain = routeSpec?.auth;
-			if (!authChain || !Array.isArray(authChain) || authChain.length === 0) {
-				// No auth configured — allow
-				await reqChannel.write('auth-res', JSON.stringify({
-					id,
-					allow: true,
-					identity: null,
-					addHeaders: {},
-				}));
-				return;
-			}
-
-			const ctx = buildAuthContext({ method, url, headers, routeSpec, poolName });
-			const result = await runAuthChain(ctx, authChain, this._loader);
+			const ctx = buildAuthContext({ method, url, headers });
+			const result = await runAuthnChain(ctx, authChain ?? [], this._loader);
 
 			await reqChannel.write('auth-res', JSON.stringify({
 				id,
 				allow: result.allow,
 				identity: result.identity ?? null,
+				provider: result.provider ?? null,
 				denyStatus: result.denyStatus ?? null,
 				denyMessage: result.denyMessage ?? null,
-				addHeaders: result.addHeaders ?? {},
 				ttlSeconds: result.ttlSeconds ?? null,
 			}));
 
@@ -100,6 +89,7 @@ export class AuthProcess extends SubProcess {
 				id,
 				allow: false,
 				identity: null,
+				provider: null,
 				denyStatus: 500,
 				denyMessage: 'Internal Server Error',
 			}));

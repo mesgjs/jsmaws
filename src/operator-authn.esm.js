@@ -1,9 +1,24 @@
 /**
  * JSMAWS Operator Authn Runner
- * Runs stateless auth providers inline in the operator process.
+ * Runs operator-resident auth providers inline in the operator process, or
+ * delegates external auth providers to the auth sub-process.
  *
- * This module handles authn for stateless methods (JWT, API key, Basic) that
- * run directly in the operator without an external auth sub-process.
+ * Provider classification:
+ * - Operator-resident providers (OPR_AUTH_PROVIDERS): stateless, run inline in the
+ *   operator without an external sub-process (JWT, API key, Basic, test-identity).
+ * - External auth providers: network-dependent providers (OAuth, LDAP, session stores,
+ *   or any custom/external provider path) that run in the auth sub-process.
+ *
+ * Chain-splitting strategy:
+ * - The chain is split at the first external (non-operator-resident) provider.
+ * - The operator-resident prefix runs inline first. If a provider succeeds, no IPC needed.
+ * - If the operator-resident prefix is exhausted without success and there is an external
+ *   suffix, the remaining chain is delegated to the auth sub-process (when authDelegate
+ *   is set). If no authDelegate is configured, the external suffix runs inline (fallback).
+ *
+ * This design minimizes IPC round-trips: requests authenticated by stateless operator-
+ * resident providers (e.g. JWT for API endpoints) never touch the auth sub-process.
+ *
  * Results are cached in an OperatorAuthnCache for server-lifetime efficiency.
  *
  * Auth chain resolution (per auth-revisions-20260510.md):
@@ -17,6 +32,19 @@
 import { runAuthnChain, buildAuthContext } from './authn-chain.esm.js';
 import { AuthProviderLoader } from './auth-provider-loader.esm.js';
 import { OperatorAuthCache } from './operator-authn-cache.esm.js';
+
+/**
+ * Set of built-in provider specs that run inline in the operator process.
+ * These are stateless providers that do not require network access.
+ * All other provider specs (including custom paths) are treated as external
+ * and delegated to the auth sub-process when one is configured.
+ */
+export const OPR_AUTH_PROVIDERS = new Set([
+	'@test-identity',
+	'@jwt',
+	'@api-key',
+	'@basic',
+]);
 
 /**
  * Extract a cache key from a request for a given auth chain.
@@ -54,8 +82,35 @@ function extractCacheKey (headers, authChain) {
 }
 
 /**
+ * Split an auth chain into an operator-resident prefix and an external suffix.
+ * The split point is the first provider that is not in OPR_AUTH_PROVIDERS.
+ *
+ * @param {Array} authChain - Auth chain config array
+ * @returns {{ oprChain: Array, extChain: Array }} Split chains
+ */
+export function splitAuthChain (authChain) {
+	if (!authChain || !authChain.length) return { oprChain: [], extChain: [] };
+
+	let splitIdx = authChain.length; // Default: all operator-resident (no external providers)
+	for (let i = 0; i < authChain.length; i++) {
+		const entry = authChain[i];
+		if (!entry || typeof entry !== 'object') continue;
+		const { provider: providerSpec } = entry;
+		if (providerSpec && !OPR_AUTH_PROVIDERS.has(providerSpec)) {
+			splitIdx = i;
+			break;
+		}
+	}
+
+	return {
+		oprChain: authChain.slice(0, splitIdx),
+		extChain: authChain.slice(splitIdx),
+	};
+}
+
+/**
  * OperatorAuthn
- * Manages operator-embedded stateless authn with caching.
+ * Manages operator-resident authn with caching and optional auth sub-process delegation.
  *
  * Top-level authn runs before routing; the result (identity + provider) is
  * passed to the router for route-group authn filtering.
@@ -67,10 +122,12 @@ export class OperatorAuthn {
 	 * @param {number} [opts.cacheConfig.maxSize=1000] - Max cache entries
 	 * @param {number} [opts.cacheConfig.defaultTtlSeconds=300] - Default TTL
 	 * @param {AuthProviderLoader} [opts.loader] - Provider loader (for testing)
+	 * @param {object} [opts.authDelegate] - OperatorAuthDelegate for external provider delegation (optional)
 	 */
-	constructor ({ cacheConfig = {}, loader } = {}) {
+	constructor ({ cacheConfig = {}, loader, authDelegate } = {}) {
 		this._cache = new OperatorAuthCache(cacheConfig);
 		this._loader = loader ?? new AuthProviderLoader();
+		this._authDelegate = authDelegate ?? null;
 	}
 
 	/**
@@ -82,8 +139,15 @@ export class OperatorAuthn {
 	}
 
 	/**
-	 * Run top-level authn for a request using the operator-embedded auth chain.
-	 * Checks the cache first; runs the auth chain on cache miss.
+	 * Run top-level authn for a request.
+	 *
+	 * Chain-splitting strategy:
+	 * 1. Split the chain into operator-resident prefix and external suffix.
+	 * 2. Run the operator-resident prefix inline. If a provider succeeds → return (cache result).
+	 * 3. If operator-resident prefix exhausted without success and external suffix is non-empty:
+	 *    a. If authDelegate is set → delegate external suffix to auth sub-process.
+	 *    b. Otherwise → run external suffix inline (fallback, no auth sub-process configured).
+	 * 4. Cache successful results.
 	 *
 	 * Returns an AuthnResult with identity and provider for use by the router.
 	 * The router uses provider to evaluate route-group authn scalar filters.
@@ -103,23 +167,68 @@ export class OperatorAuthn {
 			return { allow: true, identity: null, provider: null };
 		}
 
-		// Try cache
+		// Try cache (keyed on the full chain's credential)
 		const cacheKey = extractCacheKey(headers, authChain);
 		if (cacheKey) {
 			const cached = this._cache.get(cacheKey);
 			if (cached) return cached;
 		}
 
-		// Build auth context and run chain
-		const ctx = buildAuthContext({ method, url, headers });
-		const result = await runAuthnChain(ctx, authChain, this._loader);
+		// Split chain into operator-resident prefix and external suffix
+		const { oprChain, extChain } = splitAuthChain(authChain);
 
-		// Cache successful auth results (not denials — denials are not cacheable
-		// because the same credential might be valid for a different route)
-		if (result.allow && cacheKey) {
-			this._cache.set(cacheKey, result);
+		// Build auth context (used for inline runs)
+		const ctx = buildAuthContext({ method, url, headers });
+
+		// Step 1: Run operator-resident prefix inline
+		if (oprChain.length > 0) {
+			const oprResult = await runAuthnChain(ctx, oprChain, this._loader);
+
+			if (!oprResult.allow) {
+				// Explicit denial from operator-resident provider — stop immediately
+				return oprResult;
+			}
+
+			if (oprResult.identity !== null || extChain.length === 0) {
+				// Operator-resident provider succeeded (identity set) OR no external suffix to try
+				// Cache and return
+				if (oprResult.allow && cacheKey) {
+					this._cache.set(cacheKey, oprResult);
+				}
+				return oprResult;
+			}
+			// oprResult.allow=true, identity=null → operator-resident prefix exhausted; try external suffix
 		}
 
-		return result;
+		// Step 2: Run external suffix (via delegate or inline fallback)
+		if (extChain.length === 0) {
+			// No external suffix — allow with null identity (all providers exhausted)
+			return { allow: true, identity: null, provider: null };
+		}
+
+		let extResult;
+		if (this._authDelegate) {
+			// Delegate external suffix to auth sub-process
+			extResult = await this._authDelegate.runAuthn({ method, url, headers, authChain: extChain });
+		} else {
+			// Fallback: run external suffix inline (no auth sub-process configured)
+			extResult = await runAuthnChain(ctx, extChain, this._loader);
+		}
+
+		// Cache successful auth results (not denials)
+		if (extResult.allow && cacheKey) {
+			this._cache.set(cacheKey, extResult);
+		}
+
+		return extResult;
+	}
+
+	/**
+	 * Set or replace the auth delegate (external auth sub-process).
+	 * Called by the operator when the auth process pool is initialized or updated.
+	 * @param {object|null} authDelegate - OperatorAuthDelegate instance, or null to disable
+	 */
+	setAuthDelegate (authDelegate) {
+		this._authDelegate = authDelegate;
 	}
 }
