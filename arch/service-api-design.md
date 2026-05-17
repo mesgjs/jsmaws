@@ -27,11 +27,11 @@ This is impractical for most real-world applications. The goal is a **modular, p
 
 ## 2. Design Principles
 
-1. **Connection pooling in dedicated service processes**: Connections are managed by long-lived service process instances shared by all responders, not by individual responder processes or mod-app workers. Mod-apps request a service call via the `service` channel; the responder forwards it to a service process instance via PolyTransport `SocketTransport` (wrapping a Deno socket opened by JSMAWS).
+1. **Connection pooling in dedicated service processes**: Connections are managed by long-lived service process instances shared by all responders, not by individual responder processes or mod-app workers. Mod-apps request a service call via the `service` channel; the responder forwards it to a service sub-process instance via PolyTransport `SocketTransport` (wrapping a Deno socket opened by JSMAWS).
 2. **Credentials are stored separately**: Service credentials are managed separately (see [env-secrets-design.md](env-secrets-design.md)), not in mod-app code.
 3. **Pluggable adapters**: Each service type is implemented as an adapter module. Custom adapters can be provided by administrators.
 4. **Mod-app-facing API via IPC**: Mod-apps communicate with the service layer via a PolyTransport channel (`service`), not via direct service connections.
-5. **Scoped access**: Routes/groups declare which services they can access. Mod-apps cannot access services not declared for their route/group.
+5. **Scoped access**: Routes/route groups declare which services they can access. Mod-apps cannot access services not declared for their route or group.
 6. **Named service pools**: Services are assigned to named `servicePools` (workload profiles), not one pool per service. A single pool can serve multiple services; different pools can have different scaling strategies and process counts. This mirrors the responder pool model.
 7. **Operator as process manager**: The operator manages service process pools using the same pool infrastructure as responder pools. Service processes report health and capacity via the `control` channel.
 8. **Mesgjs-compatible**: The API should be expressible in Mesgjs message-passing style.
@@ -43,12 +43,14 @@ This is impractical for most real-world applications. The goal is a **modular, p
 ```
 Mod-App Worker (sandboxed)
   │  PostMessageTransport 'service' channel
-  │  Sends: { service: 'db', op: 'query', sql: '...', params: {...} }
-  │  Receives: { rows: [...], rowCount: N }
+  │  Calls JSMAWS.service.request('db', details)
+  │  Sends on 0: { type: 'svc-req', reqId: 1, service: 'db', details: {...} }
+  │  Receives on 0: { type: 'svc-acc', reqId: 1, messageType: 42 }
+  │  Receives on 42: { rows: [...], rowCount: N }
   ▼
 Responder Process (unprivileged, long-lived)
   │  Service relay: forwards svc-req to a service process instance,
-  │    returns svc-res/svc-err
+  │    returns svc-acc/svc-rej
   │  Enforces access control (which services this route can use)
   │  Asks operator for socket address of an available service process instance
   │  SocketTransport over Deno socket (JSMAWS manages connect step)
@@ -95,7 +97,7 @@ This means:
 
 ## 4. Mod-App ↔ Responder: Service Channel Protocol
 
-A PolyTransport channel (`service`) is added to the mod-app communication protocol. This channel is exposed via `globalThis.JSMAWS.service.channel` (alongside `.server`).
+A PolyTransport channel (`service`) is added to the mod-app communication protocol. This channel is exposed via `globalThis.JSMAWS.service.channel` (alongside `globalThis.JSMAWS.server`).
 
 The service channel uses **dynamically assigned message types** to enable true concurrent requests: each in-flight request is assigned one message type for its response data; that assignment is released when the response is complete. PolyTransport supports 2^16 (65,536) message types, making exhaustion a non-issue for practical workloads.
 
@@ -121,96 +123,89 @@ if (setupData.services?.length > 0) {
 ### 4.2 Message Type Allocation
 
 **Message Type 0**: Control sub-channel (by prior agreement between responder and mod-app)
-- Used for: request initiation, response message-type assignment, errors
-- Distinguished by `type` field in JSON payload: `'svc-req'`, `'svc-mta'`, `'svc-err'`
+- Used for: request initiation, message-type assignment, errors
+- Distinguished by `type` field in JSON payload: `'svc-req'`, `'svc-acc'`, `'svc-rej'`
 
 **Message Types 1-65535**: Response data (assigned dynamically by JSMAWS)
-- One message type is assigned per in-flight request when the responder forwards it to the service process
-- The bootstrap code receives the assigned message type via `svc-mta` on type 0 and resolves the corresponding `service.request()` promise with it
-- All response data for that request arrives on the assigned message type
+- One message type is assigned per in-flight request by the responder
+- The bootstrap code receives the assigned message type via `svc-acc` on type 0 and resolves the corresponding `service.request()` promise with it
+- All data for that request is received or sent on the assigned message type
 - The responder tracks active assignments in a map; new assignments use the next consecutive Uint16 value (wrapping, skipping 0 and any currently active assignment)
-- The mod-app calls `JSMAWS.service.release(messageType)` after it has finished reading the response; the bootstrap removes the assignment from the map
-- No message type is assigned for failed requests (error returned on type 0 via `svc-err`; `service.request()` promise rejects)
+- The mod-app calls `JSMAWS.service.release(messageType)` after the request is complete; the bootstrap removes the assignment from the map
+- No message type is assigned for failed requests (error returned on type 0 via `svc-rej`; `service.request()` promise rejects)
 
 ### 4.3 Control Messages (Message Type 0)
 
-#### Request (`type: 'svc-req'`)
+#### Service Request (`type: 'svc-req'`)
 
-This request is generated internally by `JSMAWS.service.request()`.
+This request is generated internally by `JSMAWS.service.request(service, details)`.
 
 ```javascript
-// Mod-App → Responder (on message type 0)
+// Mod-App Bootstrap → Responder (on message type 0)
 await JSMAWS.service.channel.write(0, JSON.stringify({
     // Generated by service.request():
     type: 'svc-req',
     reqId: 1,               // Request ID (consecutive integer, for tracking)
-    // Mod-app user-code-supplied payload:
     service: 'db',          // Service name (must be in route's services list)
-    op: 'query',            // Operation type (service-specific)
-    sql: 'SELECT * FROM users WHERE id = :id',
-    params: { id: userId },
-    // ... operation-specific fields
+    // Mod-app-supplied, service-specific request details
+    details: {
+      op: 'query',
+      sql: 'SELECT * FROM users WHERE id = :id',
+      params: { id: userId },
+      // ... additional request-specific fields
+    },
 }));
 ```
 
-#### Response Message-Type Assignment (`type: 'svc-mta'`)
+#### Service-Request-Accepted Response (`type: 'svc-acc'`)
 
 ```javascript
 // Responder → Mod-App bootstrap (on message type 0)
 {
-    type: 'svc-mta',
+    type: 'svc-acc',
     reqId: 1,             // Matches mod-app's request
     messageType: 42,      // Numeric message type for response data on the 'service' channel
 }
 ```
 
-The `svc-mta` message is sent intra-process (responder → mod-app worker via `PostMessageTransport`), so latency is negligible. The bootstrap resolves the `service.request()` promise with the assigned message type.
+The bootstrap resolves the `service.request()` promise with an object that includes the assigned message type, `{ messageType }`.
 
-#### Error (`type: 'svc-err'`)
+#### Service-Request-Rejected Response (`type: 'svc-rej'`)
 
 ```javascript
 // Responder → Mod-App bootstrap (on message type 0)
 {
-    type: 'svc-err',
+    type: 'svc-rej',
     reqId: 1,               // Matches mod-app's request
     error: 'Connection refused',
     code: 'ECONNREFUSED',   // Optional error code
 }
 ```
 
-### 4.4 Response Data Messages (Message Types 1-65535)
+### 4.4 Data Messages (Message Types 1-65535)
 
-Response data is sent on the assigned numeric message type. The payload format is service-specific.
+Response (and possibly additional request) data are sent with the assigned numeric message type. The message format(s) are service-specific and the traffic is opaque to the responder.
 
-```javascript
-// Responder → Mod-App (on assigned message type, e.g., 42)
-await JSMAWS.service.channel.write(42, JSON.stringify({
-    rows: [...],
-    rowCount: N,
-    fields: [...],
-}));
-```
-
-For streaming responses (future enhancement), multiple frames can be sent on the same response message type without mixing data from different requests.
+The responder is responsible for relaying opaque chunks (not entire messages) from the mod-app message-type to service sub-process `req-N` message-type `data` until the service SP closes the `req-N` channel.
 
 ### 4.5 `JSMAWS.service` — High-Level API
 
-The bootstrap exposes three functions on `JSMAWS.service`:
+The bootstrap exposes three properties on `JSMAWS.service`:
 
-- **`request(payload)`** → `Promise<number>`: Submits a service request. Resolves to the assigned response message type on success; rejects with an `Error` on `svc-err`.
-- **`release(messageType)`**: Removes the message type assignment from the active-assignment map after the mod-app has finished reading the response. Should be called after `dataMsg.process()` completes.
+- **`request(service, params)`** → `Promise<number>`: Submits a service request. Resolves to an object containing the assigned response message type on success; rejects with an `Error` on `svc-rej`.
+- **`release(messageType)`**: Removes the message type assignment from the active-assignment map after the mod-app has finished reading the response(s). Should be called after `dataMsg.process()` completes.
 - **`channel`**: The raw `service` PolyTransport channel, for reading response data on assigned message types.
 
 ```javascript
 const { request, release, channel: serviceChannel } = JSMAWS.service;
 
-// Submit request; resolves to the assigned response message type
-const responseMessageType = await request({
-    service: 'db',
+// Submit request (internally-generated message); resolves to the assigned response message type
+const response = await request('db', {
     op: 'query',
     sql: 'SELECT * FROM users WHERE id = :id',
     params: { id: userId },
 });
+const responseMessageType = response.messageType;
 
 // Read response data on the assigned message type
 const dataMsg = await serviceChannel.read({ only: responseMessageType, decode: true });
@@ -223,99 +218,47 @@ release(responseMessageType);
 
 **Implementation notes:**
 - `request()` assigns consecutive integer `reqId` values internally.
-- An internal type-0 reader loop (started when the `service` channel is opened) reads `svc-mta` and `svc-err` messages and resolves/rejects the corresponding pending promises.
+- An internal type-0 reader loop (started when the `service` channel is opened) reads `svc-acc` and `svc-rej` messages and resolves/rejects the corresponding pending promises.
 - The mod-app does not need to read from message type 0 directly.
 - `release()` is purely local — it removes the entry from the bootstrap's active-assignment map. No message is sent to the responder. The responder ↔ service process side cleans up independently when the req-N channel response arrives.
 - If `release()` is never called, the assignment remains in the map until the worker exits — harmless (just a little memory consumption), since the map is per-worker and the Uint16 counter wraps around a 65535-entry space.
+  - Note: This approach is used to prevent premature map-entry removal as mod-app content consumption may complete significantly later than the conclusion of service transmission.
 
 ### 4.6 Concurrency Model
 
-Each in-flight request is assigned its own message type for response data. The mod-app can:
+Each in-flight request is assigned its own message type for response data. The mod-app:
 
-1. Call `JSMAWS.service.request()` multiple times concurrently (each returns a promise that resolves to the assigned message type)
-2. Await the promises to learn which message type each response will arrive on
-3. Read response data on the assigned message types independently (via `channel.read({ only: responseMessageType })`)
-4. Call `JSMAWS.service.release(messageType)` after reading each (final, if more than one) response to remove the assignment from the active-assignment map
+1. Calls `JSMAWS.service.request()` multiple times concurrently (each returns a promise that resolves to an object with an assigned message type)
+2. Awaits the promises to learn which message type each response will arrive on
+3. Reads response data on the assigned message types independently (via `channel.read({ only: responseMessageType })`)
+4. Calls `JSMAWS.service.release(messageType)` after concluding communications with the service in order to remove the assignment from the active-assignment map
 
-This enables true concurrent service calls without `reqId` matching complexity in response data.
+This enables true concurrent service calls without `reqId` matching complexity in response data (which is service-specific and opaque).
 
 ---
 
 ## 5. Responder Relay Architecture
 
-The responder sits between the mod-app's `service` channel and the service process instances. This relay layer has three important responsibilities: **request ID isolation**, **response message type allocation**, and **fan-out to multiple service process connections**.
+The responder sits between the mod-app's `service` channel and the service sub-process instances. This relay layer has three important responsibilities: **request distribution to service processes**, **message type allocation**, and **data relaying**.
 
-### 5.1 Request ID Isolation and Message Type Allocation
+### 5.1 Distribution to Service Process Connections
 
-Mod-apps supply a `reqId` in each `svc-req` message for their own tracking. However, mod-app-supplied `reqId` values **must not be forwarded directly** to the service process. If they were:
-
-- Two mod-apps running concurrently (e.g., in different workers on the same responder) could use the same `reqId`, causing response misrouting.
-- A malicious mod-app could craft `reqId` values that collide with another mod-app's in-flight requests.
-
-**Solution: Responder-assigned relay IDs and response message types**
-
-The responder maintains a per-connection relay table. When forwarding a `svc-req` to a service process, the responder:
-
-1. Generates a unique relay ID (a monotonically incrementing integer scoped to the responder's connection to that service process).
-2. Allocates a response message type (numeric, 1-65535) for this request on the mod-app's `service` channel.
-3. Records the mapping: `relayId → { appReqId, appChannel, responseMessageType }`.
-4. Sends `svc-mta` to the mod-app on message type 0 with the allocated `responseMessageType`.
-5. Forwards the request to the service process with `reqId: relayId` (replacing the mod-app-supplied value).
-6. When the service process returns a response with `reqId: relayId`, the responder looks up the `responseMessageType` and `appChannel`, and writes the response data to the mod-app on the allocated message type.
-7. Deallocates the response message type after the response is complete.
-
-```
-Mod-App Worker A               Responder                  Service Process
-  svc-req { type: 'svc-req', reqId: 1, ... } (on msg type 0)
-  ──────────────────────────►
-                               relay table: { 'r-1' → { reqId: 1, ch: A, responseMessageType: 42 } }
-                               svc-mta { type: 'svc-mta', reqId: 1, messageType: 42 } (on msg type 0)
-  ◄──────────────────────────
-                               svc-req { reqId: 'r-1', ... } (forwarded to service process)
-                               ──────────────────────────────────────────────►
-                                                           svc-res { reqId: 'r-1', ... }
-                               ◄──────────────────────────────────────────────
-                               lookup 'r-1' → { reqId: 1, ch: A, responseMessageType: 42 }
-                               response data (on msg type 42 of 'service' channel)
-  ◄──────────────────────────
-```
-
-This ensures that:
-- Mod-apps cannot interfere with each other's requests regardless of `reqId` choice.
-- The service process sees only responder-scoped relay IDs, never mod-app-supplied values.
-- Each in-flight request has its own response message type on the `service` channel.
-- The relay table is cleaned up when a response is received or the mod-app connection closes.
-
-### 5.2 Fan-Out to Multiple Service Process Connections
-
-A single mod-app `service` channel may reference multiple services (e.g., `db` and `cache`), which may be assigned to different `servicePools` and thus different service process instances. The responder must maintain **one `SocketTransport` connection per service process instance** it is currently using, and route each `svc-req` to the correct connection based on the `service` field.
-
-```
-Mod-App Worker
-  │  service channel (single PostMessageTransport channel)
-  │  { type: 'svc-req', service: 'db', ... }
-  │  { type: 'svc-req', service: 'cache', ... }
-  ▼
-Responder
-  │  Reads svc-req from mod-app service channel (via message-type 0)
-  │  Inspects service field → looks up which servicePool/instance handles it
-  │  Routes to appropriate SocketTransport connection:
-  │
-  ├── SocketTransport → svc-shared-1.sock  (handles 'db', 'cache')
-  │     svc-req { reqId: 'r-1', service: 'db', ... }
-  │     svc-req { reqId: 'r-2', service: 'cache', ... }
-  │
-  └── SocketTransport → svc-analytics-1.sock  (handles 'analyticsDb')
-        svc-req { reqId: 'r-3', service: 'analyticsDb', ... }
-```
+A single mod-app `service` channel may reference multiple services (e.g., `db` and `cache`), which may be assigned to different `servicePools` and thus different service process instances. The responder must maintain **one `SocketTransport` connection per service process instance** it is currently using, and route each request to the correct connection based on the `service` field of the `svc-req` message.
 
 **Key points:**
 
 - The responder maintains a map of `servicePool name → SocketTransport connection` (one connection per pool, not per service, since a pool can serve multiple services).
+  - FEEDBACK: Needs clarification. There may be several connections to a single pool (for pending requests and new requests); is this just the one for new requests, or is this point actually incorrect?
 - Connections to service process instances are established lazily (on first use) or eagerly (at responder startup), depending on configuration.
   - Pre-connection should be supported for latency-critical services, either through the primary "allowed services" configuration or a separate option
 - If a service process instance becomes unavailable (due to connection loss or service-process request-saturation), the responder requests a new socket address from the operator and reconnects.
-- Responses from different service process instances are all written back to the single mod-app `service` channel, with `reqId` rewritten to the original mod-app-supplied value.
+- Responses from different service process instances are all written back to the single mod-app `service` channel using their uniquely-assigned message-types (see below).
+
+### 5.2 Message Type Allocation
+
+If a request is successful (the service sub-process returns `svc-acc` request accepted), the responder will assign a unique message-type (to be used as a `service` sub-channel) for data transmission related to that request (responses, plus follow-on requests, if supported).
+
+The message-type is included in the result object returned when the `request()` promise is resolved. The message-type is reserved until the mod-app calls `release(messageType)`.
 
 ---
 
@@ -330,31 +273,58 @@ Each responder ↔ service process connection uses:
 - **`control` channel**: Lifecycle messages (config, health, capacity, shutdown). Established at connection time.
 - **`req-N` channels** (N = 0, 1, 2, ...): One channel per in-flight service request. Allocated from a pool; returned after the response is complete.
 
+FEEDBACK: The control channel for the responder <-> service connection is for req-N assignment management and capacity feedback. Config and shutdown, for example, are only operator <-> service concerns, not responder <-> service concerns.
+
 This mirrors the operator ↔ responder req-N channel pool pattern ([`src/request-channel-pool.esm.js`](../src/request-channel-pool.esm.js)).
 
-### 6.2 Request/Response Flow
+### 6.2 Message Types
 
-```
-Responder                              Service Process Instance
-  │  (req-N channel, e.g. req-3)
-  │
-  │  svc-req (JSON text)
-  │  { reqId: 'r-1', service: 'db', op: 'query',
-  │    sql: 'SELECT ...', params: {...} }
-  ──────────────────────────────────────────────►
-  │
-  │                                    (adapter executes query)
-  │
-  │  svc-res (JSON text)
-  │  { reqId: 'r-1', rows: [...], rowCount: N, fields: [...] }
-  ◄──────────────────────────────────────────────
-  │
-  │  (req-3 channel returned to pool)
-```
+- `svc-req`: Service request forwarded from mod-app on 0 to service sub-process on `req-N` by responder SP
+- `svc-acc`: Request-accepted response from service SP on `req-N` to mod-app on 0
+- 
+
+### 6.3 Request/Response Flow
+
+#### Request Flow
+
+The responder:
+
+1. Creates a request context object `{ appTransport, reqId }`
+2. Looks for a connection to the service
+3. If it does not have one:
+   1. It looks for a socket address for the service
+   2. If it doesn't have one, it requests and waits for one from the operator
+   3. It connects to the service at the supplied socket address
+4. Allocates a `req-N` channel name for the request
+4. Adds `{ serviceTransport, channelName }` to the request context
+5. Forwards the request to the service SP (on `req-N`)
+6. Waits for a `svc-acc` success or `svc-rej` error response from the service SP
+
+#### Success Response Flow
+
+The responder:
+
+1. Assigns a message type (sub-channel)
+2. Adds `{ messageType }` to the request context
+3. Accepts the request on 0 with `svc-acc`, `reqId`, and `messageType`
+4. Relays opaque chunks (in both directions) between service channel `req-N` message-type `data` and mod-app assigned message-type until `req-N` is closed by the service SP
+
+#### Error Response Flow
+
+The responder:
+
+1. Closes the `req-N` channel
+2. Removes `{ serviceTransport, channelName }` from the request context
+3. If the response is "unavailable" (service SP is at capacity)
+   1. Requests and waits for a new socket address from the operator
+   2. Restarts the request at Request Flow step 3.3
+4. Rejects the request on 0 with `svc-rej`, `reqId`, and the error
+
+CONTINUE HERE
 
 ### 6.3 Message Types
 
-**`svc-req`** — Responder → Service Process (on req-N channel)
+**Service Request `svc-req`** — Responder → Service Process (on req-N channel)
 
 ```javascript
 {
@@ -365,7 +335,9 @@ Responder                              Service Process Instance
 }
 ```
 
-**`svc-res`** — Service Process → Responder (on req-N channel)
+**`svc-ack`** — Service Process → Responder (on req-N channel)
+
+FEEDBACK: ACK/success and data should be different types. Data should be treated as an opaque, `dechunk: false`, bidirectionally-relayed stream.
 
 ```javascript
 {
@@ -374,7 +346,7 @@ Responder                              Service Process Instance
 }
 ```
 
-**`svc-err`** — Service Process → Responder (on req-N channel)
+**`svc-rej`** — Service Process → Responder (on req-N channel)
 
 ```javascript
 {
@@ -384,7 +356,7 @@ Responder                              Service Process Instance
 }
 ```
 
-**`svc-unavailable`** — Service Process → Responder (on req-N channel or control channel)
+**`svc-rej`** — Service Process → Responder (on req-N channel or control channel)
 
 Sent when the service process instance is saturated and cannot accept new requests. The responder should request a new socket address from the operator and reconnect.
 
@@ -393,6 +365,8 @@ Sent when the service process instance is saturated and cannot accept new reques
     reason: 'POOL_EXHAUSTED',   // or 'SHUTTING_DOWN', etc.
 }
 ```
+
+**CONTINUE REVIEW HERE**
 
 ### 6.4 Streaming Responses (Future Enhancement)
 
@@ -858,7 +832,7 @@ services=[
 Service access is scoped to routes. A mod-app can only access services declared in its route's `services` list.
 
 - If a route has no `services`, `globalThis.JSMAWS.service` is `undefined`.
-- If a mod-app tries to access a service not in its route's list, the responder returns a `svc-err` with code `ACCESS_DENIED`.
+- If a mod-app tries to access a service not in its route's list, the responder returns a `svc-rej` with code `ACCESS_DENIED`.
 - Service names are validated against the global `services` configuration.
 
 This prevents mod-apps from accessing services they shouldn't (e.g., a public-facing mod-app accessing the payment API).
@@ -985,7 +959,7 @@ Custom adapters must implement the adapter interface (see Section 7 — Service 
    - Loads and initializes service adapters on startup (all adapters for its assigned pool)
    - Manages connection pools for each configured service
    - Routes `svc-req` messages to the appropriate adapter
-   - Returns `svc-res` or `svc-err` responses
+   - Returns `svc-res` or `svc-rej` responses
    - Reports health/capacity to operator via `control` channel `capacity-update` messages
 
 2. **Service manager** in `src/service-manager.esm.js`
@@ -1001,14 +975,14 @@ Custom adapters must implement the adapter interface (see Section 7 — Service 
    - Maintain one `SocketTransport` connection per service pool (not per service name)
    - Maintain relay table: responder-assigned relay ID → `{ appReqId, appChannel, responseMessageType }` (see Section 5.1)
    - Maintain message type assignment counter (wrapping Uint16, skipping 0 and active assignments) for the mod-app `service` channel
-   - On `svc-req` from mod-app (message type 0): assign relay ID, allocate response message type, record in relay table, send `svc-mta` to mod-app (message type 0), rewrite `reqId`, forward to correct `SocketTransport` based on `service` field
+   - On `svc-req` from mod-app (message type 0): assign relay ID, allocate response message type, record in relay table, send `svc-acc` to mod-app (message type 0), rewrite `reqId`, forward to correct `SocketTransport` based on `service` field
    - On response from service process: look up relay ID, write response data to mod-app on allocated message type, deallocate message type
-   - On error: send `svc-err` to mod-app on message type 0 (control sub-channel)
+   - On error: send `svc-rej` to mod-app on message type 0 (control sub-channel)
    - Clean up relay table entries and deallocate message types on response receipt or mod-app connection close
 
 4. **Bootstrap update** in `src/apps/bootstrap.esm.js`
    - Open `service` channel when `setupData.services` is non-empty
-   - Start internal type-0 reader loop for `svc-mta`/`svc-err` dispatch
+   - Start internal type-0 reader loop for `svc-acc`/`svc-rej` dispatch
    - Expose `{ channel, request, release }` as `globalThis.JSMAWS.service`
 
 5. **Configuration update** in `src/configuration.esm.js`
@@ -1129,6 +1103,8 @@ When the operator needs to stop or recycle a service process instance:
 
 ### 18.1 Streaming Results
 
+FEEDBACK: This is not technically a "future enhancement". Response data payload formats are service-specific, not part of the overall service API. The `res`/`res-etb`/`res-eot` message sub-type recommendation should already support this, and more, however.
+
 For large result sets, the service process can stream rows back to the mod-app as they arrive from the external service, rather than buffering the entire result set in memory.
 
 **Protocol extension (responder ↔ service process, on req-N channel):**
@@ -1173,7 +1149,7 @@ Redis/Valkey pub/sub and similar notification patterns require a persistent stre
 4. **Should there be a schema validation layer?** (e.g., validate query results against a schema)
    - **Resolved** This is a mod-app (or service-specific) concern, not a service API concern.
 5. **How should connection pool exhaustion be handled?**
-   - **Resolved** Return `svc-err` with code `POOL_EXHAUSTED` after `acquireTimeout`. Mod-app can retry or return a 503.
+   - **Resolved** Return `svc-rej` with code `POOL_EXHAUSTED` after `acquireTimeout`. Mod-app can retry or return a 503.
 6. **Should services be hot-reloadable?** (e.g., update credentials without restarting) — Complex; propose as a future enhancement (see Section 18.2).
 7. **Centralized service process via SocketTransport**
    - **Resolved**: Service adapters run in dedicated shared service process instances (Option D). JSMAWS manages the socket listen/connect steps (Unix domain socket or TCP loopback); `SocketTransport` wraps the resulting Deno socket connections. This caps connection count at `maxConnections × poolSize` regardless of responder count, and service connections survive responder recycling. The mod-app-facing `JSMAWS.service` API is identical regardless of pool size.
@@ -1182,7 +1158,9 @@ Redis/Valkey pub/sub and similar notification patterns require a persistent stre
 9. **Socket address assignment: static vs. dynamic**
    - **Resolved**: See Section 17.3.
 10. **Relay ID strategy**: Should the responder use monotonically incrementing integers (scoped per `SocketTransport` connection) or UUIDs for relay IDs? Monotonic integers are simpler and more compact; UUIDs are globally unique but larger. Since relay IDs are scoped to a single responder↔service-process connection and are short-lived, monotonic integers are likely sufficient.
+11. **Capacity-check timeline**: Should the entire request be sent to the service sub-proc before determining if it still has the necessary capacity, or should there be some sort of "ping"/capacity check before forwarding each request?
+    - **Resolved**: The available/busy ratio will be assumed to be favorable and requests will typically be sent without a prior capacity check. If a request is expected to need to support substantial amounts of associated request data, the service should support a no-op or capacity-verification request and follow-on requests with the data on the same path.
 
 ---
 
-[supplemental keywords: service API, service channel, svc-req, svc-res, svc-err, JSMAWS.service, servicePools, service process pool, database, SQL, NoSQL, PostgreSQL, MySQL, SQLite, Redis, MongoDB, HTTP API, key-value store, Deno KV, connection pool, service adapter, pluggable, modular, responder, transaction, query, CRUD, service, credentials, environment variables, access control, route-scoped, data access, data source, services, RPC, remote procedure call, pool management, health reporting, capacity update, socket registry, load balancing, workload profile]
+[supplemental keywords: service API, service channel, svc-req, svc-acc, svc-rej, JSMAWS.service, servicePools, service process pool, database, SQL, NoSQL, PostgreSQL, MySQL, SQLite, Redis, MongoDB, HTTP API, key-value store, Deno KV, connection pool, service adapter, pluggable, modular, responder, transaction, query, CRUD, service, credentials, environment variables, access control, route-scoped, data access, data source, services, RPC, remote procedure call, pool management, health reporting, capacity update, socket registry, load balancing, workload profile]
