@@ -75,12 +75,12 @@ export default {
 	 *   - No Basic header → null (provider did not recognize this request)
 	 *   - Malformed base64 → { allow: false } (structurally invalid credential)
 	 *   - Wrong credentials → null (try next provider)
-	 *   - Valid credentials → { allow: true, identity }
+	 *   - Valid credentials → { allow: true, identity, cacheKey }
 	 *
 	 * WWW-Authenticate response headers are a mod-app concern, not a provider concern.
 	 *
 	 * @param {Object} ctx - AuthContext
-	 * @param {Object} ctx.headers - Request headers
+	 * @param {Object} ctx.headers - Request headers (with lowercase keys)
 	 * @param {Object} ctx.config - Provider configuration
 	 * @returns {Object|null} AuthResult or null
 	 */
@@ -88,8 +88,8 @@ export default {
 		const { headers, config } = ctx;
 		const useBase64Passwords = config?.base64 === true || config?.base64 === '@t' || config?.base64 === 'true';
 
-		// Extract Basic credentials from Authorization header
-		const authHeader = headers?.authorization ?? headers?.Authorization ?? '';
+		// Extract Basic credentials from Authorization header (headers are lowercase per Fetch API)
+		const authHeader = headers?.authorization ?? '';
 		if (!authHeader.startsWith('Basic ')) {
 			// No Basic header — provider did not recognize this request
 			return null;
@@ -153,6 +153,20 @@ export default {
 			provider: '@basic',
 		};
 
-		return { allow: true, identity };
+		return { allow: true, identity, cacheKey: `@basic:${authHeader}` };
+	},
+
+	/**
+		* Extract a cache key for this provider from the request context.
+		* Returns an opaque string if a credential is present, or null if not.
+		* Called by the operator before running the auth chain for cache lookup.
+		*
+		* @param {Object} ctx - AuthContext (headers)
+		* @param {Object} _config - Provider configuration (unused)
+		* @returns {string|null} Cache key or null
+		*/
+	extractCacheKey (ctx, _config) {
+		const authHeader = ctx.headers?.authorization ?? '';
+		return authHeader.startsWith('Basic ') ? `@basic:${authHeader}` : null;
 	},
 };

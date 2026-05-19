@@ -298,9 +298,14 @@ Deno.test("OperatorAuthn - caches successful authn results", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			return {
+				// Provider implements extractCacheKey so the operator can cache results
+				extractCacheKey (ctx, _config) {
+					const auth = ctx.headers?.authorization ?? '';
+					return auth ? `mock:${auth}` : null;
+				},
 				async authCheck (_ctx) {
 					callCount++;
-					return { allow: true, identity: { sub: 'user-123' } };
+					return { allow: true, identity: { sub: 'user-123' }, cacheKey: 'mock:Bearer cached-token' };
 				},
 			};
 		},
@@ -330,6 +335,10 @@ Deno.test("OperatorAuthn - does not cache denial results", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			return {
+				extractCacheKey (ctx, _config) {
+					const auth = ctx.headers?.authorization ?? '';
+					return auth ? `mock:${auth}` : null;
+				},
 				async authCheck (_ctx) {
 					callCount++;
 					return { allow: false, denyStatus: 401, denyMessage: 'Unauthorized' };
@@ -360,9 +369,13 @@ Deno.test("OperatorAuthn - clearCache invalidates cached results", async () => {
 	const mockLoader = {
 		async load (_spec) {
 			return {
+				extractCacheKey (ctx, _config) {
+					const auth = ctx.headers?.authorization ?? '';
+					return auth ? `mock:${auth}` : null;
+				},
 				async authCheck (_ctx) {
 					callCount++;
-					return { allow: true, identity: { sub: 'user-123' } };
+					return { allow: true, identity: { sub: 'user-123' }, cacheKey: 'mock:Bearer token' };
 				},
 			};
 		},

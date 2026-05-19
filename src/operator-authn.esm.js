@@ -47,41 +47,6 @@ export const OPR_AUTH_PROVIDERS = new Set([
 ]);
 
 /**
- * Extract a cache key from a request for a given auth chain.
- * The key is `providerSpec + ":" + credential` for the first provider that
- * has a recognizable credential in the request headers.
- * Returns null if no credential is present (uncacheable).
- *
- * @param {Object} headers - Request headers (plain object)
- * @param {Array} authChain - Auth chain config array
- * @returns {string|null} Cache key or null
- */
-function extractCacheKey (headers, authChain) {
-	if (!authChain || !authChain.length) return null;
-
-	for (const providerConfig of authChain) {
-		if (!providerConfig || typeof providerConfig !== 'object') continue;
-		const { provider: providerSpec } = providerConfig;
-		if (!providerSpec) continue;
-
-		// JWT / Basic: Authorization header
-		const authHeader = headers?.authorization ?? headers?.Authorization;
-		if (authHeader) return `${providerSpec}:${authHeader}`;
-
-		// API key: configurable header
-		const headerName = providerConfig.header;
-		if (headerName) {
-			const lname = headerName.toLowerCase();
-			for (const [name, value] of Object.entries(headers ?? {})) {
-				if (name.toLowerCase() === lname) return `${providerSpec}:${lname}:${value}`;
-			}
-		}
-	}
-
-	return null;
-}
-
-/**
  * Split an auth chain into an operator-resident prefix and an external suffix.
  * The split point is the first provider that is not in OPR_AUTH_PROVIDERS.
  *
@@ -167,18 +132,43 @@ export class OperatorAuthn {
 			return { allow: true, identity: null, provider: null };
 		}
 
-		// Try cache (keyed on the full chain's credential)
-		const cacheKey = extractCacheKey(headers, authChain);
+		// Build auth context (used for cache key extraction and inline chain runs)
+		const ctx = buildAuthContext({ method, url, headers });
+
+		// Try cache: ask each provider (in chain order) for its cache key.
+		// The first non-null key wins. Cache key extraction runs all providers in the operator
+		// (it's a lightweight credential-presence check, not auth logic — no privilege needed).
+		let cacheKey = null;
+		for (const providerConfig of authChain) {
+			if (!providerConfig || typeof providerConfig !== 'object') continue;
+			const { provider: providerSpec, ...config } = providerConfig;
+			if (!providerSpec) continue;
+
+			let provider;
+			try {
+				provider = await this._loader.load(providerSpec);
+			} catch (_) {
+				continue; // Load failure handled during chain run
+			}
+
+			if (typeof provider.extractCacheKey === 'function') {
+				const key = provider.extractCacheKey(ctx, config);
+				if (key) {
+					cacheKey = key;
+					break;
+				}
+			}
+		}
+
 		if (cacheKey) {
+			// Note: OperatorAuthCache.get() handles TTL by ruturning null for expired entries
+			// (which causes the chain to run as if there were no cache entry).
 			const cached = this._cache.get(cacheKey);
 			if (cached) return cached;
 		}
 
 		// Split chain into operator-resident prefix and external suffix
 		const { oprChain, extChain } = splitAuthChain(authChain);
-
-		// Build auth context (used for inline runs)
-		const ctx = buildAuthContext({ method, url, headers });
 
 		// Step 1: Run operator-resident prefix inline
 		if (oprChain.length > 0) {
@@ -191,9 +181,10 @@ export class OperatorAuthn {
 
 			if (oprResult.identity !== null || extChain.length === 0) {
 				// Operator-resident provider succeeded (identity set) OR no external suffix to try
-				// Cache and return
-				if (oprResult.allow && cacheKey) {
-					this._cache.set(cacheKey, oprResult);
+				// Cache using the key from the result (the actual credential used), or the pre-run key
+				const writeKey = oprResult.cacheKey ?? cacheKey;
+				if (oprResult.allow && writeKey) {
+					this._cache.set(writeKey, oprResult);
 				}
 				return oprResult;
 			}
@@ -216,8 +207,9 @@ export class OperatorAuthn {
 		}
 
 		// Cache successful auth results (not denials)
-		if (extResult.allow && cacheKey) {
-			this._cache.set(cacheKey, extResult);
+		const extWriteKey = extResult.cacheKey ?? cacheKey;
+		if (extResult.allow && extWriteKey) {
+			this._cache.set(extWriteKey, extResult);
 		}
 
 		return extResult;

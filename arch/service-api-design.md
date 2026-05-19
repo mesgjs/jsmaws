@@ -17,9 +17,8 @@ JSMAWS mod-apps currently have no server-provided mechanism for calling server-s
 
 This is impractical for most real-world applications. The goal is a **modular, pluggable** Service API that:
 
-- Provides mod-apps with access to configured server-side services
+- Allows mod-apps to use configured server-side services
 - Manages connection pooling at the service-process level (not per-worker or per-responder)
-- Keeps credentials out of mod-app code (see [env-secrets-design.md](env-secrets-design.md))
 - Supports multiple service types (SQL databases, NoSQL stores, KV stores, HTTP APIs, notification services, custom services, etc.)
 - Is flexible enough to support custom service adapters
 
@@ -27,26 +26,49 @@ This is impractical for most real-world applications. The goal is a **modular, p
 
 ## 2. Design Principles
 
-1. **Connection pooling in dedicated service processes**: Connections are managed by long-lived service process instances shared by all responders, not by individual responder processes or mod-app workers. Mod-apps request a service call via the `service` channel; the responder forwards it to a service sub-process instance via PolyTransport `SocketTransport` (wrapping a Deno socket opened by JSMAWS).
-2. **Credentials are stored separately**: Service credentials are managed separately (see [env-secrets-design.md](env-secrets-design.md)), not in mod-app code.
-3. **Pluggable adapters**: Each service type is implemented as an adapter module. Custom adapters can be provided by administrators.
-4. **Mod-app-facing API via IPC**: Mod-apps communicate with the service layer via a PolyTransport channel (`service`), not via direct service connections.
-5. **Scoped access**: Routes/route groups declare which services they can access. Mod-apps cannot access services not declared for their route or group.
-6. **Named service pools**: Services are assigned to named `servicePools` (workload profiles), not one pool per service. A single pool can serve multiple services; different pools can have different scaling strategies and process counts. This mirrors the responder pool model.
-7. **Operator as process manager**: The operator manages service process pools using the same pool infrastructure as responder pools. Service processes report health and capacity via the `control` channel.
-8. **Mesgjs-compatible**: The API should be expressible in Mesgjs message-passing style.
+1. **Connection pooling in dedicated service processes**: Connections are managed by long-lived service process instances shared by all responders, not by individual responder processes or mod-app workers. Mod-apps request a service call via the `service` channel; the responder forwards it to a service sub-process ("SP") instance via PolyTransport `SocketTransport` (wrapping a Deno socket opened by JSMAWS).
+2. **Pluggable adapters**: Each service type is implemented as an adapter module. Custom adapters can be provided by administrators.
+3. **Mod-app-facing API via IPC**: Mod-apps communicate with the service layer via a PolyTransport channel (`service`), not via direct service connections.
+4. **Scoped access**: Routes/route groups declare which services they can access. Mod-apps cannot access services not declared for their route or group.
+5. **Named service pools**: Services are assigned to named `servicePools` (workload profiles), not one pool per service. A single pool can serve multiple services; different pools can have different scaling strategies and process counts. This mirrors the responder pool model.
+6. **Operator as process manager**: The operator manages service process pools using the same pool infrastructure as responder pools. Service processes report health and capacity via the operator <-> service transport `control` channel.
+7. **Mesgjs-compatible**: The API should be expressible in Mesgjs message-passing style.
 
 ---
 
 ## 3. Architecture Overview
 
+- Operator (privileged, server-lifetime)
+  - Manages responder and service pools
+    - Spawning, configuration, load-balancing, recycling, shut-down
+  - Maintains the service -> service pool -> sockets registry
+  - Forwards client requests to responder SPs via `PipeTransport` connections
+  - Responds to service SP socket-path requests via `PipeTransport` `control` channel
+- Responder SPs (unprivileged, long-lived)
+  - Run mod-apps in webworkers to handle the client requests
+  - Receive service requests via mod-app `PostMessageTransport` transport `service` channel
+  - Coordinate with operator on operator `PipeTransport` `control` channel to get service socket addresses
+  - Relay service requests and responses via service SP `SocketTransport` `req-N` channels and mod-app `PostMessageTransport` `service` channels
+- Service Pools
+  - Track service SPs analogously to standard pool tracking of responder SPs
+  - Have scaling strategies (static / dynamic / on demand) like responder pools, etc.
+  - Have a list of service adaptors assigned to run on service SPs in the pool
+- Service SPs (unprivileged, long-lived)
+  - Load adapters for all services configured in their pool
+    - E.g. PostgreSQL, Redis, HTTP API, notifications, custom services
+  - Receive `SocketTransport` connections from responder processes
+  - Relay requests and responses between service adaptors and responder `SocketTransport` `req-N` channels
+  - Report health and capacity to the operator on the `PipeTransport` `control` channel
+- External services (service adapter backends)
+  - Databases, caches, APIs, etc.
+  - API/protocol varies
+- Mod-app webworkers (sandboxed/unprivileged, typically short-lived)
+  - Request services via helper function `globalThis.JSMAWS.service.request(service, details)`
+    - Which sends the requests via the responder `PostMessageTransport` `service` channel (message-type 0) and returns a promise that resolves to an object that includes a message-type for receiving responses
+  - Process responses (also on the responder transport `service` channel)
+
 ```
 Mod-App Worker (sandboxed)
-  │  PostMessageTransport 'service' channel
-  │  Calls JSMAWS.service.request('db', details)
-  │  Sends on 0: { type: 'svc-req', reqId: 1, service: 'db', details: {...} }
-  │  Receives on 0: { type: 'svc-acc', reqId: 1, messageType: 42 }
-  │  Receives on 42: { rows: [...], rowCount: N }
   ▼
 Responder Process (unprivileged, long-lived)
   │  Service relay: forwards svc-req to a service process instance,
@@ -61,16 +83,8 @@ Operator (socket registry + pool manager)
   │  Spawns, monitors, scales, and recycles service process instances
   ▼
 Service Pool (named workload profile; one pool can serve multiple services)
-  │  Contains 1..N service process instances
-  │  Scaling strategy: static / dynamic / ondemand
-  │  Each instance loads adapters for all services assigned to this pool
   ▼
 Service Process Instance (unprivileged, long-lived)
-  │  Service Manager
-  │  - Holds connection pool for each service adapter it manages
-  │  - Routes svc-req messages to the appropriate adapter
-  │  - Reports health/capacity to operator via control channel
-  │  - JSMAWS manages listen step; SocketTransport wraps accepted connections
   ▼
 Service Adapter (loaded by service process instance)
   │  e.g., PostgreSQL adapter, Redis adapter, HTTP API adapter,
@@ -79,7 +93,9 @@ Service Adapter (loaded by service process instance)
 External Service (database, cache, API, etc.)
 ```
 
-The key insight is that **connection pools live in service process instances**, which are long-lived and shared by all responders. Mod-app workers are one-shot; responders are recycled after `maxReqs` requests; but service process instances persist independently, maintaining stable connections to external services.
+**Insights**
+
+Service requests are handled by adapters running in pools of long-lived service sub-process instances shared across all responder SPs. Service SPs have their own lifetimes and recycle independently of responder SPs. (A service SP due to recycle will respond "unavailable" to new requests (which will end up pushing those requests to newer service SPs) and recycle after their in-flight requests have completed processing.)
 
 The operator manages service process instances as **named pools** — the same pool infrastructure ([`src/pool-manager.esm.js`](../src/pool-manager.esm.js), [`src/process-manager.esm.js`](../src/process-manager.esm.js)) used for responder pools. Each named service pool (`servicePools`) is a workload profile: it declares scaling strategy, min/max process counts, and recycling policy. Multiple services can be assigned to the same pool (e.g., low-volume services sharing a small pool), or a single high-demand service can have its own dedicated pool.
 
@@ -94,6 +110,10 @@ This means:
 `SocketTransport` is socket-type-agnostic — it wraps any Deno socket that exposes `readable`/`writable` streams. JSMAWS is responsible for the `Deno.listen()`/`Deno.connect()` steps (using a Unix domain socket or TCP loopback as appropriate). Each service process instance calls `Deno.listen()` on its own socket and wraps each accepted connection in a `SocketTransport`; each responder calls `Deno.connect()` to the socket address provided by the operator and wraps the resulting connection in a `SocketTransport`.
 
 ---
+
+## 4. Operator
+
+**CONTINUE HERE**
 
 ## 4. Mod-App ↔ Responder: Service Channel Protocol
 
@@ -320,8 +340,6 @@ The responder:
    2. Restarts the request at Request Flow step 3.3
 4. Rejects the request on 0 with `svc-rej`, `reqId`, and the error
 
-CONTINUE HERE
-
 ### 6.3 Message Types
 
 **Service Request `svc-req`** — Responder → Service Process (on req-N channel)
@@ -365,8 +383,6 @@ Sent when the service process instance is saturated and cannot accept new reques
     reason: 'POOL_EXHAUSTED',   // or 'SHUTTING_DOWN', etc.
 }
 ```
-
-**CONTINUE REVIEW HERE**
 
 ### 6.4 Streaming Responses (Future Enhancement)
 

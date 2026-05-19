@@ -1,6 +1,6 @@
 /**
  * JSMAWS Built-in Auth Provider: @jwt
- * Verifies JSON Web Tokens (JWT) in the Authorization: Bearer header.
+ * Verifies JSON Web Tokens (JWT) in the Authorization: Bearer header or a named cookie.
  *
  * Supported algorithms: HS256, HS384, HS512, RS256, RS384, RS512
  *
@@ -10,9 +10,10 @@
  *   publicKey=:env:JWT_PUBLIC_KEY  (for RSA algorithms, PEM format)
  *   algorithm=HS256                (default: HS256)
  *   claimsField=roles              (optional: JWT claim field containing roles, default: 'roles')
+ *   cookie=cookieName              (optional: read JWT from this cookie instead of Authorization header)
  *
  * Return values (per auth-revisions-20260510.md 2026-05-11-B):
- *   null                          — no Bearer header, empty token, expired, or not-yet-valid
+ *   null                          — no Bearer header/cookie, empty token, expired, or not-yet-valid
  *   { allow: true, identity }     — valid JWT; identity includes sub, roles, claims, provider
  *   { allow: false, ... }         — structurally invalid or bad signature (malicious credential)
  *
@@ -169,37 +170,51 @@ async function verifyJwt (token, config) {
 
 export default {
 	/**
-	 * Verify JWT in Authorization: Bearer header.
+	 * Verify JWT in Authorization: Bearer header or a named cookie.
 	 *
 	 * Per auth-revisions-20260510.md 2026-05-11-B:
-	 *   - No Bearer header → null (provider did not recognize this request)
-	 *   - Empty token → null
+	 *   - No Bearer header / no cookie / empty token → null (provider did not recognize this request)
 	 *   - Expired/not-yet-valid → null (not malicious; try next provider)
 	 *   - Invalid format/bad signature → { allow: false } (structurally invalid/malicious)
 	 *   - Config error → propagated as Error (server misconfiguration)
-	 *   - Valid JWT → { allow: true, identity }
+	 *   - Valid JWT → { allow: true, identity, cacheKey }
 	 *
 	 * Role checks are removed from this provider; role is a routing-layer concern.
 	 *
 	 * @param {Object} ctx - AuthContext
-	 * @param {Object} ctx.headers - Request headers
+	 * @param {Object} ctx.headers - Request headers (with lowercase keys)
+	 * @param {Object} ctx.cookies - Parsed cookies
 	 * @param {Object} ctx.config - Provider configuration
 	 * @returns {Promise<Object|null>} AuthResult or null
 	 */
 	async authCheck (ctx) {
-		const { headers, config } = ctx;
+		const { headers, cookies, config } = ctx;
 
-		// Extract Bearer token from Authorization header
-		const authHeader = headers?.authorization ?? headers?.Authorization ?? '';
-		if (!authHeader.startsWith('Bearer ')) {
-			// No Bearer header — provider did not recognize this request
-			return null;
-		}
+		let token;
+		let cacheKey;
 
-		const token = authHeader.slice(7).trim();
-		if (!token) {
-			// Empty token — provider did not recognize this request
-			return null;
+		if (config?.cookie) {
+			// Extract JWT from named cookie
+			token = (cookies?.[config.cookie] ?? '').trim();
+			if (!token) {
+				// Cookie absent or empty — provider did not recognize this request
+				return null;
+			}
+			cacheKey = `@jwt:${config.cookie}:${token}`;
+		} else {
+			// Extract Bearer token from Authorization header (headers are lowercase per Fetch API)
+			const authHeader = headers?.authorization ?? '';
+			if (!authHeader.startsWith('Bearer ')) {
+				// No Bearer header — provider did not recognize this request
+				return null;
+			}
+
+			token = authHeader.slice(7).trim();
+			if (!token) {
+				// Empty token — provider did not recognize this request
+				return null;
+			}
+			cacheKey = `@jwt::${authHeader}`;
 		}
 
 		// verifyJwt() throws on config errors; returns status object for token outcomes
@@ -237,6 +252,26 @@ export default {
 			provider: '@jwt',
 		};
 
-		return { allow: true, identity };
+		return { allow: true, identity, cacheKey };
+	},
+
+	/**
+	 * Extract a cache key for this provider from the request context.
+	 * Returns an opaque string if a credential is present, or null if not.
+	 * Called by the operator before running the auth chain for cache lookup.
+	 *
+	 * @param {Object} ctx - AuthContext (headers, cookies)
+	 * @param {Object} config - Provider configuration
+	 * @returns {string|null} Cache key or null
+	 */
+	extractCacheKey (ctx, config) {
+		if (config?.cookie) {
+			const token = (ctx.cookies?.[config.cookie] ?? '').trim();
+			return token ? `@jwt:${config.cookie}:${token}` : null;
+		}
+		const authHeader = ctx.headers?.authorization ?? '';
+		if (!authHeader.startsWith('Bearer ')) return null;
+		const token = authHeader.slice(7).trim();
+		return token ? `@jwt::${authHeader}` : null;
 	},
 };

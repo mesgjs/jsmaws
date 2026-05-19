@@ -74,26 +74,19 @@ export default {
 	 * Per auth-revisions-20260510.md 2026-05-11-B:
 	 *   - No key header → null (provider did not recognize this request)
 	 *   - Key present but invalid → null (wrong key; try next provider)
-	 *   - Valid key → { allow: true, identity }
+	 *   - Valid key → { allow: true, identity, cacheKey }
 	 *
 	 * @param {Object} ctx - AuthContext
-	 * @param {Object} ctx.headers - Request headers
+	 * @param {Object} ctx.headers - Request headers (with lowercase keys)
 	 * @param {Object} ctx.config - Provider configuration
 	 * @returns {Object|null} AuthResult or null
 	 */
 	authCheck (ctx) {
 		const { headers, config } = ctx;
 
+		// Headers are lowercase per Fetch API; use direct lookup
 		const headerName = (config?.header ?? 'x-api-key').toLowerCase();
-
-		// Find the API key header (case-insensitive)
-		let apiKey = null;
-		for (const [name, value] of Object.entries(headers ?? {})) {
-			if (name.toLowerCase() === headerName) {
-				apiKey = value;
-				break;
-			}
-		}
+		const apiKey = headers?.[headerName];
 
 		if (!apiKey) {
 			// No key header — provider did not recognize this request
@@ -124,6 +117,21 @@ export default {
 			provider: '@api-key',
 		};
 
-		return { allow: true, identity };
+		return { allow: true, identity, cacheKey: `@api-key:${headerName}:${apiKey}` };
+	},
+
+	/**
+	 * Extract a cache key for this provider from the request context.
+	 * Returns an opaque string if a credential is present, or null if not.
+	 * Called by the operator before running the auth chain for cache lookup.
+	 *
+	 * @param {Object} ctx - AuthContext (headers)
+	 * @param {Object} config - Provider configuration
+	 * @returns {string|null} Cache key or null
+	 */
+	extractCacheKey (ctx, config) {
+		const headerName = (config?.header ?? 'x-api-key').toLowerCase();
+		const apiKey = ctx.headers?.[headerName];
+		return apiKey ? `@api-key:${headerName}:${apiKey}` : null;
 	},
 };

@@ -208,22 +208,6 @@ Deno.test("@jwt - includes other claims in identity.claims", async () => {
 	assertEquals(result.identity.claims.custom, 'value');
 });
 
-Deno.test("@jwt - handles Authorization header case-insensitively", async () => {
-	const token = await createTestJwt(
-		{ sub: 'user-123', iat: NOW, exp: NOW + 3600 },
-		JWT_SECRET
-	);
-
-	// Test with uppercase Authorization header key
-	const result = await jwtProvider.authCheck({
-		headers: { Authorization: `Bearer ${token}` },
-		config: { secret: JWT_SECRET },
-	});
-
-	assertEquals(result.allow, true);
-	assertEquals(result.identity.sub, 'user-123');
-});
-
 Deno.test("@jwt - returns allow: false for malformed JWT (wrong number of parts)", async () => {
 	const result = await jwtProvider.authCheck({
 		headers: { authorization: 'Bearer not.a.valid.jwt.token' },
@@ -232,6 +216,93 @@ Deno.test("@jwt - returns allow: false for malformed JWT (wrong number of parts)
 
 	assertEquals(result.allow, false);
 	assertEquals(result.denyStatus, 401);
+});
+
+Deno.test("@jwt - reads JWT from named cookie when cookie config is set", async () => {
+	const token = await createTestJwt(
+		{ sub: 'cookie-user', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: {},
+		cookies: { 'auth-token': token },
+		config: { secret: JWT_SECRET, cookie: 'auth-token' },
+	});
+
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'cookie-user');
+	assertEquals(result.identity.provider, '@jwt');
+});
+
+Deno.test("@jwt - returns null when cookie config is set but cookie is absent", async () => {
+	const result = await jwtProvider.authCheck({
+		headers: {},
+		cookies: {},
+		config: { secret: JWT_SECRET, cookie: 'auth-token' },
+	});
+
+	assertEquals(result, null);
+});
+
+Deno.test("@jwt - cookie takes precedence over Authorization header when cookie config is set", async () => {
+	const cookieToken = await createTestJwt(
+		{ sub: 'cookie-user', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+	const headerToken = await createTestJwt(
+		{ sub: 'header-user', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const result = await jwtProvider.authCheck({
+		headers: { authorization: `Bearer ${headerToken}` },
+		cookies: { 'auth-token': cookieToken },
+		config: { secret: JWT_SECRET, cookie: 'auth-token' },
+	});
+
+	// cookie config is set → reads from cookie, ignores Authorization header
+	assertEquals(result.allow, true);
+	assertEquals(result.identity.sub, 'cookie-user');
+});
+
+Deno.test("@jwt - extractCacheKey returns key for Bearer token", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const key = jwtProvider.extractCacheKey(
+		{ headers: { authorization: `Bearer ${token}` }, cookies: {} },
+		{ secret: JWT_SECRET }
+	);
+
+	assertEquals(typeof key, 'string');
+	assertEquals(key.startsWith('@jwt::Bearer '), true);
+});
+
+Deno.test("@jwt - extractCacheKey returns key for cookie JWT", async () => {
+	const token = await createTestJwt(
+		{ sub: 'user-123', iat: NOW, exp: NOW + 3600 },
+		JWT_SECRET
+	);
+
+	const key = jwtProvider.extractCacheKey(
+		{ headers: {}, cookies: { 'auth-token': token } },
+		{ secret: JWT_SECRET, cookie: 'auth-token' }
+	);
+
+	assertEquals(typeof key, 'string');
+	assertEquals(key.startsWith('@jwt:auth-token:'), true);
+});
+
+Deno.test("@jwt - extractCacheKey returns null when no credential present", () => {
+	const key = jwtProvider.extractCacheKey(
+		{ headers: {}, cookies: {} },
+		{ secret: JWT_SECRET }
+	);
+
+	assertEquals(key, null);
 });
 
 // ============================================================================
@@ -280,9 +351,10 @@ Deno.test("@api-key - uses custom header name", () => {
 	assertEquals(result.identity.sub, 'my-api-key');
 });
 
-Deno.test("@api-key - header lookup is case-insensitive", () => {
+Deno.test("@api-key - header name is lowercased for lookup", () => {
+	// Headers are always lowercase per Fetch API; provider normalizes config header name to lowercase
 	const result = apiKeyProvider.authCheck({
-		headers: { 'X-API-KEY': 'secret-key-1' },
+		headers: { 'x-api-key': 'secret-key-1' },
 		config: { keys: 'secret-key-1' },
 	});
 
@@ -408,16 +480,6 @@ Deno.test("@basic - returns allow: false for malformed base64 (structurally inva
 	assertEquals(result.denyStatus, 401);
 });
 
-Deno.test("@basic - handles Authorization header case-insensitively", () => {
-	const result = basicProvider.authCheck({
-		headers: { Authorization: makeBasicAuth('alice', 'secret') },
-		config: { users: { alice: 'secret' } },
-	});
-
-	assertEquals(result.allow, true);
-	assertEquals(result.identity.sub, 'alice');
-});
-
 Deno.test("@basic - accepts users as comma-separated 'user:pass' string", () => {
 	const result = basicProvider.authCheck({
 		headers: { authorization: makeBasicAuth('bob', 'pass123') },
@@ -485,4 +547,63 @@ Deno.test("@basic - returns null when no users configured", () => {
 	});
 
 	assertEquals(result, null);
+});
+
+Deno.test("@basic - extractCacheKey returns key for Basic credential", () => {
+	const key = basicProvider.extractCacheKey(
+		{ headers: { authorization: makeBasicAuth('alice', 'secret') } },
+		{}
+	);
+
+	assertEquals(typeof key, 'string');
+	assertEquals(key.startsWith('@basic:Basic '), true);
+});
+
+Deno.test("@basic - extractCacheKey returns null when no Authorization header", () => {
+	const key = basicProvider.extractCacheKey(
+		{ headers: {} },
+		{}
+	);
+
+	assertEquals(key, null);
+});
+
+Deno.test("@basic - extractCacheKey returns null when Authorization is not Basic", () => {
+	const key = basicProvider.extractCacheKey(
+		{ headers: { authorization: 'Bearer some-token' } },
+		{}
+	);
+
+	assertEquals(key, null);
+});
+
+// ============================================================================
+// @api-key extractCacheKey Tests
+// ============================================================================
+
+Deno.test("@api-key - extractCacheKey returns key for API key header", () => {
+	const key = apiKeyProvider.extractCacheKey(
+		{ headers: { 'x-api-key': 'my-secret-key' } },
+		{}
+	);
+
+	assertEquals(key, '@api-key:x-api-key:my-secret-key');
+});
+
+Deno.test("@api-key - extractCacheKey uses custom header name", () => {
+	const key = apiKeyProvider.extractCacheKey(
+		{ headers: { 'x-custom-key': 'my-secret-key' } },
+		{ header: 'x-custom-key' }
+	);
+
+	assertEquals(key, '@api-key:x-custom-key:my-secret-key');
+});
+
+Deno.test("@api-key - extractCacheKey returns null when header is absent", () => {
+	const key = apiKeyProvider.extractCacheKey(
+		{ headers: {} },
+		{}
+	);
+
+	assertEquals(key, null);
 });

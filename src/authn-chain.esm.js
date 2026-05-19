@@ -20,7 +20,7 @@ import { authProviderLoader } from './auth-provider-loader.esm.js';
  * @param {Object} ctx - AuthContext
  * @param {string} ctx.method - HTTP method
  * @param {string} ctx.url - Full request URL
- * @param {Object} ctx.headers - Raw request headers (plain object)
+ * @param {Object} ctx.headers - Raw request headers (plain object with lowercase keys)
  * @param {Object} ctx.cookies - Parsed cookies (plain object)
  * @param {Object} [ctx.config] - Auth provider configuration (from route/pool config)
  * @param {Array} authChain - Array of auth provider config objects
@@ -29,9 +29,12 @@ import { authProviderLoader } from './auth-provider-loader.esm.js';
  * @returns {Promise<AuthnResult>} Authn result
  *
  * AuthnResult (allow):
- *   { allow: true, identity: Object|null, provider: string|null }
+ *   { allow: true, identity: Object|null, provider: string|null, cacheKey: string|null }
  *   - identity: populated by the first successful auth provider (sub, roles, claims, provider)
  *   - provider: the provider spec string that succeeded (e.g. '@jwt'), or null if no auth
+ *   - cacheKey: opaque string for caching the result, or null if not cacheable
+ *     Providers that wish to support caching return a `cacheKey` in their result.
+ *     The key must uniquely identify the credential used (e.g. `'@jwt:Bearer <token>'`).
  *
  * AuthnResult (deny):
  *   { allow: false, denyStatus: number, denyMessage: string }
@@ -45,7 +48,7 @@ import { authProviderLoader } from './auth-provider-loader.esm.js';
 export async function runAuthnChain (ctx, authChain, loader = authProviderLoader) {
 	if (!authChain || !Array.isArray(authChain) || authChain.length === 0) {
 		// No auth configured — allow with null identity
-		return { allow: true, identity: null, provider: null };
+		return { allow: true, identity: null, provider: null, cacheKey: null };
 	}
 
 	for (const providerConfig of authChain) {
@@ -96,15 +99,17 @@ export async function runAuthnChain (ctx, authChain, loader = authProviderLoader
 		}
 
 		// First success — stop chain; identity does not accumulate
+		// Pass through cacheKey from provider result (null if provider does not support caching)
 		return {
 			allow: true,
 			identity: result.identity ?? null,
 			provider: providerSpec,
+			cacheKey: result.cacheKey ?? null,
 		};
 	}
 
 	// All providers exhausted without success — allow with null identity
-	return { allow: true, identity: null, provider: null };
+	return { allow: true, identity: null, provider: null, cacheKey: null };
 }
 
 /**
@@ -134,12 +139,12 @@ export function parseCookies (cookieHeader) {
  * @param {Object} opts
  * @param {string} opts.method - HTTP method
  * @param {string} opts.url - Full request URL
- * @param {Object} opts.headers - Raw request headers (plain object)
+ * @param {Object} opts.headers - Raw request headers (plain object with **lowercase keys**)
  * @returns {Object} AuthContext
  */
 export function buildAuthContext ({ method, url, headers }) {
-	const cookieHeader = headers?.cookie ?? headers?.Cookie ?? '';
-	const cookies = parseCookies(cookieHeader);
+	// Headers are expected to have lowercase keys (per Fetch API / Deno's Headers object).
+	const cookies = parseCookies(headers?.cookie ?? '');
 
 	return {
 		method,

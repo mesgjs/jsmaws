@@ -342,13 +342,18 @@ Deno.test("OperatorAuthn - caches result from external delegation", async () => 
 	const mockDelegate = {
 		async runAuthn () {
 			delegateCallCount++;
-			return { allow: true, identity: { sub: 'session-user' }, provider: '@session' };
+			return { allow: true, identity: { sub: 'session-user' }, provider: '@session', cacheKey: 'mock:Bearer some-token' };
 		},
 	};
 
 	const mockLoader = {
 		async load (_spec) {
 			return {
+				// Implement extractCacheKey so the operator can find a cache key before running the chain
+				extractCacheKey (ctx, _config) {
+					const auth = ctx.headers?.authorization ?? '';
+					return auth.startsWith('Bearer ') ? `mock:${auth}` : null;
+				},
 				async authCheck (_ctx) {
 					return null; // JWT did not authenticate
 				},
