@@ -445,7 +445,7 @@ export class RequestContext {
 		if (!channel) return; // Already released
 		this.reqChannel = null;
 		this.process.reqChannelPool.release(channel).catch((err) => {
-			this.operator?.logger.warn(`[${this.requestId}] Failed to release req-N channel: ${err.message}`);
+			if (err.message) this.operator?.logger.warn(`[${this.requestId}] Failed to release req-N channel: ${err.message}`);
 		});
 	}
 }

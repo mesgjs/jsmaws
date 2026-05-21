@@ -11,9 +11,11 @@
 JSMAWS mod-apps currently have no server-provided mechanism for calling server-side services. A mod-app that needs to query a database, read from a cache, call an external API, or invoke any other server-side capability must:
 
 1. Establish its own connection (using `Deno.connect`, `fetch`, etc.)
-2. Manage credentials directly (hard-coded)
-3. Handle connection pooling itself (one-shot workers make this impossible)
-4. Implement its own error handling and retry logic
+   - Replaced by `service` channel connection, request setup, reader loop
+2. Handle connection pooling itself (one-shot workers make this impossible)
+   - Does being able to leverage a connection pool sufficiently offset the additional complexity and latency?
+3. Implement its own error handling and retry logic
+   - Direct resource error handling and retry logic just moves to service-path error handling and retry logic
 
 This is impractical for most real-world applications. The goal is a **modular, pluggable** Service API that:
 

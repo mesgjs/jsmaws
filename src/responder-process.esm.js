@@ -22,6 +22,7 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
+import { Channel } from '@poly-transport/channel.esm.js';
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
 import { SubProcess } from './sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
@@ -135,6 +136,7 @@ export class ResponderProcess extends SubProcess {
 	 * @param {object} reqChannel - PolyTransport channel
 	 */
 	async handleReqChannel (reqChannel) {
+		if (reqChannel.state !== Channel.STATE_OPEN) return;
 		await reqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES);
 
 		// Loop 1: 'req' messages (dechunked by default — full message reassembly)
