@@ -1,8 +1,6 @@
 /**
  * Tests for JSMAWS Built-in Auth Providers
  * Tests @jwt, @api-key, and @basic providers
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";

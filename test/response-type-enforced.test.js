@@ -1,8 +1,6 @@
 /**
  * Response-Type Enforcement Tests
  * Tests for pool-level response type restrictions
- *
- * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts';

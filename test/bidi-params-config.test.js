@@ -5,8 +5,6 @@
  * After the PolyTransport refactoring, getBidiParams() returns only { maxChunkSize }.
  * All credit-based flow control parameters (initialCredits, maxBytesPerSecond,
  * idleTimeout, maxBufferSize) are obsolete and have been removed.
- *
- * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts';

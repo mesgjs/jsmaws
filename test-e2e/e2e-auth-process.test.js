@@ -7,8 +7,6 @@
  * - External provider delegation via IPC (auth-req/auth-res protocol)
  * - Mixed chains: operator-resident prefix + external suffix
  * - Auth sub-process shutdown and cleanup
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";

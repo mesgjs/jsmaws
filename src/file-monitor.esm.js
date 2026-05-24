@@ -1,61 +1,57 @@
 /**
- * JSMAWS Configuration Monitor
- * Monitors SLID configuration files for changes and triggers reloading
+ * JSMAWS File Monitor
+ * Monitors a file for changes and notifies a callback when the file is modified.
  *
- * Uses Deno's file watching capabilities to detect configuration updates
- * and notifies listeners when changes occur.
+ * Uses Deno's file watching capabilities to detect file updates.
+ * The callback receives the file path (a string); the caller is responsible
+ * for reading and interpreting the new file content.
  *
- * Since logging depends on configuration, this module logs to the console.
- * 
- * Copyright 2025 Kappa Computer Solutions, LLC and Brian Katzung
+ * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
-
-import { parseSLID } from '@nanos';
 
 /**
- * Configuration monitor for watching SLID files
+ * File monitor for watching a single file for changes
  */
-export class ConfigMonitor {
-	constructor (configPath, onChange, { debounceDelay = 500, nativeConfig = false } = {}) {
-		this.configPath = configPath;
+export class FileMonitor {
+	constructor (filePath, onChange, { debounceDelay = 500 } = {}) {
+		this.filePath = filePath;
 		this.onChange = onChange;
-		this.nativeConfig = nativeConfig;
 		this.watcher = null;
 		this.isMonitoring = false;
-		this.lastRead = Date.now(); // When the configuration was last read
+		this.lastRead = Date.now(); // When the file was last read
 		this.lastModified = null; // When the file was last modified
 		this.debounceTimer = null;
 		this.debounceDelay = debounceDelay; // ms - debounce rapid file changes
 
 		// Extract directory and filename for watching
 		// Watch directory instead of file to handle atomic writes (rename operations)
-		const pathParts = configPath.split('/');
-		this.configFilename = pathParts[pathParts.length - 1];
-		this.configDir = pathParts.slice(0, -1).join('/') || '.';
+		const pathParts = filePath.split('/');
+		this.filename = pathParts[pathParts.length - 1];
+		this.dir = pathParts.slice(0, -1).join('/') || '.';
 	}
 
 	/**
-	 * Start monitoring the configuration file
+	 * Start monitoring the file
 	 */
 	async startMonitoring () {
 		if (this.isMonitoring) {
-			console.warn('[operator] Configuration monitor already running');
+			console.warn(`File monitor already running for: ${this.filePath}`);
 			return;
 		}
 
 		this.isMonitoring = true;
-		console.info(`[operator] Starting configuration monitor for: ${this.configPath}`);
+		console.info(`Starting file monitor for: ${this.filePath}`);
 
 		try {
 			// Watch both the directory (for atomic writes/renames) and the file itself
 			// (for in-place edits). Use non-recursive watching to avoid permission issues
 			// with unreadable subdirectories. We check the file's mod time when either changes.
-			this.watcher = Deno.watchFs([this.configDir, this.configPath], { recursive: false });
+			this.watcher = Deno.watchFs([this.dir, this.filePath], { recursive: false });
 
 			// Process watch events in a separate task
 			this.processWatchEvents();
 		} catch (error) {
-			console.error('[operator] Failed to start configuration monitor:', error.message);
+			console.error('Failed to start file monitor:', error.message);
 			this.isMonitoring = false;
 			throw error;
 		}
@@ -72,7 +68,7 @@ export class ConfigMonitor {
 					break;
 				}
 
-				// We're watching the config file and its directory (non-recursive).
+				// We're watching the file and its directory (non-recursive).
 				// Any create/modify/rename event could be relevant (in-place edit or atomic write).
 				// debounceChanges will check the actual file mod time to confirm real changes.
 				switch (event.kind) {
@@ -86,13 +82,13 @@ export class ConfigMonitor {
 		} catch (error) {
 			// Ignore errors after monitoring stopped (watcher closed)
 			if (this.isMonitoring) {
-				console.error('[operator] Error in configuration monitor:', error.message);
+				console.error('Error in file monitor:', error.message);
 			}
 		}
 	}
 
 	/**
-	 * Debounce configuration change detection
+	 * Debounce file change detection
 	 */
 	async debounceChanges () {
 		// Maintain the status quo if the file is present and hasn't changed.
@@ -113,36 +109,28 @@ export class ConfigMonitor {
 		this.debounceTimer = setTimeout(async () => {
 			try {
 				this.debounceTimer = null;
-				await this.handleConfigChange();
+				await this.handleFileChange();
 			} catch (error) {
-				console.error('[operator] Error handling configuration change:', error.message);
+				console.error('Error handling file change:', error.message);
 			}
 		}, this.debounceDelay);
 	}
 
 	/**
-	 * Handle configuration file change
+	 * Handle file change — notify the callback with the file path
 	 */
-	async handleConfigChange () {
+	async handleFileChange () {
 		if (this.lastRead >= this.lastModified) return; // Already read since last change
-		try {
-			// Load new configuration
-			const configText = await Deno.readTextFile(this.configPath);
-			this.lastread = Date.now();
-			const newConfig = parseSLID(configText);
+		this.lastRead = Date.now();
 
-			console.info('[operator] Configuration file changed, reloading...');
+		console.info(`File changed: ${this.filePath}`);
 
-			// Notify listener of configuration change
-			if (this.onChange) {
-				try {
-					await this.onChange(this.nativeConfig ? newConfig.toObject({ array: true }) : newConfig);
-				} catch (callbackError) {
-					console.error('[console] Error in configuration change callback:', callbackError.message);
-				}
+		if (this.onChange) {
+			try {
+				await this.onChange(this.filePath);
+			} catch (callbackError) {
+				console.error('Error in file change callback:', callbackError.message);
 			}
-		} catch (error) {
-			console.error('[console] Failed to reload configuration:', error.message);
 		}
 	}
 
@@ -151,16 +139,16 @@ export class ConfigMonitor {
 	 */
 	async getFileModificationTime () {
 		try {
-			const stat = await Deno.stat(this.configPath);
+			const stat = await Deno.stat(this.filePath);
 			return stat.mtime ? stat.mtime.getTime() : null;
 		} catch (error) {
-			console.error(`[console] Failed to stat configuration file: ${error.message}`);
+			console.error(`Failed to stat file: ${error.message}`);
 			return null;
 		}
 	}
 
 	/**
-	 * Stop monitoring the configuration file
+	 * Stop monitoring the file
 	 */
 	stopMonitoring () {
 		if (!this.isMonitoring) {
@@ -168,7 +156,7 @@ export class ConfigMonitor {
 		}
 
 		this.isMonitoring = false;
-		console.info('[console] Stopping configuration monitor');
+		console.info('Stopping file monitor');
 
 		// Clear debounce timer
 		if (this.debounceTimer) {

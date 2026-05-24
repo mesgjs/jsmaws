@@ -1,8 +1,6 @@
 /**
  * Tests for JSMAWS Authentication Chain Runner
  * Tests the runAuthnChain() function and related helpers
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals } from "https://deno.land/std@0.208.0/assert/mod.ts";

@@ -7,22 +7,10 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
-import { parseSLID } from '@nanos';
 import { OperatorProcess } from './operator-process.esm.js';
 import { registerValueSchemes } from './schemes/index.esm.js';
 
 const DEFAULT_CONFIG_FILE = 'jsmaws.slid';
-
-/**
- * Load configuration from a SLID file
- * @param {string} configPath Path to the SLID configuration file
- * @returns {Promise<NANOS>} Parsed configuration
- */
-export async function loadConfig (configPath) {
-	const configText = await Deno.readTextFile(configPath);
-	const config = parseSLID(configText);
-	return config;
-}
 
 /**
  * Main entry point
@@ -35,18 +23,14 @@ async function main () {
 	const args = Deno.args;
 	const configFile = args[0] || DEFAULT_CONFIG_FILE;
 
-	// Load configuration from SLID file
-	console.log(`Loading configuration from: ${configFile}`);
-	const configNANOS = await loadConfig(configFile);
-	const nativeConfig = configNANOS.toObject({ array: true });
-
-	// Create operator with null config; initial config is set via handleConfigUpdate()
+	// Create operator with null config; initial config is loaded via loadConfigFile()
 	// so that value references (:env:, :file:, :kv:) are resolved before use.
 	const operator = new OperatorProcess(null, configFile);
 	globalThis.OperatorProcess = OperatorProcess;
 
-	// Resolve and apply initial configuration (same path as config reloads)
-	await operator.handleConfigUpdate(nativeConfig);
+	// Load and apply initial configuration (same path as file-watch and SIGHUP reloads)
+	console.log(`Loading configuration from: ${configFile}`);
+	await operator.loadConfigFile(configFile);
 
 	console.log('Operator configuration:');
 	console.log(`  HTTP Port: ${operator.config.httpPort}`);
@@ -68,6 +52,9 @@ async function main () {
 
 	Deno.addSignalListener('SIGINT', shutdownHandler);
 	Deno.addSignalListener('SIGTERM', shutdownHandler);
+
+	// Handle SIGHUP for graceful config reload (standard Unix practice)
+	operator.registerSighupHandler();
 
 	// Start the operator
 	await operator.start();

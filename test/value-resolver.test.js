@@ -2,8 +2,6 @@
  * Value Resolver Tests
  * Tests for ValueResolver, parseValueRef, and all scheme handlers
  * (EnvScheme, FileScheme, KvScheme)
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import {

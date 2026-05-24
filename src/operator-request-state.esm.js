@@ -9,6 +9,7 @@
  */
 
 import { WebSocketTransport } from '@poly-transport/transport/websocket.esm.js';
+import { Channel } from '@poly-transport/channel.esm.js';
 import { OperatorProcess } from './operator-process.esm.js';
 import { applyResponseFilter } from './header-filter.esm.js';
 
@@ -306,9 +307,10 @@ export class RequestContext {
 				const msg = await bidiChannel.read({ only: 'bidi-frame', dechunk: false });
 				if (!msg) break;
 				await msg.process(async () => {
-					if (this.state !== RequestState.COMPLETED && this.reqChannel) {
+					const reqChannel = this.reqChannel;
+					if (this.state !== RequestState.COMPLETED && reqChannel?.state === Channel.STATE_OPEN) {
 						// console.log('*** Opr Cli->App bidi relay', msg.dataSize);
-						await this.reqChannel.write('bidi-frame', msg.data, { eom: false });
+						await reqChannel.write('bidi-frame', msg.data, { eom: false });
 					}
 					// else console.log('*** Opr Cli->App discarding message', this.state, this.reqChannel);
 				});

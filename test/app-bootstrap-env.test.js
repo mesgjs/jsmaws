@@ -2,8 +2,6 @@
  * Mod-App Bootstrap Environment Injection Tests
  * Tests that setupData.appEnv is correctly exposed as globalThis.JSMAWS.env
  * in the mod-app worker.
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';
@@ -90,7 +88,7 @@ async function setupBootstrapWorker (appCode, setupOverrides = {}) {
 	return { worker, transport, appChannel, cleanup };
 }
 
-// ─── JSMAWS.env availability ──────────────────────────────────────────────────
+// --- JSMAWS.env availability --------------------------------------------------
 
 Deno.test('Bootstrap env - JSMAWS.env is available as a frozen object', async () => {
 	const appCode = `
@@ -160,7 +158,7 @@ Deno.test('Bootstrap env - JSMAWS.env is empty object when no appEnv in setupDat
 	}
 });
 
-// ─── appEnv injection ─────────────────────────────────────────────────────────
+// --- appEnv injection ---------------------------------------------------------
 
 Deno.test('Bootstrap env - injected appEnv values are accessible via JSMAWS.env', async () => {
 	const appCode = `

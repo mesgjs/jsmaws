@@ -12,6 +12,8 @@
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
+import { Channel } from '@poly-transport/channel.esm.js';
+
 export default async function (_setupData) {
 	const server = globalThis.JSMAWS.server;
 
@@ -68,7 +70,7 @@ export default async function (_setupData) {
 		await server.write('res-frame', null);
 
 	} catch (error) {
-		await server.write('res-error', JSON.stringify({
+		if (server.state === Channel.STATE_OPEN) await server.write('res-error', JSON.stringify({
 			error: error.message,
 			stack: error.stack,
 		}));

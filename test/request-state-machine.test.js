@@ -8,8 +8,6 @@
  *   - context.handleResFrame(data, eom) — handles 'res-frame' chunks
  *   - context.relayBidiFrame(data) — relays 'bidi-frame' to client WS
  *   - context.handleError(error) — error handling
- *
- * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';

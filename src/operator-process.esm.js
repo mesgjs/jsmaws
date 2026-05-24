@@ -13,11 +13,10 @@
  */
 
 import { BufferPool } from '@poly-transport/buffer-pool.esm.js';
-import { NANOS } from '@nanos';
 import { createSSLManager } from './ssl-manager.esm.js';
 import { Router } from './router-worker.esm.js';
 import { Configuration } from './configuration.esm.js';
-import { ConfigMonitor } from './config-monitor.esm.js';
+import { FileMonitor } from './file-monitor.esm.js';
 import { createLogger } from './logger.esm.js';
 import { ProcessManager, ProcessType } from './process-manager.esm.js';
 import { PoolManager } from './pool-manager.esm.js';
@@ -39,8 +38,8 @@ export class OperatorProcess {
 
 	constructor (config, configPath) {
 		this.constructor.instance = this;
-		// Accept NANOS (from parseSLID), plain object (from JSON.parse), Configuration instance,
-		// or null/undefined (config will be set via handleConfigUpdate() before start()).
+		// Accept plain object (from JSON.parse), Configuration instance,
+		// or null/undefined (config will be set via loadConfigFile() before start()).
 		this.config = (config instanceof Configuration) ? config : new Configuration(config ?? {});
 		this.configPath = configPath;
 		this.httpServer = null;
@@ -270,14 +269,13 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Handle configuration update from config monitor (or initial load).
+	 * Handle configuration update from file monitor (or initial load).
 	 * Resolves value references, updates Configuration, and propagates changes
 	 * to the router, responder pools, and sub-processes (if initialized).
 	 *
 	 * Safe to call before the logger is initialized (uses console fallback).
-	 * Accepts NANOS objects (converted internally by resolveConfig).
 	 *
-	 * @param {NANOS|Object} newConfig - New configuration (NANOS or plain object)
+	 * @param {Object} newConfig - New configuration (plain object)
 	 */
 	async handleConfigUpdate (newConfig) {
 		(this.logger ?? console).info('Configuration updated; reloading...');
@@ -314,29 +312,6 @@ export class OperatorProcess {
 		if (updateTasks.length > 0) {
 			await Promise.all(updateTasks);
 		}
-	}
-
-	/**
-	 * Resolve value references in a raw configuration object.
-	 * Injects configDir for the :file: scheme and calls valueResolver.resolveObject().
-	 * The caller is responsible for converting NANOS to a plain object before calling.
-	 *
-	 * @param {Object} rawConfig - Raw plain-object configuration
-	 * @returns {Promise<Object>} Resolved plain-object configuration
-	 */
-	async resolveConfig (rawConfig) {
-		if (rawConfig instanceof NANOS) {
-			// Support NANOS for backward compatibility/testing
-			rawConfig = rawConfig.toObject({ array: true });
-		}
-		// Derive configDir from configPath for :file: relative path resolution.
-		// Use URL to handle both absolute and relative configPath values consistently.
-		const configDir = this.configPath
-			? new URL('.', new URL(this.configPath, `file://${Deno.cwd()}/`)).pathname.replace(/\/$/, '')
-			: Deno.cwd();
-
-		const rawWithDir = { ...(rawConfig ?? {}), configDir };
-		return await this.valueResolver.resolveObject(rawWithDir, rawWithDir);
 	}
 
 	/**
@@ -625,6 +600,40 @@ export class OperatorProcess {
 	}
 
 	/**
+	 * Load configuration from a file path, resolve value references, and apply it.
+	 * Used for initial boot, file-watch reloads, and SIGHUP reloads — all the same path.
+	 * No-op if filePath is not provided.
+	 *
+	 * @param {string} filePath Path to the SLID config file
+	 * @returns {Promise<void>}
+	 */
+	async loadConfigFile (filePath) {
+		if (!filePath) {
+			(this.logger ?? console).warn('loadConfigFile() called with no filePath; skipping');
+			return;
+		}
+		const config = await Configuration.fromFile(filePath);
+		await this.handleConfigUpdate(config.config);
+	}
+
+	/**
+	 * Register the SIGHUP signal handler for graceful config reload.
+	 * Exposed as a method so tests can register it without going through main().
+	 * The handler logs at INFO level and calls loadConfigFile().
+	 */
+	registerSighupHandler () {
+		Deno.addSignalListener('SIGHUP', async () => {
+			this.logger.info('SIGHUP received; reloading configuration...');
+			try {
+				await this.loadConfigFile(this.configPath);
+				this.logger.info('Configuration reloaded successfully (SIGHUP)');
+			} catch (error) {
+				this.logger.error(`Failed to reload configuration on SIGHUP: ${error.message}`);
+			}
+		});
+	}
+
+	/**
 	 * Reload HTTPS server with updated certificates
 	 */
 	async reloadHttpsServer () {
@@ -650,6 +659,24 @@ export class OperatorProcess {
 		} finally {
 			this.isReloading = false;
 		}
+	}
+
+	/**
+	 * Resolve value references in a raw configuration object.
+	 * Injects configDir for the :file: scheme and calls valueResolver.resolveObject().
+	 *
+	 * @param {Object} rawConfig - Raw plain-object configuration
+	 * @returns {Promise<Object>} Resolved plain-object configuration
+	 */
+	async resolveConfig (rawConfig) {
+		// Derive configDir from configPath for :file: relative path resolution.
+		// Use URL to handle both absolute and relative configPath values consistently.
+		const configDir = this.configPath
+			? new URL('.', new URL(this.configPath, `file://${Deno.cwd()}/`)).pathname.replace(/\/$/, '')
+			: Deno.cwd();
+
+		const rawWithDir = { ...(rawConfig ?? {}), configDir };
+		return await this.valueResolver.resolveObject(rawWithDir, rawWithDir);
 	}
 
 	/**
@@ -755,10 +782,9 @@ export class OperatorProcess {
 		}
 
 		if (this.configPath) {
-			this.configMonitor = new ConfigMonitor(
+			this.configMonitor = new FileMonitor(
 				this.configPath,
-				(newConfig) => this.handleConfigUpdate(newConfig),
-				{ nativeConfig: true }
+				(filePath) => this.loadConfigFile(filePath)
 			);
 			await this.configMonitor.startMonitoring();
 		}

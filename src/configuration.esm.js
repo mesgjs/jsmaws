@@ -58,6 +58,16 @@ export class Configuration {
 	}
 
 	/**
+	 * Load and parse a SLID file, returning a new Configuration instance.
+	 * @param {string} filePath Path to the SLID file
+	 * @returns {Promise<Configuration>} Loaded configuration
+	 */
+	static async fromFile (filePath) {
+		const text = await Deno.readTextFile(filePath);
+		return Configuration.fromSLID(text);
+	}
+
+	/**
 	 * Create Configuration from SLID string
 	 * @param {string} slidString SLID-formatted configuration string
 	 * @returns {Configuration} New Configuration instance

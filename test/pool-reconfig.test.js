@@ -1,6 +1,6 @@
 /**
  * Tests for Pool Reconfiguration
- * 
+ *
  * Tests the pool lifecycle management during configuration reloads:
  * - Default pool application on reconfig
  * - Pool addition (parallel)
@@ -12,7 +12,6 @@
 import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.0/assert/mod.ts";
 import { OperatorProcess } from "../src/operator.esm.js";
 import { Configuration } from "../src/configuration.esm.js";
-import { NANOS, parseSLID } from '@nanos';
 
 // ============================================================================
 // Helper Functions
@@ -43,7 +42,7 @@ function createMockProcessManager (operator) {
 				},
 				shutdown: async (timeout) => {
 					// Simulate graceful shutdown
-					await new Promise(resolve => setTimeout(resolve, 0));
+					await new Promise((resolve) => setTimeout(resolve, 0));
 				}
 			};
 			processes.set(processId, mockProcess);
@@ -68,18 +67,17 @@ function createMockProcessManager (operator) {
 }
 
 /**
- * Create an OperatorProcess with a Configuration from a SLID string
+ * Create an OperatorProcess with a given plain-object config
  */
-function makeOperator (slidStr) {
-	const config = slidStr ? new Configuration(parseSLID(slidStr)) : new Configuration({ noSSL: true });
-	return new OperatorProcess(config);
+function makeOperator (config = {}) {
+	return new OperatorProcess(new Configuration({ noSSL: true, ...config }));
 }
 
 /**
  * Wait for async operations to complete
  */
 async function waitForAsync (ms = 50) {
-	await new Promise(resolve => setTimeout(resolve, ms));
+	await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ============================================================================
@@ -87,7 +85,7 @@ async function waitForAsync (ms = 50) {
 // ============================================================================
 
 Deno.test("Pool Reconfig - applies default pool when pools section missing", async () => {
-	const operator = makeOperator(null);
+	const operator = makeOperator();
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -99,10 +97,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section missing", asy
 	assertExists(operator.poolManagers.get('standard'));
 
 	// Create new config without pools section
-	const newConfig = new NANOS({
-		httpPort: 9090,
-		httpsPort: 9443
-	});
+	const newConfig = { httpPort: 9090, httpsPort: 9443 };
 
 	// Handle config update
 	await operator.handleConfigUpdate(newConfig);
@@ -121,7 +116,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section missing", asy
 });
 
 Deno.test("Pool Reconfig - applies default pool when pools section is omitted", async () => {
-	const operator = makeOperator(null);
+	const operator = makeOperator();
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -130,11 +125,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section is omitted", 
 	await operator.initializeResponderPools();
 
 	// Create new config with pools section explicitly null
-	const newConfig = new NANOS({
-		httpPort: 9090,
-		httpsPort: 9443,
-		pools: null
-	});
+	const newConfig = { httpPort: 9090, httpsPort: 9443, pools: null };
 
 	// Handle config update
 	await operator.handleConfigUpdate(newConfig);
@@ -150,7 +141,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section is omitted", 
 });
 
 Deno.test("Pool Reconfig - uses provided pools config when present", async () => {
-	const operator = makeOperator(null);
+	const operator = makeOperator();
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -159,14 +150,15 @@ Deno.test("Pool Reconfig - uses provided pools config when present", async () =>
 	await operator.initializeResponderPools();
 
 	// Create new config with custom pools
-	const newConfig = parseSLID(`[(
-		httpPort=9090 httpsPort=9443
-		logging=[level=debug]
-		pools=[
-			fast=[minProcs=2 maxProcs=10]
-			slow=[minProcs=1 maxProcs=5]
-		]
-	)]`);
+	const newConfig = {
+		httpPort: 9090,
+		httpsPort: 9443,
+		logLevel: 'debug',
+		pools: {
+			fast: { minProcs: 2, maxProcs: 10 },
+			slow: { minProcs: 1, maxProcs: 5 },
+		},
+	};
 
 	// Handle config update
 	await operator.handleConfigUpdate(newConfig);
@@ -195,9 +187,7 @@ Deno.test("Pool Reconfig - uses provided pools config when present", async () =>
 // ============================================================================
 
 Deno.test("Pool Reconfig - adds new pools in parallel", async () => {
-	const operator = makeOperator(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5]]
-	)]`);
+	const operator = makeOperator({ pools: { poolA: { minProcs: 1, maxProcs: 5 } } });
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -208,13 +198,13 @@ Deno.test("Pool Reconfig - adds new pools in parallel", async () => {
 	assertEquals(operator.poolManagers.size, 1);
 
 	// Add poolB and poolC
-	const newConfig = parseSLID(`[(
-		pools=[
-			poolA=[minProcs=1 maxProcs=5]
-			poolB=[minProcs=2 maxProcs=10]
-			poolC=[minProcs=1 maxProcs=1]
-		]
-	)]`);
+	const newConfig = {
+		pools: {
+			poolA: { minProcs: 1, maxProcs: 5 },
+			poolB: { minProcs: 2, maxProcs: 10 },
+			poolC: { minProcs: 1, maxProcs: 1 },
+		},
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);
@@ -232,13 +222,13 @@ Deno.test("Pool Reconfig - adds new pools in parallel", async () => {
 });
 
 Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
-	const operator = makeOperator(`[(
-		pools=[
-			poolA=[minProcs=1 maxProcs=5]
-			poolB=[minProcs=1 maxProcs=5]
-			poolC=[minProcs=1 maxProcs=5]
-		]
-	)]`);
+	const operator = makeOperator({
+		pools: {
+			poolA: { minProcs: 1, maxProcs: 5 },
+			poolB: { minProcs: 1, maxProcs: 5 },
+			poolC: { minProcs: 1, maxProcs: 5 },
+		},
+	});
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -248,9 +238,9 @@ Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
 	assertEquals(operator.poolManagers.size, 3);
 
 	// Remove poolB and poolC, keep poolA
-	const newConfig = parseSLID(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5]]
-	)]`);
+	const newConfig = {
+		pools: { poolA: { minProcs: 1, maxProcs: 5 } },
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);
@@ -268,9 +258,7 @@ Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
 });
 
 Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () => {
-	const operator = makeOperator(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5]]
-	)]`);
+	const operator = makeOperator({ pools: { poolA: { minProcs: 1, maxProcs: 5 } } });
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -283,9 +271,9 @@ Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () 
 	assertEquals(originalPoolManager.config.maxProcs, 5);
 
 	// Reconfigure poolA with different limits
-	const newConfig = parseSLID(`[(
-		pools=[poolA=[minProcs=2 maxProcs=10]]
-	)]`);
+	const newConfig = {
+		pools: { poolA: { minProcs: 2, maxProcs: 10 } },
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);
@@ -305,12 +293,12 @@ Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () 
 });
 
 Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
-	const operator = makeOperator(`[(
-		pools=[
-			poolA=[minProcs=1 maxProcs=5]
-			poolB=[minProcs=1 maxProcs=5]
-		]
-	)]`);
+	const operator = makeOperator({
+		pools: {
+			poolA: { minProcs: 1, maxProcs: 5 },
+			poolB: { minProcs: 1, maxProcs: 5 },
+		},
+	});
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -321,12 +309,12 @@ Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
 	const originalPoolA = operator.poolManagers.get('poolA');
 
 	// Reconfig: keep poolA (modified), remove poolB, add poolC
-	const newConfig = parseSLID(`[(
-		pools=[
-			poolA=[minProcs=2 maxProcs=10]
-			poolC=[minProcs=3 maxProcs=3]
-		]
-	)]`);
+	const newConfig = {
+		pools: {
+			poolA: { minProcs: 2, maxProcs: 10 },
+			poolC: { minProcs: 3, maxProcs: 3 },
+		},
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);
@@ -350,12 +338,12 @@ Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
 // ============================================================================
 
 Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () => {
-	const operator = makeOperator(`[(
-		pools=[
-			poolA=[minProcs=1 maxProcs=5 maxWorkers=1]
-			poolB=[minProcs=1 maxProcs=5 maxWorkers=1]
-		]
-	)]`);
+	const operator = makeOperator({
+		pools: {
+			poolA: { minProcs: 1, maxProcs: 5, maxWorkers: 1 },
+			poolB: { minProcs: 1, maxProcs: 5, maxWorkers: 1 },
+		},
+	});
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -397,9 +385,9 @@ Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () =
 	assertEquals(operator.affinityMap.get('/app3.js').size, 2);
 
 	// Remove poolB
-	const newConfig = parseSLID(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5 maxWorkers=1]]
-	)]`);
+	const newConfig = {
+		pools: { poolA: { minProcs: 1, maxProcs: 5, maxWorkers: 1 } },
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);
@@ -429,10 +417,10 @@ Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () =
 // ============================================================================
 
 Deno.test("Pool Reconfig - respects shutdown timeout", async () => {
-	const operator = makeOperator(`[(
-		shutdownDelay=1
-		pools=[poolA=[minProcs=1 maxProcs=5]]
-	)]`);
+	const operator = makeOperator({
+		shutdownDelay: 1,
+		pools: { poolA: { minProcs: 1, maxProcs: 5 } },
+	});
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -441,10 +429,7 @@ Deno.test("Pool Reconfig - respects shutdown timeout", async () => {
 	await operator.initializeResponderPools();
 
 	// Remove pool (should timeout after shutdownDelay + 5s grace)
-	const newConfig = parseSLID(`[(
-		shutdownDelay=1
-		pools=[]
-	)]`);
+	const newConfig = { shutdownDelay: 1, pools: {} };
 
 	const startTime = Date.now();
 	await operator.handleConfigUpdate(newConfig);
@@ -462,12 +447,12 @@ Deno.test("Pool Reconfig - respects shutdown timeout", async () => {
 // ============================================================================
 
 Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async () => {
-	const operator = makeOperator(`[(
-		pools=[
-			@router=[minProcs=1 maxProcs=5]
-			poolA=[minProcs=1 maxProcs=5]
-		]
-	)]`);
+	const operator = makeOperator({
+		pools: {
+			'@router': { minProcs: 1, maxProcs: 5 },
+			poolA: { minProcs: 1, maxProcs: 5 },
+		},
+	});
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -478,12 +463,12 @@ Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async ()
 	assertExists(operator.poolManagers.get('poolA'));
 
 	// Reconfig with @router still present
-	const newConfig = parseSLID(`[(
-		pools=[
-			@router=[minProcs=2 maxProcs=10]
-			poolB=[minProcs=1 maxProcs=5]
-		]
-	)]`);
+	const newConfig = {
+		pools: {
+			'@router': { minProcs: 2, maxProcs: 10 },
+			poolB: { minProcs: 1, maxProcs: 5 },
+		},
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);
@@ -504,9 +489,7 @@ Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async ()
 // ============================================================================
 
 Deno.test("Pool Reconfig - continues on pool creation failure", async () => {
-	const operator = makeOperator(`[(
-		pools=[poolA=[minProcs=1 maxProcs=5]]
-	)]`);
+	const operator = makeOperator({ pools: { poolA: { minProcs: 1, maxProcs: 5 } } });
 	operator.initializeLogger();
 	operator.initializeRouter();
 
@@ -525,13 +508,13 @@ Deno.test("Pool Reconfig - continues on pool creation failure", async () => {
 	await operator.initializeResponderPools();
 
 	// Try to add poolB (will fail) and poolC (should succeed)
-	const newConfig = parseSLID(`[(
-		pools=[
-			poolA=[minProcs=1 maxProcs=5]
-			poolB=[minProcs=1 maxProcs=5]
-			poolC=[minProcs=1 maxProcs=5]
-		]
-	)]`);
+	const newConfig = {
+		pools: {
+			poolA: { minProcs: 1, maxProcs: 5 },
+			poolB: { minProcs: 1, maxProcs: 5 },
+			poolC: { minProcs: 1, maxProcs: 5 },
+		},
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);
@@ -548,12 +531,12 @@ Deno.test("Pool Reconfig - continues on pool creation failure", async () => {
 });
 
 Deno.test("Pool Reconfig - continues on pool reconfiguration failure", async () => {
-	const operator = makeOperator(`[(
-		pools=[
-			poolA=[minProcs=1 maxProcs=5]
-			poolB=[minProcs=1 maxProcs=5]
-		]
-	)]`);
+	const operator = makeOperator({
+		pools: {
+			poolA: { minProcs: 1, maxProcs: 5 },
+			poolB: { minProcs: 1, maxProcs: 5 },
+		},
+	});
 	operator.initializeLogger();
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
@@ -568,12 +551,12 @@ Deno.test("Pool Reconfig - continues on pool reconfiguration failure", async () 
 	};
 
 	// Try to reconfigure both pools (poolA will fail, poolB should succeed)
-	const newConfig = parseSLID(`[(
-		pools=[
-			poolA=[minProcs=2 maxProcs=10]
-			poolB=[minProcs=2 maxProcs=10]
-		]
-	)]`);
+	const newConfig = {
+		pools: {
+			poolA: { minProcs: 2, maxProcs: 10 },
+			poolB: { minProcs: 2, maxProcs: 10 },
+		},
+	};
 
 	await operator.handleConfigUpdate(newConfig);
 	await waitForAsync(100);

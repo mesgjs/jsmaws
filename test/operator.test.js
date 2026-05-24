@@ -10,7 +10,7 @@
  */
 
 import { assertEquals, assertExists, assert } from "https://deno.land/std@0.208.0/assert/mod.ts";
-import { OperatorProcess, loadConfig } from "../src/operator.esm.js";
+import { OperatorProcess } from "../src/operator.esm.js";
 import { Configuration } from "../src/configuration.esm.js";
 import { NANOS } from '@nanos';
 
@@ -75,25 +75,23 @@ Deno.test("Configuration - network/SSL getters work from NANOS", () => {
 });
 
 // ============================================================================
-// Configuration Loading Tests
+// Configuration.fromFile Tests
 // ============================================================================
 
-Deno.test("loadConfig - loads existing SLID file", async () => {
-	const config = await loadConfig('jsmaws.slid');
+Deno.test("Configuration.fromFile - loads existing SLID file", async () => {
+	const config = await Configuration.fromFile('jsmaws.slid');
 
 	assertExists(config);
-	assertEquals(config.at('httpPort'), 8080);
-	assertEquals(config.at('httpsPort'), 8443);
-	assertEquals(config.at('hostname'), 'localhost');
+	assertEquals(config.httpPort, 8080);
+	assertEquals(config.httpsPort, 8443);
+	assertEquals(config.hostname, 'localhost');
 });
 
-Deno.test("loadConfig - throws error for missing file", async () => {
+Deno.test("Configuration.fromFile - throws error for missing file", async () => {
 	try {
-		await loadConfig('nonexistent.slid');
-		// If we get here, the test should fail
-		throw new Error('Expected loadConfig to throw for missing file');
+		await Configuration.fromFile('nonexistent.slid');
+		throw new Error('Expected fromFile to throw for missing file');
 	} catch (error) {
-		// Verify it's a NotFound error
 		assert(error instanceof Deno.errors.NotFound, 'Expected Deno.errors.NotFound');
 	}
 });
@@ -254,10 +252,11 @@ Deno.test("OperatorProcess - handles configuration update", async () => {
 	};
 
 	try {
-		const newConfig = new NANOS({
+		// Pass a plain object (not NANOS) — the canonical input after the config loading refactor
+		const newConfig = {
 			httpPort: 9090,
-			httpsPort: 9443
-		});
+			httpsPort: 9443,
+		};
 
 		await operator.handleConfigUpdate(newConfig);
 
@@ -411,4 +410,58 @@ Deno.test("OperatorProcess - initializeResponderPools with empty pools config", 
 
 	// Should not throw with empty pools
 	await operator.initializeResponderPools();
+});
+
+// ============================================================================
+// SIGHUP / loadConfigFile Tests
+// ============================================================================
+
+Deno.test("OperatorProcess - loadConfigFile is a no-op when filePath is not provided", async () => {
+	const operator = new OperatorProcess({ noSSL: true });
+	operator.initializeLogger();
+
+	// Should not throw; just logs a warning
+	await operator.loadConfigFile(null);
+	await operator.loadConfigFile(undefined);
+	await operator.loadConfigFile('');
+});
+
+Deno.test("OperatorProcess - loadConfigFile reads config file and calls handleConfigUpdate", async () => {
+	// Write a minimal SLID config to a temp file
+	const tmpFile = await Deno.makeTempFile({ suffix: '.slid' });
+	try {
+		const slidContent = NANOS.toSLID({ noSSL: true, httpPort: 7777 });
+		await Deno.writeTextFile(tmpFile, slidContent);
+
+		const operator = new OperatorProcess({ noSSL: true }, tmpFile);
+		operator.initializeLogger();
+		operator.initializeRouter();
+
+		let updateCalled = false;
+		const originalUpdate = operator.handleConfigUpdate.bind(operator);
+		operator.handleConfigUpdate = async (cfg) => {
+			updateCalled = true;
+			assertEquals(cfg.httpPort, 7777);
+			await originalUpdate(cfg);
+		};
+
+		await operator.loadConfigFile(tmpFile);
+
+		assert(updateCalled, 'Expected handleConfigUpdate to be called by loadConfigFile');
+		assertEquals(operator.config.httpPort, 7777);
+	} finally {
+		await Deno.remove(tmpFile);
+	}
+});
+
+Deno.test("OperatorProcess - loadConfigFile propagates errors from missing config file", async () => {
+	const operator = new OperatorProcess({ noSSL: true }, '/nonexistent/path/jsmaws.slid');
+	operator.initializeLogger();
+
+	try {
+		await operator.loadConfigFile('/nonexistent/path/jsmaws.slid');
+		throw new Error('Expected loadConfigFile to throw for missing file');
+	} catch (error) {
+		assert(error instanceof Deno.errors.NotFound, `Expected NotFound, got: ${error}`);
+	}
 });

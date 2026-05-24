@@ -339,7 +339,7 @@ Deno.test('Logger: Multiple backends', async () => {
 		logger.info('Test message');
 
 		// Wait for async log operations to complete
-		await new Promise(resolve => setTimeout(resolve, 10));
+		await new Promise((resolve) => setTimeout(resolve, 10));
 
 		capture.stop();
 		const output = capture.getStdout();

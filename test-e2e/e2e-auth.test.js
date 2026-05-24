@@ -11,8 +11,6 @@
  * - @deny-all: always skips the group (results in 404)
  * - Provider name (e.g. '@jwt'): allows if identity came from that provider
  * - Implied [@allow-known @allow-all] at end of filter
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";

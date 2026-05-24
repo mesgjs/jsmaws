@@ -9,8 +9,6 @@
  * - Privilege escalation prevention
  * - Console output isolation via C2C channel
  * - Approved API boundary enforcement
- *
- * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';

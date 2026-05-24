@@ -6,8 +6,6 @@
  * - splitAuthChain() (chain splitting at first external provider)
  * - OperatorAuthn with chain splitting and external delegation
  * - OperatorAuthDelegate (IPC delegation to auth sub-process)
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists } from "https://deno.land/std@0.208.0/assert/mod.ts";

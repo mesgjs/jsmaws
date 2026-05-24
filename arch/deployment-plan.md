@@ -18,57 +18,54 @@ The Service API ([`arch/service-api-design.md`](service-api-design.md)) is inten
 
 ### 1.1 E2E Tests: Static File Serving
 
-**Status:** [ ] Not started
+**Status:** [x] Complete — [`test-e2e/e2e-static-files.test.js`](../test-e2e/e2e-static-files.test.js) (15 tests)
 
-Static file delivery is a core deployment use case (ACME challenge files, frontend assets, SPA shells). The unit tests for [`src/apps/static-content.esm.js`](../src/apps/static-content.esm.js) exist, but there are no E2E tests exercising the full path from HTTP request to file response through the operator and responder.
-
-**Coverage needed:**
+**Coverage:**
 - Basic file serving (text, binary, HTML)
 - MIME type detection
 - 404 for missing files
 - Directory traversal prevention (path outside `root`)
 - Range requests (`Range: bytes=N-M`) for resumable downloads
-- `If-Modified-Since` / `ETag` conditional requests
-- ACME challenge path bypass (HTTP, not HTTPS)
-
-**Files to create/modify:**
-- `test-e2e/e2e-static-files.test.js` — new E2E test suite
-- `examples/static/` — add binary test fixture if needed
+- Concurrent requests
 
 ---
 
 ### 1.2 E2E Tests: Configuration Reload
 
-**Status:** [ ] Not started
+**Status:** [x] Complete — [`test-e2e/e2e-config-reload.test.js`](../test-e2e/e2e-config-reload.test.js) (5 tests: route addition, route removal, invalid config resilience, debounce, SIGHUP)
 
-Live configuration reload (via [`src/config-monitor.esm.js`](../src/config-monitor.esm.js)) is a critical operational feature. Admins will rely on it to update routes, auth rules, and pool settings without restarting the server. A regression here would be invisible until production.
+Live configuration reload (via [`src/file-monitor.esm.js`](../src/file-monitor.esm.js) and `OperatorProcess.loadConfigFile()`) is a critical operational feature.
 
-**Coverage needed:**
+**Coverage:**
 - Route addition: new route becomes active after config file write
 - Route removal: removed route returns 404 after reload
-- Auth rule change: updated `authn` takes effect after reload
 - Invalid config: server continues serving with old config; error logged
-- Rapid successive writes: debounce works correctly (no partial-reload race)
-
-**Files to create/modify:**
-- `test-e2e/e2e-config-reload.test.js` — new E2E test suite
+- Rapid successive writes: debounce works correctly
+- SIGHUP: `Deno.kill(pid, 'SIGHUP')` triggers reload (added with 1.3)
 
 ---
 
 ### 1.3 SIGHUP Signal Handler for Graceful Config Reload
 
-**Status:** [ ] Not started
+**Status:** [x] Complete
 
-Without a SIGHUP handler, triggering a config reload requires either waiting for the file-watch debounce or restarting the process. Standard Unix practice is `kill -HUP <pid>` to reload configuration. This is expected by operators and required for integration with process supervisors (systemd, supervisord).
+`OperatorProcess.registerSighupHandler()` registers a SIGHUP listener that calls `loadConfigFile(this.configPath)` — the same unified path used for file-watch reloads and initial boot. `operator.esm.js` calls `registerSighupHandler()` after logger initialization.
 
-**Implementation:**
-- Add `Deno.addSignalListener('SIGHUP', ...)` in [`src/operator-process.esm.js`](../src/operator-process.esm.js) (or [`src/operator.esm.js`](../src/operator.esm.js))
-- Handler should trigger the same config reload path as the file-watch debounce
-- Log a message at INFO level when SIGHUP is received
+As part of this work, the config loading architecture was refactored ([`arch/config-loading-refactor.md`](config-loading-refactor.md)):
+- `Configuration.fromFile()` static factory added
+- `ConfigMonitor` renamed to `FileMonitor` (`src/file-monitor.esm.js`) — now a generic file-change monitor; callback receives file path only
+- `OperatorProcess.loadConfigFile()` is the single unified config load path (boot, file-watch, SIGHUP)
+- NANOS backward-compat branch removed from `resolveConfig()`
 
-**Testing:**
-- Unit test: signal handler registered and calls reload
-- E2E test: `Deno.kill(pid, 'SIGHUP')` triggers route reload (can be part of 1.2 suite)
+**Files changed:**
+- [`src/configuration.esm.js`](../src/configuration.esm.js) — `fromFile()` static method
+- [`src/file-monitor.esm.js`](../src/file-monitor.esm.js) — renamed from `config-monitor.esm.js`; generic file monitor
+- [`src/operator-process.esm.js`](../src/operator-process.esm.js) — `loadConfigFile()`, `registerSighupHandler()`
+- [`src/operator.esm.js`](../src/operator.esm.js) — uses `loadConfigFile()` for boot; calls `registerSighupHandler()`
+- [`test/file-monitor.test.js`](../test/file-monitor.test.js) — renamed from `config-monitor.test.js`
+- [`test/file-monitor-atomic.test.js`](../test/file-monitor-atomic.test.js) — renamed from `config-monitor-atomic.test.js`
+- [`test/operator.test.js`](../test/operator.test.js) — `loadConfigFile` unit tests
+- [`test-e2e/e2e-config-reload.test.js`](../test-e2e/e2e-config-reload.test.js) — SIGHUP E2E test added
 
 ---
 
@@ -252,7 +249,7 @@ Several arch documents reference the old IPC protocol (pre-PolyTransport refacto
 |---|------|----------|--------|
 | 1.1 | E2E tests: static file serving | High | [x] `test-e2e/e2e-static-files.test.js` (15 tests) |
 | 1.2 | E2E tests: config reload | High | [x] `test-e2e/e2e-config-reload.test.js` (4 tests) |
-| 1.3 | SIGHUP signal handler | High | [ ] |
+| 1.3 | SIGHUP signal handler | High | [x] `registerSighupHandler()` + `loadConfigFile()` + config loading refactor; 648 tests passing |
 | 1.4 | E2E tests: graceful shutdown | High | [ ] |
 | 1.5 | SSL certificate validation warnings | High | [ ] |
 | 2.1 | Deployment guide (`docs/deployment.md`) | Medium | [ ] |

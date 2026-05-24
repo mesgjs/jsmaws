@@ -10,8 +10,6 @@
  * - Writes 'res-error' message (JSON text) on error
  *
  * Tests use PostMessageTransport to communicate with the mod-app via bootstrap.
- *
- * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';

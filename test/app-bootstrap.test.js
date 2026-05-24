@@ -7,8 +7,6 @@
  * - Exposes globalThis.JSMAWS.server (app channel) and .bidi (bidi mode only)
  * - Intercepts console output via C2C channel
  * - Locks down Deno namespace and disables Worker constructor
- *
- * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertExists, assert } from 'https://deno.land/std@0.208.0/assert/mod.ts';

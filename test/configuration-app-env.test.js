@@ -2,8 +2,6 @@
  * Configuration.getEffectiveAppEnv() Tests
  * Tests for the appEnv merge hierarchy: global → pool → route
  * and the :delete: / wildcard-delete semantics.
- *
- * Copyright 2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts';

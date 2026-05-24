@@ -3,8 +3,6 @@
  *
  * Uses real PipeTransport with in-memory backing (makePipeTransportPair)
  * to test the PolyTransport-based control channel message loop.
- *
- * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 import { assertEquals, assertRejects } from 'https://deno.land/std@0.208.0/assert/mod.ts';

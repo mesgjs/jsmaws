@@ -65,7 +65,7 @@ export async function startTestServer (operator) {
 	console.log('[E2E-UTILS] Server listening on:', baseUrl);
 
 	// Give server a moment to fully initialize
-	await new Promise(resolve => setTimeout(resolve, 100));
+	await new Promise((resolve) => setTimeout(resolve, 100));
 
 	return baseUrl;
 }
@@ -115,7 +115,7 @@ export async function waitFor (condition, timeoutMs = 5000, intervalMs = 100) {
 		if (await condition()) {
 			return;
 		}
-		await new Promise(resolve => setTimeout(resolve, intervalMs));
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
 	}
 
 	throw new Error(`Timeout waiting for condition after ${timeoutMs}ms`);

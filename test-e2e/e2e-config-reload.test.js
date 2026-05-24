@@ -3,13 +3,14 @@
  *
  * Tests that the server correctly reloads its configuration when the SLID
  * config file is modified on disk. Uses a real config file (not in-memory
- * config) so that the ConfigMonitor file-watch path is exercised.
+ * config) so that the FileMonitor file-watch path is exercised.
  *
  * Coverage:
  * - Route addition: new route becomes active after config file write
  * - Route removal: removed route returns 404 after reload
  * - Invalid config: server continues serving with old config; no crash
  * - Rapid successive writes: debounce works correctly
+ * - SIGHUP: signal triggers config reload (same path as file-watch)
  */
 
 import {
@@ -19,7 +20,7 @@ import { join } from 'https://deno.land/std@0.208.0/path/mod.ts';
 import { OperatorProcess } from '../src/operator.esm.js';
 import { Configuration } from '../src/configuration.esm.js';
 import { fetchWithTimeout, waitFor } from './e2e-utils.esm.js';
-import { NANOS, parseSLID } from '@nanos';
+import { NANOS } from '@nanos';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,7 +31,6 @@ const RELOAD_WAIT_MS = DEBOUNCE_MS + 500; // debounce + propagation margin
 
 /**
  * Write a SLID config file with the given routes and pool config.
- * Uses a minimal SLID format that the ConfigMonitor can parse.
  * httpPort=0 is intentionally omitted from the reloaded config so that
  * the port assignment from the initial start is preserved.
  */
@@ -58,12 +58,8 @@ async function createFileConfigServer (initialConfig) {
 
 	await writeConfig(configPath, initialConfig);
 
-	// Parse the SLID file to get initial config (same as what ConfigMonitor does)
-	const configText = await Deno.readTextFile(configPath);
-	const parsedConfig = parseSLID(configText);
-	const configObj = parsedConfig.toObject({ array: true });
-
-	const config = new Configuration(configObj);
+	// Load initial config via Configuration.fromFile() — same path as all reloads
+	const config = await Configuration.fromFile(configPath);
 	const operator = new OperatorProcess(config, configPath);
 	operator.initializeLogger();
 
@@ -76,7 +72,7 @@ async function createFileConfigServer (initialConfig) {
 	const baseUrl = `http://localhost:${addr.port}`;
 
 	// Give server a moment to fully initialize
-	await new Promise(resolve => setTimeout(resolve, 100));
+	await new Promise((resolve) => setTimeout(resolve, 100));
 
 	return { operator, baseUrl, configPath, tmpDir };
 }
@@ -127,7 +123,7 @@ Deno.test({
 			});
 
 			// Wait for debounce + propagation, then poll until /greet is active
-			await new Promise(resolve => setTimeout(resolve, RELOAD_WAIT_MS));
+			await new Promise((resolve) => setTimeout(resolve, RELOAD_WAIT_MS));
 			await waitFor(async () => {
 				const r = await fetchWithTimeout(`${baseUrl}/greet`, {}, 2000);
 				const ok = r.status === 200;
@@ -177,7 +173,7 @@ Deno.test({
 			});
 
 			// Wait for debounce + propagation, then poll until /bye returns 404
-			await new Promise(resolve => setTimeout(resolve, RELOAD_WAIT_MS));
+			await new Promise((resolve) => setTimeout(resolve, RELOAD_WAIT_MS));
 			await waitFor(async () => {
 				const r = await fetchWithTimeout(`${baseUrl}/bye`, {}, 2000);
 				const ok = r.status === 404;
@@ -220,7 +216,7 @@ Deno.test({
 			await Deno.writeTextFile(configPath, '[( this is not valid SLID ');
 
 			// Wait for debounce + propagation
-			await new Promise(resolve => setTimeout(resolve, RELOAD_WAIT_MS));
+			await new Promise((resolve) => setTimeout(resolve, RELOAD_WAIT_MS));
 
 			// Server should still be running and serving the old config
 			const r2 = await fetchWithTimeout(`${baseUrl}/hello`);
@@ -277,6 +273,67 @@ Deno.test({
 			const r = await fetchWithTimeout(`${baseUrl}/hello`);
 			assertEquals(r.status, 200);
 			await r.body?.cancel();
+
+		} finally {
+			await stopFileConfigServer(operator, tmpDir);
+		}
+	},
+});
+
+Deno.test({
+	name: 'E2E Config Reload - SIGHUP triggers config reload',
+	sanitizeResources: false,
+	sanitizeOps: false,
+	async fn () {
+		const { operator, baseUrl, configPath, tmpDir } = await createFileConfigServer({
+			routes: [
+				{ path: '/hello', app: '../examples/apps/hello-world.esm.js', pool: 'fast' },
+			],
+			pools: {
+				fast: { minProcs: 1, maxProcs: 1, maxWorkers: 2, reqTimeout: 5 },
+			},
+		});
+
+		// Register the SIGHUP handler so the test process responds to SIGHUP
+		operator.registerSighupHandler();
+
+		try {
+			// Verify initial route works
+			const r1 = await fetchWithTimeout(`${baseUrl}/hello`);
+			assertEquals(r1.status, 200);
+			await r1.body?.cancel();
+
+			// Verify /sighup-route does not exist yet
+			const r2 = await fetchWithTimeout(`${baseUrl}/sighup-route`);
+			assertEquals(r2.status, 404);
+			await r2.body?.cancel();
+
+			// Write new config with /sighup-route added
+			await writeConfig(configPath, {
+				routes: [
+					{ path: '/hello', app: '../examples/apps/hello-world.esm.js', pool: 'fast' },
+					{ path: '/sighup-route', app: '../examples/apps/hello-world.esm.js', pool: 'fast' },
+				],
+				pools: {
+					fast: { minProcs: 1, maxProcs: 1, maxWorkers: 2, reqTimeout: 5 },
+				},
+			});
+
+			// Send SIGHUP to the current process to trigger reload
+			Deno.kill(Deno.pid, 'SIGHUP');
+
+			// Poll until /sighup-route becomes active (SIGHUP reload is immediate, no debounce)
+			await waitFor(async () => {
+				const r = await fetchWithTimeout(`${baseUrl}/sighup-route`, {}, 2000);
+				const ok = r.status === 200;
+				await r.body?.cancel();
+				return ok;
+			}, 5000, 200);
+
+			// /hello should still work
+			const r3 = await fetchWithTimeout(`${baseUrl}/hello`);
+			assertEquals(r3.status, 200);
+			await r3.body?.cancel();
 
 		} finally {
 			await stopFileConfigServer(operator, tmpDir);
