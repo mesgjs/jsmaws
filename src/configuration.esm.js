@@ -395,6 +395,20 @@ export class Configuration {
 	}
 
 	/**
+	 * Get router pool configuration.
+	 * The canonical config key is `routerPool`; `pools['@router']` is accepted for
+	 * backward compatibility (with a deprecation warning).
+	 * @returns {Object|null} Router pool configuration or null if not configured
+	 */
+	get routerPool () {
+		const routerPool = this.config.routerPool
+		if (routerPool != null) return routerPool;
+		const legacy = this.config.pools?.['@router'];
+		if (legacy) return legacy;
+		return null;
+	}
+
+	/**
 	 * Get routes configuration
 	 * @returns {Array} Routes configuration (plain array)
 	 */
@@ -500,5 +514,10 @@ export class Configuration {
 		// Invalidate computed caches
 		this._routing = null;
 		this._logging = null;
+
+		const legacyRouter = this.config.pools?.['@router'];
+		if (legacyRouter != null) {
+			console.warn('[Configuration] pools[@router] is deprecated; use top-level routerPool instead.');
+		}
 	}
 }

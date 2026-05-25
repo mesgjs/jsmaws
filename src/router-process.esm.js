@@ -49,8 +49,8 @@ export class RouterProcess extends SubProcess {
 
 		// Update pool manager if already initialized
 		if (this.poolManager) {
-			// Get router pool config
-			const routerPoolConfig = this.config.getPoolConfig('@router') || {};
+			// Get router pool config (canonical: routerPool; legacy: pools['@router'])
+			const routerPoolConfig = this.config.routerPool || {};
 			await this.poolManager.updateConfig(routerPoolConfig);
 
 			// Update all workers with new configuration
@@ -197,7 +197,8 @@ export class RouterProcess extends SubProcess {
 	 */
 	async onStarted () {
 		// Initialize pool manager with router worker factory
-		const routerPoolConfig = this.config.getPoolConfig('@router') || {
+		// Canonical key: routerPool; legacy fallback: pools['@router'] (via config.routerPool getter)
+		const routerPoolConfig = this.config.routerPool || {
 			minProcs: 1,
 			maxProcs: 5,
 			maxReqs: 0,
@@ -211,7 +212,7 @@ export class RouterProcess extends SubProcess {
 			return { item: worker, isWorker: true };
 		};
 
-		this.poolManager = new PoolManager('@router', routerPoolConfig, workerFactory, this.logger);
+		this.poolManager = new PoolManager('routerPool', routerPoolConfig, workerFactory, this.logger);
 		await this.poolManager.initialize();
 	}
 }

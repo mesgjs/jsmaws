@@ -13,14 +13,14 @@ import { NANOS, parseSLID } from '@nanos';
 
 function makeConfig (extra = {}) {
 	return new Configuration({
+		routerPool: {
+			minProcs: 1,
+			maxProcs: 5,
+			maxReqs: 0,
+			idleTimeout: 300,
+			reqTimeout: 30,
+		},
 		pools: {
-			'@router': {
-				minProcs: 1,
-				maxProcs: 5,
-				maxReqs: 0,
-				idleTimeout: 300,
-				reqTimeout: 30,
-			},
 			standard: {
 				minProcs: 2,
 				maxProcs: 10,
@@ -73,7 +73,7 @@ Deno.test('RouterProcess - handleConfigUpdate updates pool manager config', asyn
 
 	// Pool manager should have been updated
 	assertEquals(updateConfigCalled, true);
-	// The @router pool config should have been passed
+	// The routerPool config should have been passed
 	assertExists(lastPoolConfig);
 });
 

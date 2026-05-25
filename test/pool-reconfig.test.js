@@ -442,7 +442,43 @@ Deno.test("Pool Reconfig - respects shutdown timeout", async () => {
 // Router Pool Skip Tests
 // ============================================================================
 
-Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async () => {
+Deno.test("Pool Reconfig - routerPool key is not treated as a responder pool", async () => {
+	const operator = makeOperator({
+		routerPool: { minProcs: 1, maxProcs: 5 },
+		pools: {
+			poolA: { minProcs: 1, maxProcs: 5 },
+		},
+	});
+	operator.initializeLogger();
+	operator.initializeRouter();
+	operator.processManager = createMockProcessManager(operator);
+
+	// Initialize pools (routerPool is not a responder pool)
+	await operator.initializeResponderPools();
+	assertEquals(operator.poolManagers.get('routerPool'), undefined);
+	assertExists(operator.poolManagers.get('poolA'));
+
+	// Reconfig with routerPool still present
+	const newConfig = {
+		routerPool: { minProcs: 2, maxProcs: 10 },
+		pools: {
+			poolB: { minProcs: 1, maxProcs: 5 },
+		},
+	};
+
+	await operator.handleConfigUpdate(newConfig);
+	await waitForAsync(100);
+
+	// Verify routerPool still not a responder pool, poolA removed, poolB added
+	assertEquals(operator.poolManagers.get('routerPool'), undefined);
+	assertEquals(operator.poolManagers.get('poolA'), undefined);
+	assertExists(operator.poolManagers.get('poolB'));
+
+	// Cleanup
+	await shutdownOperPoolManagers(operator);
+});
+
+Deno.test("Pool Reconfig - legacy @router key is skipped in responder pools (backward compat)", async () => {
 	const operator = makeOperator({
 		pools: {
 			'@router': { minProcs: 1, maxProcs: 5 },
@@ -453,7 +489,7 @@ Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async ()
 	operator.initializeRouter();
 	operator.processManager = createMockProcessManager(operator);
 
-	// Initialize pools (should skip @router)
+	// Initialize pools (should skip @router - legacy key)
 	await operator.initializeResponderPools();
 	assertEquals(operator.poolManagers.get('@router'), undefined);
 	assertExists(operator.poolManagers.get('poolA'));

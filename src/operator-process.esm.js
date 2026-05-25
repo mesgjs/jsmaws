@@ -564,30 +564,25 @@ export class OperatorProcess {
 		// An explicitly empty pools object ({}) is respected as-is (no pools configured).
 		const poolsConfig = this.config.pools;
 
-		// Create PoolManager for each pool
+		// Create PoolManager for each pool (skip @router — handled separately via routerPool)
 		for (const [poolName, poolConfig] of Object.entries(poolsConfig)) {
-			if (poolName === '@router') {
-				const fsRouting = this.config.routing.fsRouting;
-				if (fsRouting) {
-					this.logger.info(`Initializing router pool '${poolName}' (filesystem routing)`);
-				}
-			} else {
-				this.logger.info(`Initializing pool '${poolName}' with PoolManager`);
+			if (poolName === '@router') continue; // legacy key; handled via config.routerPool
 
-				const itemFactory = async (itemId) => {
-					return await this.processManager.createProcess(
-						itemId,
-						ProcessType.RESPONDER,
-						poolName,
-						poolConfig
-					);
-				};
+			this.logger.info(`Initializing pool '${poolName}' with PoolManager`);
 
-				const poolManager = new PoolManager(poolName, poolConfig, itemFactory, this.logger);
-				await poolManager.initialize();
+			const itemFactory = async (itemId) => {
+				return await this.processManager.createProcess(
+					itemId,
+					ProcessType.RESPONDER,
+					poolName,
+					poolConfig
+				);
+			};
 
-				this.poolManagers.set(poolName, poolManager);
-			}
+			const poolManager = new PoolManager(poolName, poolConfig, itemFactory, this.logger);
+			await poolManager.initialize();
+
+			this.poolManagers.set(poolName, poolManager);
 		}
 	}
 
@@ -969,7 +964,7 @@ export class OperatorProcess {
 		const poolsToAdd = new Set();
 
 		for (const poolName of oldPoolNames) {
-			// FIX LATER (needs to be noted in memory bank): bad design - the router is not a responder; it should use routerPool (like auth uses authPool)
+			// Ignore legacy router pool name (routers are not responders)
 			if (poolName === '@router') continue;
 
 			if (!newPoolNames.has(poolName)) {
