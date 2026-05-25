@@ -71,37 +71,56 @@ As part of this work, the config loading architecture was refactored ([`arch/con
 
 ### 1.4 E2E Tests: Graceful Shutdown
 
-**Status:** [ ] Not started
+**Status:** [x] Complete — [`test-e2e/e2e-graceful-shutdown.test.js`](../test-e2e/e2e-graceful-shutdown.test.js) (8 tests)
 
-No E2E test verifies that in-flight requests complete before the server exits. A broken shutdown path causes dropped connections in production, which is especially harmful for streaming and WebSocket connections.
+All 8 E2E tests passing. `shutdownSpread` documented in `docs/configuration.md`. `JSMAWS.shutdownDeadline` promise implemented in bootstrap. Deadline propagation through operator → pool manager → process manager → responder → mod-app.
 
-**Coverage needed:**
+**Coverage:**
 - SIGTERM received while request is in flight → request completes, then server exits
 - SIGTERM received while SSE stream is active → stream closes cleanly
 - SIGTERM received while WebSocket is open → WebSocket closes with appropriate close frame
 - Server exits with code 0 on clean shutdown
+- `JSMAWS.shutdownDeadline` promise resolves during shutdown (test 8)
 
-**Files to create/modify:**
-- `test-e2e/e2e-graceful-shutdown.test.js` — new E2E test suite
+**Files created/modified:**
+- [`test-e2e/e2e-graceful-shutdown.test.js`](../test-e2e/e2e-graceful-shutdown.test.js) — E2E test suite (8 tests)
+- [`test-e2e/apps/shutdown-deadline-check.esm.js`](../test-e2e/apps/shutdown-deadline-check.esm.js) — fixture mod-app for test 8
+- [`src/operator-process.esm.js`](../src/operator-process.esm.js) — `registerSigtermHandler()`, `shutdown()`
+- [`src/pool-manager.esm.js`](../src/pool-manager.esm.js) — `shutdown(deadline, spread)`
+- [`src/process-manager.esm.js`](../src/process-manager.esm.js) — `shutdownProcess(proc, deadline, spread)`
+- [`src/responder-process.esm.js`](../src/responder-process.esm.js) — `handleShutdown(msg)`
+- [`src/apps/bootstrap.esm.js`](../src/apps/bootstrap.esm.js) — `JSMAWS.shutdownDeadline` promise
+- [`src/configuration.esm.js`](../src/configuration.esm.js) — `shutdownDelay`, `shutdownSpread` getters
+- [`docs/configuration.md`](../docs/configuration.md) — `shutdownSpread` documented
 
 ---
 
 ### 1.5 SSL Certificate Validation Warnings
 
-**Status:** [ ] Not started
+**Status:** [x] Complete — [`test/ssl-cert-expiry.test.js`](../test/ssl-cert-expiry.test.js) (13 tests)
 
-In production, expired or near-expiry certificates should produce log warnings. Without this, certificate expiry is silent until HTTPS breaks for clients.
+Certificate expiry checking implemented in [`src/ssl-manager.esm.js`](../src/ssl-manager.esm.js) via `parseCertificateExpiry()`, `checkCertificateExpiry()`, and `SSLManager.checkExpiry()`. Checked on startup and on each certificate reload.
 
 **Implementation:**
-- In [`src/ssl-manager.esm.js`](../src/ssl-manager.esm.js), after loading a certificate, parse the `notAfter` field
-- Log `WARN` if certificate expires within 30 days
-- Log `ERROR` if certificate is already expired (but still load it — don't break the server)
-- Re-check on each certificate reload
+- `parseCertificateExpiry(certPem)` — pure ASN.1 DER parser; extracts `notAfter` from PEM certificate
+- `checkCertificateExpiry(certPem, logger, certFile, now)` — logs ERROR if expired, WARN if within 30 days, INFO otherwise
+- `SSLManager.checkExpiry()` — reads cert file and calls `checkCertificateExpiry()`; called on startup and on each reload
+- `SSLManager.certRefTime` option — injectable reference time for testing
 
 **Testing:**
-- Unit test: warning logged for near-expiry cert
-- Unit test: error logged for expired cert
-- Unit test: no warning for cert with >30 days remaining
+- Unit test: `parseCertificateExpiry` returns null for invalid PEM
+- Unit test: `parseCertificateExpiry` parses notAfter from reference cert
+- Unit test: INFO logged for cert with >30 days remaining
+- Unit test: WARN logged for cert expiring within 30 days
+- Unit test: ERROR logged for expired cert
+- Unit test: WARN logged for unparseable cert
+- Unit test: works without certFile label
+- Unit test: uses real time when `now` not provided
+- Integration: `SSLManager.checkExpiry` returns null when no certFile configured
+- Integration: logs WARN for near-expiry cert file
+- Integration: logs ERROR for expired cert file
+- Integration: logs INFO for valid cert file
+- Integration: logs WARN for missing cert file
 
 ---
 
@@ -250,8 +269,8 @@ Several arch documents reference the old IPC protocol (pre-PolyTransport refacto
 | 1.1 | E2E tests: static file serving | High | [x] `test-e2e/e2e-static-files.test.js` (15 tests) |
 | 1.2 | E2E tests: config reload | High | [x] `test-e2e/e2e-config-reload.test.js` (4 tests) |
 | 1.3 | SIGHUP signal handler | High | [x] `registerSighupHandler()` + `loadConfigFile()` + config loading refactor; 648 tests passing |
-| 1.4 | E2E tests: graceful shutdown | High | [ ] |
-| 1.5 | SSL certificate validation warnings | High | [ ] |
+| 1.4 | E2E tests: graceful shutdown | High | [x] `test-e2e/e2e-graceful-shutdown.test.js` (8 tests); `JSMAWS.shutdownDeadline`; 671 tests passing |
+| 1.5 | SSL certificate validation warnings | High | [x] `parseCertificateExpiry()` + `checkCertificateExpiry()` + `SSLManager.checkExpiry()`; 13 tests in `test/ssl-cert-expiry.test.js` |
 | 2.1 | Deployment guide (`docs/deployment.md`) | Medium | [ ] |
 | 2.2 | Mod-app development guide | Medium | [ ] |
 | 2.3 | Client-side PolyTransport integration guide | Medium | [ ] |

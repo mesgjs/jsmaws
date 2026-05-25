@@ -797,7 +797,8 @@ export class OperatorProcess {
 		if (!this.config.noSSL && this.config.certFile && this.config.keyFile) {
 			this.sslManager = createSSLManager(
 				this.config,
-				() => this.reloadHttpsServer()
+				() => this.reloadHttpsServer(),
+				this.logger
 			);
 			await this.sslManager.startMonitoring();
 		}
