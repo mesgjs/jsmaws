@@ -108,6 +108,7 @@ Both `certFile` and `keyFile` are required when `noSSL` is not set. The server m
 | `uid` | number | — | Numeric user ID for sub-processes (required when running as root) |
 | `gid` | number | — | Numeric group ID for sub-processes (required when running as root) |
 | `shutdownDelay` | number | `30` | Graceful shutdown timeout in seconds |
+| `shutdownSpread` | number | `0` | Deadline spread for graceful shutdown. When `>= 1`, the value is in seconds and is subtracted from the deadline at each successive layer (operator → responder → mod-app). When `0 < value < 1`, the value is treated as a fraction of `shutdownDelay` and converted to an integer number of seconds (minimum 1s). A spread of `0` means all layers share the same deadline (not ideal). |
 | `healthCheckInterval` | number | `60` | Health check interval in seconds |
 
 Sub-processes are spawned with the configured `uid`/`gid` for privilege separation. Numeric IDs are required (symbolic names are not supported). When running as root, both `uid` and `gid` must be configured.
@@ -813,6 +814,8 @@ The `chunkSize` parameter controls the maximum chunk size (in bytes) used by the
     /* ── Process Management ──────────────────────────────────── */
     uid=33
     gid=33
+    shutdownDelay=30
+    shutdownSpread=0.1
 
     /* ── Logging ─────────────────────────────────────────────── */
     logLevel=info

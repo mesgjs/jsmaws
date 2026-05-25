@@ -272,6 +272,52 @@ Deno.test({
 });
 
 // ---------------------------------------------------------------------------
+// Test 8: JSMAWS.shutdownDeadline resolves during shutdown
+// ---------------------------------------------------------------------------
+
+Deno.test({
+	name: 'E2E Graceful Shutdown - JSMAWS.shutdownDeadline resolves during shutdown',
+	// sanitizeResources: false,
+	// sanitizeOps: false,
+	async fn () {
+		const DEADLINE_APP = '../test-e2e/apps/shutdown-deadline-check.esm.js';
+
+		const { operator } = await createTestServer({
+			routes: [
+				{ path: '/deadline', app: DEADLINE_APP, pool: 'fast' },
+			],
+			pools: { fast: FAST_POOL },
+		});
+		const baseUrl = await startTestServer(operator);
+
+		// Start a request that will block until JSMAWS.shutdownDeadline resolves
+		// Do NOT await — the mod-app waits for shutdown before responding
+		const requestPromise = fetchWithTimeout(`${baseUrl}/deadline`, {}, 10000);
+
+		// Give the request time to reach the responder and start waiting
+		await new Promise((resolve) => setTimeout(resolve, 300));
+
+		// Record the time before shutdown so we can verify the deadline is in the future
+		const beforeShutdown = Date.now();
+
+		// Initiate shutdown — this should cause JSMAWS.shutdownDeadline to resolve
+		// in the mod-app, which will then send its response
+		const shutdownPromise = operator.shutdown(5, 1);
+
+		// Both should complete: the mod-app responds after receiving the shutdown deadline
+		const [response] = await Promise.all([requestPromise, shutdownPromise]);
+
+		assertEquals(response.status, 200, 'Mod-app should respond with 200 after shutdown deadline resolves');
+		const body = await response.json();
+
+		// Verify the shutdownDeadline value is a valid future timestamp
+		assertExists(body.shutdownDeadline, 'Response should contain shutdownDeadline');
+		assert(typeof body.shutdownDeadline === 'number', 'shutdownDeadline should be a number');
+		assert(body.shutdownDeadline > beforeShutdown, 'shutdownDeadline should be a future timestamp (ms since epoch)');
+	},
+});
+
+// ---------------------------------------------------------------------------
 // Test 7: Shutdown deadline respected (timeout enforcement)
 // ---------------------------------------------------------------------------
 
