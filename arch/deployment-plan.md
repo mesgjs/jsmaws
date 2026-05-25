@@ -1,7 +1,7 @@
 # JSMAWS Deployment Readiness Plan
 
 
-**Status:** [ACTIVE]
+**Status:** [ACTIVE]  
 **Date:** 2026-05-21
 
 ---
@@ -128,11 +128,9 @@ Certificate expiry checking implemented in [`src/ssl-manager.esm.js`](../src/ssl
 
 ### 2.1 Deployment Guide
 
-**Status:** [ ] Not started
+**Status:** [x] Complete — [`docs/deployment.md`](../docs/deployment.md) (522 lines)
 
-[`docs/configuration.md`](../docs/configuration.md) covers configuration syntax well, but there is no guide for actually deploying the server. Operators need step-by-step instructions.
-
-**Content needed (`docs/deployment.md`):**
+Comprehensive deployment guide covering:
 - System requirements (Deno version, OS)
 - Installation steps
 - Privilege setup: creating a dedicated `www-data` user/group; numeric UID/GID in config
@@ -144,18 +142,13 @@ Certificate expiry checking implemented in [`src/ssl-manager.esm.js`](../src/ssl
 - Log rotation setup (logrotate config)
 - Upgrading JSMAWS
 
-**Files to create:**
-- `docs/deployment.md`
-
 ---
 
 ### 2.2 Mod-App Development Guide
 
-**Status:** [ ] Not started
+**Status:** [x] Complete — [`docs/mod-app-development.md`](../docs/mod-app-development.md) (574 lines)
 
-No guide exists for writing mod-apps. The [`examples/apps/`](../examples/apps/) directory has good examples, but there is no narrative documentation explaining the protocol, available APIs, or patterns.
-
-**Content needed (`docs/mod-app-development.md`):**
+Comprehensive mod-app development guide covering:
 - What is a mod-app (ES module with default export function)
 - The `setupData` object: fields, types, meaning
 - The `JSMAWS.server` channel: reading `req`, writing `res`/`res-frame`/`res-error`
@@ -163,54 +156,49 @@ No guide exists for writing mod-apps. The [`examples/apps/`](../examples/apps/) 
 - Response patterns: simple response, streaming (SSE), error response
 - The `JSMAWS.env` secrets API (`:env:`, `:file:`, `:kv:` schemes)
 - WebSocket / bidi connections (`bidi-frame` message type)
+- Graceful shutdown (`JSMAWS.shutdownDeadline` promise)
 - Logging from mod-apps (`console.log` → C2C channel → operator log)
 - Error handling best practices
+- Routing configuration
 - Example: hello-world, SSE clock, WebSocket echo, auth-echo (cross-reference [`examples/apps/`](../examples/apps/))
-
-**Files to create:**
-- `docs/mod-app-development.md`
 
 ---
 
 ### 2.3 Client-Side PolyTransport Integration Guide
 
-**Status:** [ ] Not started
+**Status:** [x] Complete — [`docs/client-bidi-integration.md`](../docs/client-bidi-integration.md) (430 lines)
 
-Clients using WebSocket bidi connections need to know how to use `WebSocketTransport` + `NestedTransport` on the browser/client side. Without this, the bidi/WebSocket feature is effectively undocumented for external consumers.
-
-**Content needed (`docs/client-bidi-integration.md`):**
-- When to use bidi vs. plain WebSocket
+Comprehensive client-side PolyTransport integration guide covering:
+- Overview of JSMAWS bidi protocol (WebSocket with `bidi-frame` messages only)
+- PolyTransport architecture (WebSocketTransport + NestedTransport layers)
 - Setting up `WebSocketTransport` on the client
 - Using `NestedTransport` for multiplexed channels
-- Sending and receiving `bidi-frame` messages
-- Flow control considerations
-- Example: browser client for the `websocket-echo` example app (cross-reference [`examples/clients/ws-echo.esm.js`](../examples/clients/ws-echo.esm.js))
-
-**Files to create:**
-- `docs/client-bidi-integration.md`
+- Sending and receiving messages with proper flow control
+- Flow control considerations (automatic sliding-window)
+- Error handling and graceful shutdown
+- Complete Deno/Node.js example
+- Browser integration example with HTML/JavaScript
+- Installation options (local clone, CDN via jsdelivr.net)
 
 ---
 
 ### 2.4 Verify Auth Revisions Reflected in `docs/configuration.md`
 
-**Status:** [ ] Not started
+**Status:** [x] Complete
 
-[`arch/auth-revisions-20260510.md`](auth-revisions-20260510.md) introduced several features that must be fully documented in the user-facing [`docs/configuration.md`](../docs/configuration.md):
+All auth revisions from [`arch/auth-revisions-20260510.md`](auth-revisions-20260510.md) are documented in [`docs/configuration.md`](../docs/configuration.md):
 
-**Items to verify/add:**
-- `hostRoutes` — multi-host SNI routing
-- `routeGroups` — named, reusable routing groups
-- Route-group-level `authn` (scalar filter) and `role`
-- Route-level `authn` and `role` (overrides group-level)
-- `requestFilter` / `responseFilter` at top-level and route-group level
-- `response` route type with `responseText` and `headers` properties
-- `@allow-known`, `@allow-all`, `@deny-all` routing built-ins
-- `@test-identity` provider
-- `cookie=name` parameter for `@jwt` provider (added 2026-05-19)
-- Top-level `authn` (site-level default, runs before routing)
-
-**Files to modify:**
-- [`docs/configuration.md`](../docs/configuration.md) — add/update sections as needed
+**Verified items:**
+- `hostRoutes` — multi-host SNI routing ✅ (lines 316-338)
+- `routeGroups` — named, reusable routing groups ✅ (lines 270+)
+- Route-group-level `authn` (scalar filter) and `role` ✅ (lines 299-313)
+- Route-level `authn` and `role` (overrides group-level) ✅ (lines 634-636)
+- `requestFilter` / `responseFilter` at top-level and route-group level ✅ (lines 665+)
+- `response` route type with `responseText` and `headers` properties ✅ (lines 222-223)
+- `@allow-known`, `@allow-all`, `@deny-all` routing built-ins ✅ (lines 597-603)
+- `@test-identity` provider ✅ (lines 575-587)
+- `cookie=name` parameter for `@jwt` provider ✅ (line 534)
+- Top-level `authn` (site-level default, runs before routing) ✅ (documented throughout)
 
 ---
 
@@ -271,10 +259,10 @@ Several arch documents reference the old IPC protocol (pre-PolyTransport refacto
 | 1.3 | SIGHUP signal handler | High | [x] `registerSighupHandler()` + `loadConfigFile()` + config loading refactor; 648 tests passing |
 | 1.4 | E2E tests: graceful shutdown | High | [x] `test-e2e/e2e-graceful-shutdown.test.js` (8 tests); `JSMAWS.shutdownDeadline`; 671 tests passing |
 | 1.5 | SSL certificate validation warnings | High | [x] `parseCertificateExpiry()` + `checkCertificateExpiry()` + `SSLManager.checkExpiry()`; 13 tests in `test/ssl-cert-expiry.test.js` |
-| 2.1 | Deployment guide (`docs/deployment.md`) | Medium | [ ] |
-| 2.2 | Mod-app development guide | Medium | [ ] |
-| 2.3 | Client-side PolyTransport integration guide | Medium | [ ] |
-| 2.4 | Verify auth revisions in `docs/configuration.md` | Medium | [ ] |
+| 2.1 | Deployment guide (`docs/deployment.md`) | Medium | [x] `docs/deployment.md` (522 lines) |
+| 2.2 | Mod-app development guide | Medium | [x] `docs/mod-app-development.md` (574 lines) |
+| 2.3 | Client-side PolyTransport integration guide | Medium | [x] `docs/client-bidi-integration.md` (430 lines) |
+| 2.4 | Verify auth revisions in `docs/configuration.md` | Medium | [x] All auth revisions documented |
 | 3.1 | Performance benchmarking | Lower | [ ] |
 | 3.2 | `@session` and `@oauth-is` auth providers | Lower | [ ] |
 | 3.3 | Archive/annotate superseded arch documents | Lower | [ ] |

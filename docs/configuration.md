@@ -11,30 +11,31 @@ The configuration file is monitored for changes and reloaded automatically when 
 3. [SSL / TLS Settings](#ssl--tls-settings)
 4. [Process Management](#process-management)
 5. [Logging](#logging)
-6. [Routing](#routing)
+6. [Filesystem Settings](#filesystem-settings)
+7. [Routing](#routing)
    - [Top-Level Routes](#top-level-routes)
    - [Route Properties](#route-properties)
    - [Path Syntax](#path-syntax)
    - [Method Values](#method-values)
    - [Route Groups](#route-groups)
    - [Host-Based Routing](#host-based-routing)
-7. [Process Pools](#process-pools)
+8. [Process Pools](#process-pools)
    - [Pool Parameters](#pool-parameters)
    - [Scaling Strategies](#scaling-strategies)
    - [Timeout Parameters](#timeout-parameters)
-8. [Authentication](#authentication)
+9. [Authentication](#authentication)
    - [Top-Level `authn`](#top-level-authn)
    - [Auth Pool (`authPool`)](#auth-pool-authpool)
    - [Built-in Auth Providers](#built-in-auth-providers)
    - [Route-Group and Route-Level Auth Filters](#route-group-and-route-level-auth-filters)
-9. [Header and Cookie Filtering](#header-and-cookie-filtering)
-10. [Environment and Secrets Injection](#environment-and-secrets-injection)
+10. [Header and Cookie Filtering](#header-and-cookie-filtering)
+11. [Environment and Secrets Injection](#environment-and-secrets-injection)
     - [Value Reference Syntax](#value-reference-syntax)
     - [KV Store Configuration](#kv-store-configuration)
     - [Mod-App Environment Injection (`appEnv`)](#mod-app-environment-injection-appenv)
-11. [MIME Types](#mime-types)
-12. [Chunking](#chunking)
-13. [Complete Example](#complete-example)
+12. [MIME Types](#mime-types)
+13. [Chunking](#chunking)
+14. [Complete Example](#complete-example)
 
 ---
 
@@ -135,6 +136,30 @@ Sub-processes are spawned with the configured `uid`/`gid` for privilege separati
     logLevel=info
     logDestination=console
     logFormat=apache
+)]
+```
+
+---
+
+## Filesystem Settings
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `root` | string | — | Filesystem root directory for static file serving (used by `@static` mod-app) |
+| `appRoot` | string | — | Filesystem root directory for mod-app files (used when resolving relative `app` paths in routes) |
+| `extensions` | array | `['.esm.js' '.js']` | File extensions to try when resolving filesystem-based routes (`@*` and `@name` path patterns) |
+| `fsRouting` | boolean | `@f` | Enable filesystem-based routing (`@*` and `@name` path patterns); requires `appRoot` |
+
+`root` and `appRoot` may be the same directory or different directories. Trailing slashes are optional — JSMAWS normalizes them internally.
+
+`extensions` controls which file extensions are tried (in order) when resolving a filesystem route. The router verifies that the resolved path is a file (or a symlink resolving to a file), not a directory.
+
+```slid
+[(
+    root=/var/www/html
+    appRoot=/var/www/apps
+    extensions=['.esm.js' '.js']
+    fsRouting=@t
 )]
 ```
 
@@ -412,6 +437,25 @@ pools=[
 ```slid
 [path=/api/slow  pool=standard  reqTimeout=120]
 ```
+
+### Router Pool (`routerPool`)
+
+When `fsRouting` is enabled, JSMAWS can optionally delegate filesystem route resolution to a dedicated router sub-process pool. Router sub-processes run with reduced privilege and offload filesystem I/O from the operator process.
+
+`routerPool` accepts standard [process pool parameters](#pool-parameters):
+
+```slid
+[(
+    routerPool=[
+        minProcs=1
+        maxProcs=2
+    ]
+)]
+```
+
+When `routerPool` is not configured, filesystem routing runs inline in the operator process.
+
+---
 
 **Global chunk size** (used by PolyTransport for IPC):
 
@@ -822,9 +866,11 @@ The `chunkSize` parameter controls the maximum chunk size (in bytes) used by the
     logDestination=console
     logFormat=apache
 
-    /* ── Filesystem Roots ────────────────────────────────────── */
+    /* ── Filesystem Settings ─────────────────────────────────── */
     root=/var/www/html
     appRoot=/var/www/apps
+    /* extensions=['.esm.js' '.js'] */   /* default */
+    /* fsRouting=@t */                   /* enable filesystem-based routing */
 
     /* ── MIME Types ──────────────────────────────────────────── */
     mimeTypes=[
