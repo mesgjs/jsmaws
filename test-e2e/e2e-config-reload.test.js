@@ -78,7 +78,7 @@ async function createFileConfigServer (initialConfig) {
 }
 
 async function stopFileConfigServer (operator, tmpDir) {
-	await operator.shutdown(5);
+	await operator.shutdown(5, 1);
 	await Deno.remove(tmpDir, { recursive: true });
 }
 

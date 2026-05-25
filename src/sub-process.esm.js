@@ -268,6 +268,23 @@ export class SubProcess {
 	}
 
 	/**
+	 * Parse shutdown message to extract { deadline, spread }.
+	 * Falls back to config-based defaults when msg is null (SIGTERM path)
+	 * or when the message does not include deadline/spread.
+	 * @param {object|null} msg - PolyTransport message (may be null)
+	 * @returns {{ deadline: number, spread: number }}
+	 */
+	shutdownMesgDeadline (msg) {
+		const stopTime = this.config?.shutdownDelay ?? 30;
+		const defaultSpread = this.config?.shutdownSpread ?? 0;
+		const parsed = msg ? JSON.parse(msg.text ?? '{}') : {};
+		return {
+			deadline: parsed.deadline ?? (Date.now() + stopTime * 1000),
+			spread: parsed.spread ?? defaultSpread,
+		};
+	}
+
+	/**
 	 * Start the sub-process.
 	 * Template method that orchestrates the startup sequence.
 	 */

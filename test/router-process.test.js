@@ -17,7 +17,6 @@ function makeConfig (extra = {}) {
 			'@router': {
 				minProcs: 1,
 				maxProcs: 5,
-				scaling: 'dynamic',
 				maxReqs: 0,
 				idleTimeout: 300,
 				reqTimeout: 30,
@@ -25,7 +24,6 @@ function makeConfig (extra = {}) {
 			standard: {
 				minProcs: 2,
 				maxProcs: 10,
-				scaling: 'dynamic',
 			}
 		},
 		routes: [
@@ -97,11 +95,13 @@ Deno.test('RouterProcess - handleShutdown sets isShuttingDown and calls pool shu
 	proc.config = makeConfig();
 
 	let poolShutdownCalled = false;
-	let poolShutdownTimeout = null;
+	let poolShutdownDeadline = null;
+	let poolShutdownSpread = null;
 	proc.poolManager = {
-		shutdown: async (timeout) => {
+		shutdown: async (deadline, spread) => {
 			poolShutdownCalled = true;
-			poolShutdownTimeout = timeout;
+			poolShutdownDeadline = deadline;
+			poolShutdownSpread = spread;
 		},
 	};
 
@@ -118,8 +118,9 @@ Deno.test('RouterProcess - handleShutdown sets isShuttingDown and calls pool shu
 
 	try {
 		// Create a mock PolyTransport message with shutdown payload
+		const msgDeadline = Date.now() + 5000;
 		const mockMsg = {
-			text: JSON.stringify({ timeout: 5 }),
+			text: JSON.stringify({ deadline: msgDeadline, spread: 2 }),
 			done: () => {},
 			process: () => {},
 		};
@@ -128,7 +129,8 @@ Deno.test('RouterProcess - handleShutdown sets isShuttingDown and calls pool shu
 
 		assertEquals(proc.isShuttingDown, true);
 		assertEquals(poolShutdownCalled, true);
-		assertEquals(poolShutdownTimeout, 5);
+		assertEquals(poolShutdownDeadline, msgDeadline);
+		assertEquals(poolShutdownSpread, 2);
 		assertEquals(transportStopped, true);
 		assertEquals(exitCode, 0);
 	} finally {
@@ -136,13 +138,13 @@ Deno.test('RouterProcess - handleShutdown sets isShuttingDown and calls pool shu
 	}
 });
 
-Deno.test('RouterProcess - handleShutdown with null msg uses default timeout', async () => {
+Deno.test('RouterProcess - handleShutdown with null msg uses config defaults', async () => {
 	const proc = new RouterProcess('router-test-5');
 	proc.config = makeConfig();
 
-	let poolShutdownTimeout = null;
+	let poolShutdownDeadline = null;
 	proc.poolManager = {
-		shutdown: async (timeout) => { poolShutdownTimeout = timeout; },
+		shutdown: async (deadline) => { poolShutdownDeadline = deadline; },
 	};
 	proc.transport = { stop: async () => {} };
 
@@ -150,8 +152,12 @@ Deno.test('RouterProcess - handleShutdown with null msg uses default timeout', a
 	Deno.exit = () => {};
 
 	try {
+		const before = Date.now();
 		await proc.handleShutdown(null);
-		assertEquals(poolShutdownTimeout, 30); // Default timeout
+		const after = Date.now();
+		// Default shutdownDelay is 30s; deadline should be ~30s from now
+		assertEquals(poolShutdownDeadline >= before + 29000, true, 'deadline should be ~30s from now');
+		assertEquals(poolShutdownDeadline <= after + 31000, true, 'deadline should be ~30s from now');
 	} finally {
 		Deno.exit = originalExit;
 	}
@@ -241,5 +247,5 @@ Deno.test('RouterProcess - onStarted initializes pool manager', async () => {
 	assertExists(proc.poolManager);
 
 	// Clean up to prevent resource leaks
-	await proc.poolManager.shutdown(0);
+	await proc.poolManager.shutdown(Date.now());
 });

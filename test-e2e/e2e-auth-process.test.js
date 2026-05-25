@@ -46,6 +46,8 @@ const AUTH_POOL_CONFIG = {
 
 Deno.test({
 	name: "E2E Auth Process - auth sub-process spawns when authPool is configured",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		const { operator } = await createTestServer({
 			authPool: AUTH_POOL_CONFIG,
@@ -74,12 +76,12 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 Deno.test({
 	name: "E2E Auth Process - no auth pool when authPool not configured",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		const { operator } = await createTestServer({
 			routes: [
@@ -99,8 +101,6 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 // ============================================================================
@@ -109,6 +109,8 @@ Deno.test({
 
 Deno.test({
 	name: "E2E Auth Process - external provider delegated to auth sub-process (valid token)",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		const { operator } = await createTestServer({
 			authPool: AUTH_POOL_CONFIG,
@@ -148,12 +150,12 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 Deno.test({
 	name: "E2E Auth Process - external provider denial from auth sub-process",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		const { operator } = await createTestServer({
 			authPool: AUTH_POOL_CONFIG,
@@ -182,12 +184,12 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 Deno.test({
 	name: "E2E Auth Process - external provider null result (no token) → null identity",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		const { operator } = await createTestServer({
 			authPool: AUTH_POOL_CONFIG,
@@ -220,8 +222,6 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 // ============================================================================
@@ -230,6 +230,8 @@ Deno.test({
 
 Deno.test({
 	name: "E2E Auth Process - mixed chain: operator-resident JWT succeeds (no IPC needed)",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		// JWT (operator-resident) + external provider
 		// JWT succeeds → external provider never called → no IPC
@@ -284,12 +286,12 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 Deno.test({
 	name: "E2E Auth Process - mixed chain: JWT fails, external provider succeeds via IPC",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		// JWT (operator-resident) + external provider
 		// JWT returns null (no Authorization header) → external provider called via IPC
@@ -331,12 +333,12 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 Deno.test({
 	name: "E2E Auth Process - mixed chain: JWT denial stops chain (external not called)",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		// JWT (operator-resident) + external provider
 		// JWT returns explicit denial → chain stops, external provider NOT called
@@ -368,8 +370,6 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });
 
 // ============================================================================
@@ -378,6 +378,8 @@ Deno.test({
 
 Deno.test({
 	name: "E2E Auth Process - external provider runs inline when no authPool (fallback)",
+	// sanitizeResources: false,
+	// sanitizeOps: false,
 	async fn () {
 		// No authPool configured → external provider runs inline in operator (fallback)
 		const { operator } = await createTestServer({
@@ -419,6 +421,4 @@ Deno.test({
 			await stopTestServer(operator);
 		}
 	},
-	sanitizeResources: false,
-	sanitizeOps: false,
 });

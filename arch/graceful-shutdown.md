@@ -82,12 +82,12 @@ The shutdown notification is sent as a control channel message (not a new messag
 
 **New payload:**
 ```json
-{ "deadline": 1748050000000, "spread": 3000 }
+{ "deadline": 1748050000000, "spread": 3 }
 ```
 
 Where:
 - `deadline`: Absolute deadline in milliseconds since epoch (for this process's layer)
-- `spread`: Milliseconds to subtract from `deadline` when forwarding to the next layer (mod-app workers)
+- `spread`: Seconds to subtract from `deadline` when forwarding to the next layer (mod-app workers)
 
 The `timeout` field is removed. Sub-processes compute their remaining time as `deadline - Date.now()` when needed (e.g. for the drain loop timeout).
 
@@ -97,18 +97,18 @@ The `timeout` field is removed. Sub-processes compute their remaining time as `d
 Operator
   │  shutdown(stopTime=30, spread=0.1)
   │  deadline = now + 30000ms
-  │  spreadMs = max(1000, 0.1 * 30000) = 3000ms
+  │  spreadSec = max(1, 0.1 * 30) = 3 seconds
   │
   ├─► HTTP/HTTPS server: server.shutdown()
   │     (stops accepting new connections; in-flight requests continue)
   │
-  ├─► PoolManager.shutdown(deadline, spreadMs)
+  ├─► PoolManager.shutdown(deadline, spreadSec)
   │     │
-  │     └─► ProcessManager.shutdownProcess(proc, deadline, spreadMs)
-  │           │  controlChannel.write('shutdown', { deadline, spread: spreadMs })
+  │     └─► ProcessManager.shutdownProcess(proc, deadline, spreadSec)
+  │           │  controlChannel.write('shutdown', { deadline, spread: spreadSec })
   │           │
   │           └─► ResponderProcess.handleShutdown({ deadline, spread })
-  │                 │  modAppDeadline = deadline - spread
+  │                 │  modAppDeadline = deadline - spread * 1000
   │                 │
   │                 ├─► Phase 0: for each active request:
   │                 │     bootstrapChannel.write('shutdown', { deadline: modAppDeadline })
@@ -156,28 +156,29 @@ Called from `src/operator.esm.js` after logger initialization (alongside `regist
 **Modify `shutdown(stopTime)`:**
 
 - Compute `absoluteDeadline = Date.now() + stopTime * 1000`
-- Compute `spreadMs`: if `spread >= 1`, use `spread * 1000`; if `0 < spread < 1`, use `Math.max(1000, Math.round(spread * stopTime * 1000))`; if `spread === 0`, use `0`
-- Pass `{ deadline: absoluteDeadline, spread: spreadMs }` to `poolManager.shutdown()` and `processManager.shutdown()`
+- Get `spread` from `config.shutdownSpread` (already normalized to integer seconds by the getter)
+- Pass `deadline: absoluteDeadline, spread` to `poolManager.shutdown()` and `processManager.shutdown()`
 - Replace the `(stopTime + 2) * 1000` hard timeout with `Math.max(0, absoluteDeadline - Date.now())`
 
 ### 2. `src/pool-manager.esm.js` — Pass Deadline to Process Shutdown
 
-**Modify `shutdown(deadline, spreadMs)`:**
+**Modify `shutdown(deadline, spread)`:**
 
-- Change signature from `shutdown(stopTime = 30)` to `shutdown(deadline, spreadMs = 0)`
-- Pass `deadline` and `spreadMs` through to `item.item.shutdown(deadline, spreadMs)`
+- Change signature from `shutdown(stopTime = 30)` to `shutdown(deadline, spread = 0)` where `spread` is in seconds
+- Pass `deadline - spread * 1000` and `spread` through to `item.item.shutdown(deadline - spread * 1000, spread)`
 - Update the timeout calculation: `Math.max(0, deadline - Date.now())` instead of `stopTime * 1000`
 
 ### 3. `src/process-manager.esm.js` — Send Deadline in Shutdown Message
 
-**Modify `shutdownProcess(managedProc, deadline, spreadMs = 0)`:**
+**Modify `shutdownProcess(managedProc, deadline, spread = 0)`:**
 
-- Change the shutdown message payload from `{ timeout }` to `{ deadline, spread: spreadMs }`
+- Change signature to accept `deadline` (ms) and `spread` (seconds)
+- Change the shutdown message payload from `{ timeout }` to `{ deadline, spread }` where `spread` is in seconds
 - Update the SIGKILL fallback timer: `Math.max(0, deadline - Date.now())` instead of `timeout * 1000`
 
-**Modify `ManagedProcess.shutdown(deadline, spreadMs)`:**
+**Modify `ManagedProcess.shutdown(deadline, spread)`:**
 
-- Update signature to accept `deadline` and `spreadMs`
+- Update signature to accept `deadline` (ms) and `spread` (seconds)
 
 ### 4. `src/sub-process.esm.js` — Update Control Message Handling
 
@@ -187,11 +188,12 @@ No changes needed to the base class. The `handleShutdown(msg)` method is impleme
 
 **Modify `handleShutdown(msg)`:**
 
-- Parse `{ deadline, spread }` from `msg.text` (with fallback: if `timeout` is present instead of `deadline`, compute `deadline = Date.now() + timeout * 1000` for backward compatibility)
-- Compute `modAppDeadline = deadline - (spread ?? 0)`
-- Pass `modAppDeadline` to each mod-app worker via the transport's shutdown signal (see §6 below)
-- Replace the drain loop condition: `Date.now() < deadline` instead of `(Date.now() - shutdownStart) < timeout * 1000`
-- Hard-terminate workers at `deadline`, not at `shutdownStart + timeout * 1000`
+- Parse `{ deadline, spread }` from `msg.text` where `spread` is in seconds
+- Compute `modAppDeadline = deadline - (spread ?? 0) * 1000`
+- Send `shutdown` message on each active request's `bootstrapChannel` with `modAppDeadline` (Phase 0, see §6 below)
+- Replace the drain loop condition: `Date.now() < modAppDeadline` instead of `(Date.now() - shutdownStart) < timeout * 1000`
+- Hard-terminate workers at `modAppDeadline`, not at `shutdownStart + timeout * 1000`
+- Store `bootstrapChannel` in `activeRequests` map entry (currently only `appChannel` is stored)
 
 ### 6. `src/apps/bootstrap.esm.js` — Expose `JSMAWS.shutdownDeadline`
 
@@ -286,9 +288,7 @@ Modify existing `shutdown` message payload:
 |---|---|---|---|
 | `timeout` | `number` (seconds) | removed | Replaced by `deadline` |
 | `deadline` | — | `number` (ms epoch) | Absolute shutdown deadline for this process |
-| `spread` | — | `number` (ms) | Milliseconds to subtract for next layer's deadline |
-
-Backward compatibility: if `timeout` is present and `deadline` is absent, compute `deadline = Date.now() + timeout * 1000`.
+| `spread` | — | `number` (seconds) | Seconds to subtract for next layer's deadline |
 
 ---
 

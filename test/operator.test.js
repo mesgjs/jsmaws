@@ -266,7 +266,7 @@ Deno.test("OperatorProcess - handles configuration update", async () => {
 	} finally {
 		// Clean up: shutdown pool managers to stop scaling timers and close processes
 		for (const [poolName, poolManager] of operator.poolManagers) {
-			await poolManager.shutdown(0);
+			await poolManager.shutdown(Date.now());
 		}
 
 		// Restore original
@@ -395,7 +395,7 @@ Deno.test("OperatorProcess - initializeResponderPools with no pools config", asy
 	} finally {
 		// Clean up: shutdown pool managers to stop scaling timers
 		for (const [poolName, poolManager] of operator.poolManagers) {
-			await poolManager.shutdown(0);
+			await poolManager.shutdown(Date.now());
 		}
 
 		// Restore original

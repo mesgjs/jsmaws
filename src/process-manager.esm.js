@@ -129,9 +129,11 @@ class ManagedProcess {
 
 	/**
 	 * Shutdown (typically for recycling, so default is fast)
+	 * @param {number} deadline - Absolute deadline in milliseconds since epoch
+	 * @param {number} spread - Seconds to subtract for next layer's deadline (default: 0)
 	 */
-	shutdown (timeout = 5) {
-		this.processManager.shutdownProcess(this, timeout);
+	shutdown (deadline, spread = 0) {
+		this.processManager.shutdownProcess(this, deadline, spread);
 	}
 
 	/**
@@ -460,16 +462,20 @@ export class ProcessManager {
 	 * Gracefully shutdown all processes.
 	 * Note: This is typically called by PoolManager.shutdown() for each process.
 	 * But can also be used for emergency shutdown of all tracked processes.
+	 * @param {number} deadline - Absolute deadline in milliseconds since epoch
+	 * @param {number} spread - Seconds to subtract for next layer's deadline (default: 0)
 	 */
-	async shutdown (timeout = 30) {
+	async shutdown (deadline, spread = 0) {
 		this.isShuttingDown = true;
-		this.logger.info('Shutting down all tracked processes...');
+		const remainingMs = Math.max(0, deadline - Date.now());
+		const remainingSec = Math.ceil(remainingMs / 1000);
+		this.logger.info(`Shutting down all tracked processes (${remainingSec}s)...`);
 
 		const tasks = [];
 		for (const [processId, proc] of this.processes) {
 			if (proc.state === ProcessState.DEAD) continue;
 
-			tasks.push(this.shutdownProcess(proc, timeout));
+			tasks.push(this.shutdownProcess(proc, deadline, spread));
 		}
 
 		// Wait for all processes to shutdown
@@ -486,9 +492,10 @@ export class ProcessManager {
 	/**
 	 * Shutdown a sub-process (for PoolManager).
 	 * @param {ManagedProcess} managedProc Process to shutdown
-	 * @param {number} timeout Shutdown timeout in seconds
+	 * @param {number} deadline Absolute deadline in milliseconds since epoch
+	 * @param {number} spread Seconds to subtract for next layer's deadline (default: 0)
 	 */
-	async shutdownProcess (managedProc, timeout = 30) {
+	async shutdownProcess (managedProc, deadline, spread = 0) {
 		if (!managedProc || !managedProc.id) {
 			this.logger.warn('Invalid process provided to shutdownProcess');
 			return;
@@ -497,21 +504,23 @@ export class ProcessManager {
 		if (managedProc.state === ProcessState.STOPPING) return;
 
 		const processId = managedProc.id;
-		this.logger.info(`Shutting down process: ${processId}`);
+		const remainingMs = Math.max(0, deadline - Date.now());
+		const remainingSec = Math.ceil(remainingMs / 1000);
+		this.logger.info(`Shutting down process: ${processId} (${remainingSec}s)`);
 
 		managedProc.state = ProcessState.STOPPING;
 
 		try {
-			// Send shutdown signal via control channel
-			await managedProc.controlChannel.write('shutdown', JSON.stringify({ timeout }));
+			// Send shutdown signal via control channel (spread in seconds)
+			await managedProc.controlChannel.write('shutdown', JSON.stringify({ deadline, spread }));
 
 			// Wait for process to exit (with timeout)
 			const timeoutPromise = Promise.withResolvers();
 			const timer = setTimeout(() => {
-				this.logger.warn(`Process ${processId} did not exit within ${timeout}s; forcing termination`);
+				this.logger.warn(`Process ${processId} did not exit within ${remainingSec}s; forcing termination`);
 				managedProc.process.kill('SIGKILL');
 				timeoutPromise.resolve();
-			}, timeout * 1000);
+			}, remainingMs);
 
 			await managedProc.process.status.then((status) => {
 				clearTimeout(timer);

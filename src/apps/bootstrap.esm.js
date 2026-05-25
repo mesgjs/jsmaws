@@ -30,6 +30,12 @@ import { PromiseTracer } from '@poly-transport/promise-tracer.esm.js';
 import { Channel } from '@poly-transport/channel.esm.js';
 
 /**
+ * Bootstrap channel message types
+ * Exported for use by responder-process.esm.js
+ */
+export const BOOT_CHANNEL_MESSAGE_TYPES = ['setup', 'shutdown'];
+
+/**
  * Approved Deno APIs
  * These are the only Deno APIs mod-apps can access
  */
@@ -223,7 +229,7 @@ async function bootstrap () {
 
 	// Read setup instructions from the private 'bootstrap' channel
 	const bootstrapChannel = await transport.requestChannel('bootstrap');
-	await bootstrapChannel.addMessageTypes(['setup']);
+	await bootstrapChannel.addMessageTypes(BOOT_CHANNEL_MESSAGE_TYPES);
 	const setupMsg = await bootstrapChannel.read({ only: 'setup', decode: true });
 	let setupData;
 	await setupMsg.process(() => {
@@ -244,10 +250,24 @@ async function bootstrap () {
 	const appChannel = await transport.requestChannel('app');
 	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
 
+	// Set up shutdown deadline promise (resolved when shutdown message is received)
+	const shutdownResolvers = Promise.withResolvers();
+
+	// Background: listen for shutdown message on bootstrap channel
+	(async () => {
+		const msg = await bootstrapChannel.read({ only: 'shutdown', decode: true });
+		if (msg) {
+			const { deadline } = JSON.parse(msg.text);
+			await msg.done();
+			shutdownResolvers.resolve(deadline);
+		}
+	})();
+
 	// Build the JSMAWS namespace object (frozen before mod-app import)
 	const jsmawsNamespace = {
 		server: appChannel,
 		env: Object.freeze(setupData.appEnv ?? {}),
+		shutdownDeadline: shutdownResolvers.promise,
 	};
 
 	// Expose frozen namespace to mod-app

@@ -69,7 +69,11 @@ Deno.test('E2E - SSE streaming with sse-clock mod-app', async () => {
 	}
 });
 
-Deno.test('E2E - SSE streaming handles early client disconnect', async () => {
+Deno.test({
+	name: 'E2E - SSE streaming handles early client disconnect',
+	// sanitizeResources: false,
+	// sanitizeOps: false,
+	async fn () {
 	// Create test configuration
 	const testConfig = {
 		noSSL: true,
@@ -115,9 +119,13 @@ Deno.test('E2E - SSE streaming handles early client disconnect', async () => {
 	} finally {
 		await stopTestServer(operator);
 	}
-});
+}});
 
-Deno.test('E2E - SSE streaming with multiple concurrent clients', async () => {
+Deno.test({
+	name: 'E2E - SSE streaming with multiple concurrent clients',
+	// sanitizeResources: false,
+	// sanitizeOps: false,
+	async fn () {
 	// Create test configuration
 	const testConfig = {
 		noSSL: true,
@@ -179,7 +187,7 @@ Deno.test('E2E - SSE streaming with multiple concurrent clients', async () => {
 	} finally {
 		await stopTestServer(operator);
 	}
-});
+}});
 
 Deno.test('E2E - SSE streaming respects pool configuration', async () => {
 	// Create test configuration with stream pool

@@ -116,7 +116,7 @@ Deno.test('PoolManager - Fixed-Size Pool Pattern', async (t) => {
 		await pool.initialize();
 		assertEquals(pool.items.size, 3);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should not scale up or down', async () => {
@@ -144,7 +144,7 @@ Deno.test('PoolManager - Fixed-Size Pool Pattern', async (t) => {
 		assertEquals(item3, null); // Should not spawn new item
 		assertEquals(pool.items.size, 2);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 
@@ -161,7 +161,7 @@ Deno.test('PoolManager - Baseline Pool Pattern', async (t) => {
 		await pool.initialize();
 		assertEquals(pool.items.size, 2);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should scale up when all items busy', async () => {
@@ -185,7 +185,7 @@ Deno.test('PoolManager - Baseline Pool Pattern', async (t) => {
 		assertEquals(item2 !== null, true);
 		assertEquals(pool.items.size, 2);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should not exceed maxProcs', async () => {
@@ -206,7 +206,7 @@ Deno.test('PoolManager - Baseline Pool Pattern', async (t) => {
 		const item3 = await pool.getAvailableItem();
 		assertEquals(item3, null); // At max capacity
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should scale down idle items after timeout', async () => {
@@ -235,7 +235,7 @@ Deno.test('PoolManager - Baseline Pool Pattern', async (t) => {
 		// Should scale down to minProcs
 		assertEquals(pool.items.size, 1);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 
@@ -252,7 +252,7 @@ Deno.test('PoolManager - Zero-Baseline Pool Pattern', async (t) => {
 		await pool.initialize();
 		assertEquals(pool.items.size, 0);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should spawn items on demand', async () => {
@@ -271,7 +271,7 @@ Deno.test('PoolManager - Zero-Baseline Pool Pattern', async (t) => {
 		assertEquals(item !== null, true);
 		assertEquals(pool.items.size, 1);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should kill idle items after timeout', async () => {
@@ -301,7 +301,7 @@ Deno.test('PoolManager - Zero-Baseline Pool Pattern', async (t) => {
 		// Should scale down to 0
 		assertEquals(pool.items.size, 0);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 
@@ -325,7 +325,7 @@ Deno.test('PoolManager - Item Lifecycle', async (t) => {
 		assertEquals(item.state, ItemState.IDLE);
 		assertEquals(item.isAvailable(), true);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should recycle items after maxReqs', async () => {
@@ -354,7 +354,7 @@ Deno.test('PoolManager - Item Lifecycle', async (t) => {
 		assertEquals(pool.items.has(itemId), false);
 		assertEquals(pool.items.size, initialSize); // Replaced
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should track request count', async () => {
@@ -378,7 +378,7 @@ Deno.test('PoolManager - Item Lifecycle', async (t) => {
 		await pool.decrementItemUsage(item.id);
 		assertEquals(item.totalRequests, 2);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 
@@ -409,7 +409,7 @@ Deno.test('PoolManager - Metrics', async (t) => {
 		assertEquals(metrics2.busyItems, 1);
 		assertEquals(metrics2.totalRequests, 1);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should track spawned and recycled counts', async () => {
@@ -439,7 +439,7 @@ Deno.test('PoolManager - Metrics', async (t) => {
 		assertEquals(pool.metrics.totalRecycled, 1);
 		assertEquals(pool.metrics.totalSpawned, 2); // Original + replacement
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 
@@ -467,7 +467,7 @@ Deno.test('PoolManager - Configuration Updates', async (t) => {
 		assertEquals(pool.config.maxProcs, 10);
 		assertEquals(pool.items.size, 2); // Should spawn to meet minProcs
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should stop timer when converging to fixed size', async () => {
@@ -493,7 +493,7 @@ Deno.test('PoolManager - Configuration Updates', async (t) => {
 
 		assertEquals(pool.scaleTimer, null); // Timer should be stopped at equilibrium
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 
@@ -512,7 +512,7 @@ Deno.test('PoolManager - Worker vs Process Pools', async (t) => {
 		const item = await pool.getAvailableItem();
 		assertEquals(item.isWorker, true);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should handle process pools', async () => {
@@ -529,7 +529,7 @@ Deno.test('PoolManager - Worker vs Process Pools', async (t) => {
 		const item = await pool.getAvailableItem();
 		assertEquals(item.isWorker, false);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 
@@ -546,7 +546,7 @@ Deno.test('PoolManager - Shutdown', async (t) => {
 		await pool.initialize();
 		assertEquals(pool.items.size, 3);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 		assertEquals(pool.items.size, 0);
 		assertEquals(pool.isShuttingDown, true);
 	});
@@ -594,7 +594,7 @@ Deno.test('PoolManager - Unified Scaling', async (t) => {
 		// Timer should be stopped at equilibrium
 		assertEquals(pool.scaleTimer, null);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should continue timer when out of spec after config change', async () => {
@@ -636,7 +636,7 @@ Deno.test('PoolManager - Unified Scaling', async (t) => {
 		await pool.performScaling();
 		assertEquals(pool.scaleTimer, null);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should handle any minProcs/maxProcs combination', async () => {
@@ -651,7 +651,7 @@ Deno.test('PoolManager - Unified Scaling', async (t) => {
 		}, factory, logger);
 		await pool1.initialize();
 		assertEquals(pool1.items.size, 0);
-		await pool1.shutdown(1);
+		await pool1.shutdown(Date.now() + 1000);
 
 		// Test 5/5 (fixed-size)
 		const pool2 = new PoolManager('unified-test-2', {
@@ -661,7 +661,7 @@ Deno.test('PoolManager - Unified Scaling', async (t) => {
 		}, factory, logger);
 		await pool2.initialize();
 		assertEquals(pool2.items.size, 5);
-		await pool2.shutdown(1);
+		await pool2.shutdown(Date.now() + 1000);
 
 		// Test 2/20 (baseline with scaling)
 		const pool3 = new PoolManager('unified-test-3', {
@@ -671,7 +671,7 @@ Deno.test('PoolManager - Unified Scaling', async (t) => {
 		}, factory, logger);
 		await pool3.initialize();
 		assertEquals(pool3.items.size, 2);
-		await pool3.shutdown(1);
+		await pool3.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should scale up to minProcs after config increase', async () => {
@@ -696,7 +696,7 @@ Deno.test('PoolManager - Unified Scaling', async (t) => {
 		// Should spawn to reach new minimum
 		assertEquals(pool.items.size, 5);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 
 	await t.step('should scale down to maxProcs after config decrease', async () => {
@@ -731,7 +731,7 @@ Deno.test('PoolManager - Unified Scaling', async (t) => {
 		// Should scale down to new maximum (10)
 		assertEquals(pool.items.size <= 10, true);
 
-		await pool.shutdown(1);
+		await pool.shutdown(Date.now() + 1000);
 	});
 });
 

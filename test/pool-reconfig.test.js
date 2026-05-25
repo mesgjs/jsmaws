@@ -74,6 +74,18 @@ function makeOperator (config = {}) {
 }
 
 /**
+ * Shutdown all operator pool managers
+ */
+async function shutdownOperPoolManagers (operator) {
+	const deadline = Date.now() + 5000;
+	const shutdownPromises = [];
+	for (const [_, poolManager] of operator.poolManagers) {
+		shutdownPromises.push(poolManager.shutdown(deadline));
+	}
+	return await Promise.all(shutdownPromises);
+}
+
+/**
  * Wait for async operations to complete
  */
 async function waitForAsync (ms = 50) {
@@ -110,9 +122,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section missing", asy
 	assertExists(operator.poolManagers.get('standard'));
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 Deno.test("Pool Reconfig - applies default pool when pools section is omitted", async () => {
@@ -135,9 +145,7 @@ Deno.test("Pool Reconfig - applies default pool when pools section is omitted", 
 	assertExists(operator.config.pools.standard);
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 Deno.test("Pool Reconfig - uses provided pools config when present", async () => {
@@ -177,9 +185,7 @@ Deno.test("Pool Reconfig - uses provided pools config when present", async () =>
 	assertExists(operator.poolManagers.get('slow'));
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 // ============================================================================
@@ -216,9 +222,7 @@ Deno.test("Pool Reconfig - adds new pools in parallel", async () => {
 	assertEquals(operator.poolManagers.size, 3);
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
@@ -252,9 +256,7 @@ Deno.test("Pool Reconfig - removes old pools in parallel", async () => {
 	assertEquals(operator.poolManagers.size, 1);
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () => {
@@ -287,9 +289,7 @@ Deno.test("Pool Reconfig - reconfigures existing pools synchronously", async () 
 	assertEquals(updatedPoolManager.config.maxProcs, 10);
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
@@ -328,9 +328,7 @@ Deno.test("Pool Reconfig - handles mixed add/remove/reconfig", async () => {
 	assertEquals(operator.poolManagers.size, 2);
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 // ============================================================================
@@ -407,9 +405,7 @@ Deno.test("Pool Reconfig - cleans up affinity map for removed pools", async () =
 	assert(!operator.affinityMap.get('/app3.js').has(itemB3.id));
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 // ============================================================================
@@ -479,9 +475,7 @@ Deno.test("Pool Reconfig - skips @router pool in lifecycle management", async ()
 	assertExists(operator.poolManagers.get('poolB'));
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 // ============================================================================
@@ -525,9 +519,7 @@ Deno.test("Pool Reconfig - continues on pool creation failure", async () => {
 	assertExists(operator.poolManagers.get('poolC'));
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });
 
 Deno.test("Pool Reconfig - continues on pool reconfiguration failure", async () => {
@@ -569,7 +561,5 @@ Deno.test("Pool Reconfig - continues on pool reconfiguration failure", async () 
 	assertEquals(operator.poolManagers.get('poolB').config.minProcs, 2);
 
 	// Cleanup
-	for (const [poolName, poolManager] of operator.poolManagers) {
-		await poolManager.shutdown(5);
-	}
+	await shutdownOperPoolManagers(operator);
 });

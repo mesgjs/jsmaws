@@ -44,14 +44,14 @@ async function main () {
 
 	operator.initializeLogger();
 
-	// Handle shutdown signals
-	const shutdownHandler = async () => {
+	// Handle SIGINT for interactive shutdown (Ctrl+C)
+	Deno.addSignalListener('SIGINT', async () => {
 		await operator.shutdown();
 		Deno.exit(0);
-	};
+	});
 
-	Deno.addSignalListener('SIGINT', shutdownHandler);
-	Deno.addSignalListener('SIGTERM', shutdownHandler);
+	// Handle SIGTERM for graceful shutdown (uses configured shutdownDelay and shutdownSpread)
+	operator.registerSigtermHandler();
 
 	// Handle SIGHUP for graceful config reload (standard Unix practice)
 	operator.registerSighupHandler();

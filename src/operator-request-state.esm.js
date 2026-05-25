@@ -157,13 +157,13 @@ export class RequestContext {
 				chunk = data; // Already Uint8Array or compatible
 			}
 			if (chunk.length > 0) {
-				this.streamController?.enqueue(chunk);
+				try { this.streamController?.enqueue(chunk); } catch (_) {/**/}
 			}
 		}
 
 		// Check for end-of-stream (null/undefined data + eom:true)
 		if (data == null && eom) {
-			try { this.streamController?.close(); } catch (_) {}
+			try { this.streamController?.close(); } catch (_) {/**/}
 			this.state = RequestState.COMPLETED;
 			this.operator.logger.debug(`[${this.requestId}] was STREAMING_RESPONSE now COMPLETED`);
 
@@ -384,7 +384,6 @@ export class RequestContext {
 
 		// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
 		// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
-		// Pass msg.data ?? msg.text so string and binary writes are both handled lazily.
 		(async () => {
 			while (true) {
 				const msg = await reqChannel.read({ only: 'res-frame', dechunk: false });

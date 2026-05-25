@@ -151,9 +151,12 @@ export class AuthProcess extends SubProcess {
 	 * @param {object} msg - PolyTransport message (may be null for signal-triggered shutdown)
 	 */
 	async handleShutdown (msg) {
-		const timeout = msg ? (JSON.parse(msg.text ?? '{}').timeout ?? 30) : 30;
+		const { deadline } = this.shutdownMesgDeadline(msg);
 		msg?.done();
-		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
+
+		const remainingMs = Math.max(0, deadline - Date.now());
+		const remainingSec = Math.ceil(remainingMs / 1000);
+		console.info(`[${this.processId}] Shutdown requested (${remainingSec}s)`);
 
 		this.isShuttingDown = true;
 

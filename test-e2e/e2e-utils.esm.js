@@ -76,7 +76,7 @@ export async function startTestServer (operator) {
  */
 export async function stopTestServer (operator) {
 	// Shutdown operator (which shuts down pools internally)
-	await operator.shutdown(5);
+	await operator.shutdown(5, 1);
 }
 
 /**
@@ -283,13 +283,13 @@ export async function closePolyTransportWebSocket (connection) {
 
 	// Close in reverse order of creation
 	if (appChannel) {
-		await appChannel.close();
+		await appChannel.close({ discard: true });
 	}
 	if (nestedTransport) {
 		await nestedTransport.stop();
 	}
 	if (bidiChannel) {
-		await bidiChannel.close();
+		await bidiChannel.close({ discard: true });
 	}
 	if (wsTransport) {
 		await wsTransport.stop();

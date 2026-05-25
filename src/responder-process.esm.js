@@ -28,6 +28,13 @@ import { SubProcess } from './sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
 
 /**
+ * Bootstrap channel message types (duplicated from bootstrap.esm.js to avoid
+ * importing that module in the responder's main thread - bootstrap.esm.js needs to run
+ * itself unconditionally when imported, which we do not want to have happen here).
+ */
+const BOOT_CHANNEL_MESSAGE_TYPES = ['setup', 'shutdown'];
+
+/**
  * Responder process class
  * Spawns mod-app workers on-demand to handle requests
  */
@@ -48,6 +55,9 @@ export class ResponderProcess extends SubProcess {
 		this.chunkingConfig = {
 			chunkSize: 65536, // 64KB default; updated from config
 		};
+
+		// Drain promise for shutdown (resolved when all requests complete)
+		this.drainResolvers = null;
 	}
 
 	/**
@@ -171,36 +181,59 @@ export class ResponderProcess extends SubProcess {
 
 	/**
 	 * Handle shutdown request from operator.
-	 * @param {object} msg - PolyTransport message (may be null for signal-triggered shutdown)
+	 * @param {object} msg - PolyTransport message
 	 */
 	async handleShutdown (msg) {
-		const timeout = msg ? (JSON.parse(msg.text ?? '{}').timeout ?? 30) : 30;
+		const { deadline, spread } = this.shutdownMesgDeadline(msg);
 		msg?.done();
-		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
+
+		const remainingMs = Math.max(0, deadline - Date.now());
+		const remainingSec = Math.ceil(remainingMs / 1000);
+		console.info(`[${this.processId}] Shutdown requested (${remainingSec}s)`);
+
+		const modAppDeadline = deadline - (spread ?? 0) * 1000;
 
 		this.isShuttingDown = true;
 
-		// Phase 1: fire-and-forget graceful stop on each mod-app transport so
-		// mod-app can finish in-flight work.  Collect the stop promises so we
-		// can await them all at the end (after any hard-terminate phase).
-		const stopPromises = [];
+		// Phase 1: notify mod-apps of impending shutdown via bootstrap channel
+		// This replaces the old "graceful stop" which immediately made new channel writes impossible.
+		// Instead, we notify mod-apps and let them finish their work before the deadline.
 		for (const requestInfo of this.activeRequests.values()) {
-			if (requestInfo.transport) {
-				stopPromises.push(requestInfo.transport.stop().catch(() => {}));
+			if (requestInfo.bootstrapChannel) {
+				await requestInfo.bootstrapChannel.write('shutdown', JSON.stringify({ deadline: modAppDeadline }))
+					.catch(() => {});
 			}
 		}
 
 		// Phase 2: wait for active requests to drain (with timeout)
-		const shutdownStart = Date.now();
-		while (this.activeRequests.size > 0 && (Date.now() - shutdownStart) < timeout * 1000) {
-			console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active requests...`);
-			await new Promise((resolve) => setTimeout(resolve, 1000));
+		if (this.activeRequests.size > 0) {
+			// Set up periodic reporting
+			const reportInterval = setInterval(() => {
+				if (this.activeRequests.size > 0) {
+					console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active request(s)...`);
+				}
+			}, 1000);
+
+			// Create drain promise (resolved by #onAppTransportStopped when all requests complete)
+			this.drainResolvers = Promise.withResolvers();
+			const drainPromise = this.drainResolvers.promise;
+
+			// Create deadline promise
+			const deadlinePromise = new Promise((resolve) => {
+				const remaining = Math.max(0, modAppDeadline - Date.now());
+				setTimeout(resolve, remaining);
+			});
+
+			// Wait for all requests to complete OR deadline to be reached
+			await Promise.race([drainPromise, deadlinePromise]);
+			clearInterval(reportInterval);
 		}
 
-		// Phase 3: hard-terminate any workers still running after the timeout.
+		// Phase 3: hard-terminate any workers still running after the deadline.
 		// stop({ disconnected: true }) overrides the in-progress graceful stop
 		// and triggers the 'stopped' event, which handles 503 + state cleanup.
 		// Collect the disconnected-stop promises so we can await them below.
+		const stopPromises = [];
 		for (const [id, requestInfo] of this.activeRequests.entries()) {
 			console.debug(`[${this.processId}] Hard-terminating worker for request ${id}`);
 			requestInfo.worker?.terminate();
@@ -338,6 +371,11 @@ export class ResponderProcess extends SubProcess {
 
 		this.channelMap.delete(reqChannel);
 		this.activeRequests.delete(id);
+
+		// Resolve drain promise if all requests are complete (for shutdown)
+		if (this.drainResolvers && this.activeRequests.size === 0) {
+			this.drainResolvers.resolve();
+		}
 	}
 
 	/**
@@ -413,7 +451,7 @@ export class ResponderProcess extends SubProcess {
 			const appEnv = this.config.getEffectiveAppEnv(routeSpec, this.poolName);
 
 			// Spawn mod-app worker and establish PostMessageTransport
-			const { worker, transport, c2cChannel, appChannel } =
+			const { worker, transport, c2cChannel, appChannel, bootstrapChannel } =
 				await this.#spawnAppWorker(app, mode, appEnv);
 
 			// Set up request timeout: send error first (sets responseStarted), then abort.
@@ -428,6 +466,7 @@ export class ResponderProcess extends SubProcess {
 			// Track active request
 			this.activeRequests.set(id, {
 				appChannel,
+				bootstrapChannel,
 				isStreaming: false,
 				mode,
 				reqChannel,
@@ -602,7 +641,7 @@ export class ResponderProcess extends SubProcess {
 
 		// Send setup instructions to bootstrap via the private 'bootstrap' channel
 		const bootstrapChannel = await transport.requestChannel('bootstrap');
-		await bootstrapChannel.addMessageTypes(['setup']);
+		await bootstrapChannel.addMessageTypes(BOOT_CHANNEL_MESSAGE_TYPES);
 		const setupData = { appPath: appHref, mode, keepDeno };
 		if (appEnv && Object.keys(appEnv).length > 0) {
 			setupData.appEnv = appEnv;
@@ -613,7 +652,7 @@ export class ResponderProcess extends SubProcess {
 		const appChannel = await transport.requestChannel('app');
 		await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
 
-		return { worker, transport, c2cChannel, appChannel };
+		return { worker, transport, c2cChannel, appChannel, bootstrapChannel };
 	}
 
 	/**

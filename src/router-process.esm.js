@@ -111,15 +111,18 @@ export class RouterProcess extends SubProcess {
 	 * @param {object} msg - PolyTransport message (may be null for signal-triggered shutdown)
 	 */
 	async handleShutdown (msg) {
-		const timeout = msg ? (JSON.parse(msg.text ?? '{}').timeout ?? 30) : 30;
+		const { deadline, spread } = this.shutdownMesgDeadline(msg);
 		msg?.done(); // ACK the shutdown message before transport.stop() to avoid channel-close deadlock
-		console.info(`[${this.processId}] Shutdown requested (timeout: ${timeout}s)`);
+
+		const remainingMs = Math.max(0, deadline - Date.now());
+		const remainingSec = Math.ceil(remainingMs / 1000);
+		console.info(`[${this.processId}] Shutdown requested (${remainingSec}s)`);
 
 		this.isShuttingDown = true;
 
 		// Shutdown pool manager
 		if (this.poolManager) {
-			await this.poolManager.shutdown(timeout);
+			await this.poolManager.shutdown(deadline, spread);
 		}
 
 		// Log complete before loss of transport/C2C

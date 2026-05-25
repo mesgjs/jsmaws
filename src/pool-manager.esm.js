@@ -419,9 +419,13 @@ export class PoolManager {
 
 	/**
 	 * Graceful shutdown
+	 * @param {number} deadline - Absolute deadline in milliseconds since epoch (for this process layer)
+	 * @param {number} spread - Seconds to subtract for next layer's deadline (default: 0)
 	 */
-	async shutdown (stopTime = 30) {
-		this.logger.info(`[PoolManager:${this.poolName}] Shutting down (${stopTime}s)`);
+	async shutdown (deadline, spread = 0) {
+		const remainingMs = Math.max(0, deadline - Date.now());
+		const remainingSec = Math.ceil(remainingMs / 1000);
+		this.logger.info(`[PoolManager:${this.poolName}] Shutting down (${remainingSec}s)`);
 		this.isShuttingDown = true;
 		this.stopScaling();
 		// The process manager will handle processes in the case of a system-wide shutdown
@@ -437,7 +441,9 @@ export class PoolManager {
 						item.item.terminate();
 					} else if (!systemShutdown) {
 						if (typeof item.item.shutdown === 'function') {
-							await item.item.shutdown(stopTime);
+							// Pass deadline - spread to workers (one level down)
+							const workerDeadline = deadline - spread * 1000;
+							await item.item.shutdown(workerDeadline, spread);
 						}
 					}
 					this.items.delete(itemId);
@@ -452,7 +458,7 @@ export class PoolManager {
 		if (shutdownPromises.length) {
 			const wrapUpPromise = Promise.withResolvers();
 			Promise.all(shutdownPromises).then(() => wrapUpPromise.resolve(true));
-			const timer = setTimeout(() => wrapUpPromise.resolve(false), stopTime * 1000);
+			const timer = setTimeout(() => wrapUpPromise.resolve(false), remainingMs);
 			await wrapUpPromise.promise;
 			clearTimeout(timer);
 		}

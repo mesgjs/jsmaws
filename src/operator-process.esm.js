@@ -634,6 +634,20 @@ export class OperatorProcess {
 	}
 
 	/**
+	 * Register the SIGTERM signal handler for graceful shutdown.
+	 * Exposed as a method so tests can register it without going through main().
+	 * The handler logs at INFO level, calls shutdown() with configured delay and spread,
+	 * and exits with code 0.
+	 */
+	registerSigtermHandler () {
+		Deno.addSignalListener('SIGTERM', async () => {
+			this.logger.info('SIGTERM received; initiating graceful shutdown...');
+			await this.shutdown();
+			Deno.exit(0);
+		});
+	}
+
+	/**
 	 * Reload HTTPS server with updated certificates
 	 */
 	async reloadHttpsServer () {
@@ -680,16 +694,25 @@ export class OperatorProcess {
 	}
 
 	/**
-	 * Gracefully shutdown the operator process
+	 * Gracefully shutdown the operator process.
+	 *
+	 * @param {number|null} stopTime - Shutdown timeout in seconds (default: config.shutdownDelay)
+	 * @param {number|null} spread - Spread in seconds (default: config.shutdownSpread, already normalized)
 	 */
-	async shutdown (stopTime = null) {
+	async shutdown (stopTime = null, spread = null) {
 		if (this.isShuttingDown) {
 			return;
 		}
 		this.isShuttingDown = true;
 
-		stopTime ??= this.config.config.shutdownDelay ?? 30;
-		this.logger.info(`Shutting down JSMAWS operator process (${stopTime}s)...`);
+		// Use normalized config getters (shutdownSpread is already in seconds)
+		stopTime ??= this.config.shutdownDelay;
+		spread ??= this.config.shutdownSpread;
+		this.logger.info(`Shutting down JSMAWS operator process (${stopTime}s, spread=${spread}s)...`);
+
+		// Compute absolute deadline (ms since epoch) for next layer.
+		// Sub-processes receive subDeadline = now + (stopTime - spread) * 1000.
+		const subDeadline = Date.now() + (stopTime - spread) * 1000;
 
 		if (this.healthCheckInterval) {
 			clearInterval(this.healthCheckInterval);
@@ -717,17 +740,17 @@ export class OperatorProcess {
 		if (this.poolManagers) {
 			for (const [poolName, poolManager] of this.poolManagers) {
 				this.logger.info(`Shutting down pool: ${poolName}`);
-				tasks.push(poolManager.shutdown(stopTime));
+				tasks.push(poolManager.shutdown(subDeadline, spread));
 			}
 		}
 
 		if (this.authPoolManager) {
 			this.logger.info('Shutting down auth pool');
-			tasks.push(this.authPoolManager.shutdown(stopTime));
+			tasks.push(this.authPoolManager.shutdown(subDeadline, spread));
 		}
 
 		if (this.processManager) {
-			tasks.push(this.processManager.shutdown(stopTime));
+			tasks.push(this.processManager.shutdown(subDeadline, spread));
 		}
 
 		if (tasks.length) {
@@ -735,7 +758,10 @@ export class OperatorProcess {
 			wrapUpPromise.promise.then((completed) => {
 				if (!completed) this.logger.info('Operator shutdown timed out');
 			});
-			const wrapUpTimer = setTimeout(wrapUpPromise.resolve, (stopTime + 2) * 1000);
+			// Operator waits until its own deadline (stopTime from now, not reduced by spread)
+			const deadline = Date.now() + stopTime * 1000;
+			const remainingMs = Math.max(0, deadline - Date.now());
+			const wrapUpTimer = setTimeout(wrapUpPromise.resolve, remainingMs);
 			await Promise.race([Promise.all(tasks), wrapUpPromise.promise]);
 			wrapUpPromise.resolve(true);
 			clearTimeout(wrapUpTimer);
@@ -898,8 +924,11 @@ export class OperatorProcess {
 			// authPool removed from config — shut down if running
 			if (this.authPoolManager) {
 				this.logger.info('authPool removed from config; shutting down auth pool');
-				const stopTime = this.config.config.shutdownDelay ?? 30;
-				await this.authPoolManager.shutdown(stopTime);
+				// Config reload: pass unreduced process deadline + spread for workers
+				const stopTime = this.config.shutdownDelay;
+				const spread = this.config.shutdownSpread;
+				const deadline = Date.now() + stopTime * 1000;
+				await this.authPoolManager.shutdown(deadline, spread);
 				this.authPoolManager = null;
 				this.operatorAuthn.setAuthDelegate(null);
 			}
@@ -927,7 +956,10 @@ export class OperatorProcess {
 		this.logger.info('Updating responder pools');
 		const newPoolsConfig = this.config.pools;
 
-		const stopTime = this.config.config.shutdownDelay ?? 30;
+		// Config reload: pass unreduced process deadline + spread for workers
+		const stopTime = this.config.shutdownDelay;
+		const spread = this.config.shutdownSpread;
+		const deadline = Date.now() + stopTime * 1000;
 		const newPoolNames = new Set(Object.keys(newPoolsConfig));
 		const oldPoolNames = new Set(this.poolManagers.keys());
 
@@ -937,6 +969,7 @@ export class OperatorProcess {
 		const poolsToAdd = new Set();
 
 		for (const poolName of oldPoolNames) {
+			// FIX LATER (needs to be noted in memory bank): bad design - the router is not a responder; it should use routerPool (like auth uses authPool)
 			if (poolName === '@router') continue;
 
 			if (!newPoolNames.has(poolName)) {
@@ -1010,7 +1043,7 @@ export class OperatorProcess {
 			if (poolManager) {
 				const removePromise = (async () => {
 					try {
-						await poolManager.shutdown(stopTime);
+						await poolManager.shutdown(deadline, spread);
 						this.poolManagers.delete(poolName);
 						++completedShutdowns;
 					} catch (error) {
@@ -1022,8 +1055,8 @@ export class OperatorProcess {
 			}
 		}
 
-		// Wait for shutdowns with timeout
-		const shutdownTimeout = (stopTime + 5) * 1000;
+		// Wait for shutdowns until the deadline
+		const shutdownTimeout = Math.max(0, deadline - Date.now());
 		const timeoutPromise = Promise.withResolvers();
 		const timer = setTimeout(timeoutPromise.resolve, shutdownTimeout);
 

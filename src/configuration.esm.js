@@ -447,6 +447,30 @@ export class Configuration {
 	}
 
 	/**
+	 * Get shutdown delay in seconds.
+	 * @returns {number} Shutdown delay in seconds (default: 30)
+	 */
+	get shutdownDelay () {
+		return this.config.shutdownDelay ?? 30;
+	}
+
+	/**
+	 * Get shutdown spread in seconds (normalized from config).
+	 * Config value may be:
+	 *   - 0 (or absent): no spread
+	 *   - >= 1: spread in seconds (used as-is)
+	 *   - 0 < value < 1: fraction of shutdownDelay (converted to seconds, minimum 1s)
+	 * @returns {number} Spread in seconds (default: 0)
+	 */
+	get shutdownSpread () {
+		const raw = this.config.shutdownSpread ?? 0;
+		if (raw === 0) return 0;
+		if (raw >= 1) return raw;
+		// Fraction of shutdownDelay, minimum 1 second
+		return Math.max(1, Math.round(raw * this.shutdownDelay));
+	}
+
+	/**
 	 * Get SSL certificate check interval in hours
 	 * @returns {number}
 	 */
