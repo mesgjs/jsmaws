@@ -1,11 +1,12 @@
 # JSMAWS Examples
 
-This directory contains example applets and test clients to demonstrate the JSMAWS unified frame protocol.
+This directory contains example mod-apps and test clients to demonstrate JSMAWS features.
 
-## Example Applets
+## Example Mod-Apps
 
-### hello-world.esm.js
-Simple HTTP request/response applet that returns JSON.
+### [`apps/hello-world.esm.js`](apps/hello-world.esm.js)
+
+Simple HTTP request/response mod-app that returns a JSON greeting.
 
 **Features:**
 - Single-frame response
@@ -14,191 +15,123 @@ Simple HTTP request/response applet that returns JSON.
 
 **Test:**
 ```bash
-deno run --allow-net examples/clients/http-client.js
+deno run --allow-net examples/clients/http-hello.esm.js
 ```
 
-### sse-clock.esm.js
-Server-Sent Events (SSE) applet that streams time updates.
+### [`apps/sse-clock.esm.js`](apps/sse-clock.esm.js)
+
+Server-Sent Events (SSE) mod-app that streams time updates.
 
 **Features:**
-- Streaming mode (`mode: 'stream'`)
-- Long-lived connection (`keepAlive: true`)
+- Streaming mode
+- Long-lived connection
 - Multiple frames over time
 - Graceful close
 
 **Test:**
 ```bash
-deno run --allow-net examples/clients/sse-client.js
+deno run --allow-net examples/clients/sse-clock.esm.js
 ```
 
-### websocket-echo.esm.js
+### [`apps/websocket-echo.esm.js`](apps/websocket-echo.esm.js)
+
 WebSocket echo server that demonstrates bidirectional communication.
 
 **Features:**
-- Bidirectional mode (`mode: 'bidi'`)
-- WebSocket upgrade handling
-- Protocol parameter negotiation
-- Credit-based flow control
+- Bidirectional mode (WebSocket upgrade)
 - Message echoing
+- PolyTransport flow control
 
 **Test:**
 ```bash
-deno run --allow-net examples/clients/websocket-client.js
+deno run --allow-net examples/clients/ws-echo.esm.js
 ```
+
+### [`apps/auth-echo.esm.js`](apps/auth-echo.esm.js)
+
+Echoes the authenticated identity back to the caller as JSON. Useful for testing authentication configuration.
 
 ## Test Clients
 
-### http-client.js
-Tests the hello-world applet with various HTTP requests.
-
-### sse-client.js
-Connects to the SSE clock applet and displays received events.
-
-### websocket-client.js
-Connects to the WebSocket echo applet and sends test messages.
+| Client | Description |
+|--------|-------------|
+| [`clients/http-hello.esm.js`](clients/http-hello.esm.js) | Tests the hello-world mod-app with various HTTP requests |
+| [`clients/sse-clock.esm.js`](clients/sse-clock.esm.js) | Connects to the SSE clock mod-app and displays received events |
+| [`clients/ws-echo.esm.js`](clients/ws-echo.esm.js) | Connects to the WebSocket echo mod-app and sends test messages |
 
 ## Running the Examples
 
-1. **Start JSMAWS server** (when implemented):
+1. **Start JSMAWS** with the example configuration:
    ```bash
-   deno run --allow-all src/operator.esm.js --config examples/jsmaws-examples.slid
+   deno run --allow-all --unstable-worker-options \
+       src/operator.esm.js --config examples/jsmaws-examples.slid
    ```
 
-2. **Run a test client**:
+2. **Run a test client** in another terminal:
    ```bash
-   deno run --allow-net examples/clients/http-client.js
-   deno run --allow-net examples/clients/sse-client.js
-   deno run --allow-net examples/clients/websocket-client.js
+   deno run --allow-net examples/clients/http-hello.esm.js
+   deno run --allow-net examples/clients/sse-clock.esm.js
+   deno run --allow-net examples/clients/ws-echo.esm.js
    ```
 
 ## Configuration
 
-Create `examples/jsmaws-examples.slid` to configure routes for these applets:
-
-```slid
-[(
-  routes=[
-    [path=/hello app=examples/applets/hello-world.esm.js pool=fast]
-    [path=/sse-clock app=examples/applets/sse-clock.esm.js pool=stream]
-    [path=/ws-echo app=examples/applets/websocket-echo.esm.js pool=stream]
-  ]
-  
-  pools=[
-    fast=[
-      minProcs=1
-      maxProcs=5
-      minWorkers=2
-      maxWorkers=8
-      scaling=dynamic
-      reqTimeout=5
-    ]
-    stream=[
-      minProcs=1
-      maxProcs=10
-      maxWorkers=1
-      scaling=ondemand
-      reqTimeout=0
-      conTimeout=3600
-    ]
-  ]
-)]
-```
-
-## Protocol Patterns
-
-### Simple Response (hello-world)
-```javascript
-self.postMessage({
-  type: 'frame',
-  id,
-  mode: 'response',
-  status: 200,
-  headers: { 'Content-Type': 'application/json' },
-  data: responseData,
-  final: true,
-  keepAlive: false
-});
-```
-
-### Streaming (sse-clock)
-```javascript
-// First frame
-self.postMessage({
-  type: 'frame',
-  id,
-  mode: 'stream',
-  status: 200,
-  headers: { 'Content-Type': 'text/event-stream' },
-  data: null,
-  keepAlive: true
-});
-
-// Subsequent frames
-self.postMessage({
-  type: 'frame',
-  id,
-  data: eventData,
-  final: true  // Each event is one frame
-});
-
-// Close
-self.postMessage({
-  type: 'frame',
-  id,
-  data: null,
-  final: true,
-  keepAlive: false
-});
-```
-
-### Bidirectional (websocket-echo)
-```javascript
-// Accept upgrade
-self.postMessage({
-  type: 'frame',
-  id,
-  mode: 'bidi',
-  status: 101,
-  headers: { 'Upgrade': 'websocket', ... },
-  data: null,
-  keepAlive: true
-});
-
-// Receive protocol parameters
-if (initialCredits !== undefined) {
-  // Connection ready
-}
-
-// Send/receive messages
-self.postMessage({
-  type: 'frame',
-  id,
-  data: messageData,
-  final: true
-});
-```
+The example configuration file [`jsmaws-examples.slid`](jsmaws-examples.slid) defines routes for the example mod-apps.
 
 ## Key Concepts
 
-### Frame Protocol
-- **First frame**: Includes `mode`, `status`, `headers`
-- **Subsequent frames**: Only `data` and `final`
-- **Sticky state**: `mode` and `keepAlive` persist
+### Mod-App Structure
 
-### Modes
-- **response**: Single request/response (default `keepAlive: false`)
-- **stream**: Long-lived streaming (SSE, chunked responses)
-- **bidi**: Bidirectional (WebSocket, future transports)
+A mod-app is an ES module with a default export function. JSMAWS bootstraps it in a Web Worker and provides a frozen `globalThis.JSMAWS` namespace:
+
+```javascript
+export default async function handler () {
+    const { server } = globalThis.JSMAWS;
+
+    // Read the incoming request
+    const req = await server.read({ only: 'req', decode: true });
+    if (!req) return;
+
+    const { method, url, headers } = JSON.parse(req.text);
+    await req.done();
+
+    // Send the response
+    await server.write('res', JSON.stringify({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ hello: 'world' }),
+    }));
+}
+```
+
+### Response Modes
+
+| Mode | Description | Example |
+|------|-------------|---------|
+| `response` | Single request/response | REST API, static data |
+| `stream` | Long-lived streaming (SSE, chunked) | Real-time updates, file downloads |
+| `bidi` | Bidirectional (WebSocket) | Chat, live collaboration |
+
+### JSMAWS Namespace
+
+`globalThis.JSMAWS` is a frozen object set by the bootstrap before the mod-app is imported:
+
+| Property | Description |
+|----------|-------------|
+| `server` | PolyTransport channel for request/response communication |
+| `env` | Frozen plain object of injected environment values (from `appEnv` config) |
+| `request` | Request metadata: `{ method, url, headers, identity }` |
+| `shutdownDeadline` | Promise that resolves to a deadline timestamp (ms) when shutdown is initiated |
 
 ### Security
-- Applets receive `maxChunkSize` limit
-- Chunks exceeding limit cause termination
-- Built-in applets get additional `config` object
-- User applets are sandboxed
 
-## Next Steps
+- Mod-apps run in isolated Web Workers with restricted permissions
+- Built-in mod-apps (like `@static`) receive an additional `config` object
+- User mod-apps receive only `maxChunkSize` from the server configuration
+- The authenticated identity is passed via `JSMAWS.request.identity` — mod-apps never see raw credential headers unless explicitly allowed by `requestFilter`
 
-- Add more example applets (file upload, JSON-RPC, etc.)
-- Add load testing clients
-- Add error handling examples
-- Add authentication examples
+## See Also
+
+- [`docs/mod-app-development.md`](../docs/mod-app-development.md) — Complete mod-app development guide
+- [`docs/configuration.md`](../docs/configuration.md) — Full configuration reference
+- [`docs/client-bidi-integration.md`](../docs/client-bidi-integration.md) — Client-side WebSocket/bidi integration
