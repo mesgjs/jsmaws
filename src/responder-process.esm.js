@@ -26,13 +26,7 @@ import { Channel } from '@poly-transport/channel.esm.js';
 import { PostMessageTransport } from '@poly-transport/transport/post-message.esm.js';
 import { SubProcess } from './sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
-
-/**
- * Bootstrap channel message types (duplicated from bootstrap.esm.js to avoid
- * importing that module in the responder's main thread - bootstrap.esm.js needs to run
- * itself unconditionally when imported, which we do not want to have happen here).
- */
-const BOOT_CHANNEL_MESSAGE_TYPES = ['setup', 'shutdown'];
+import { BOOT_CHANNEL_MESSAGE_TYPES } from './apps/bootstrap.esm.js';
 
 /**
  * Responder process class

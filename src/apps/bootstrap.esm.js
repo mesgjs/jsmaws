@@ -304,7 +304,10 @@ async function bootstrap () {
 	self.close();
 }
 
-// Rethrow any fatal bootstrap errors as uncaught exceptions.
-// The responder will see these as worker errors (independent of transport state)
-// and log them on the req-N channel as a con-error.
-bootstrap().catch((err) => { throw err; });
+if (typeof self !== 'undefined' && self.postMessage) {
+	// Execute the bootstrap when imported in web worker context.
+	// Rethrow any fatal bootstrap errors as uncaught exceptions.
+	// The responder will see these as worker errors (independent of transport state)
+	// and log them on the req-N channel as a con-error.
+	bootstrap().catch((err) => { throw err; });
+}

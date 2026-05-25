@@ -349,5 +349,7 @@ Deno.test('Logger: Multiple backends', async () => {
 	finally {
 		// Clean up TCP connection
 		await logger.close();
+		// Allow a little extra time
+		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
 });
