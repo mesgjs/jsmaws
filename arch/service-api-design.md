@@ -32,7 +32,7 @@ This is impractical for most real-world applications. The goal is a **modular, p
 2. **Pluggable adapters**: Each service type is implemented as an adapter module. Custom adapters can be provided by administrators.
 3. **Mod-app-facing API via IPC**: Mod-apps communicate with the service layer via a PolyTransport channel (`service`), not via direct service connections.
 4. **Scoped access**: Routes/route groups declare which services they can access. Mod-apps cannot access services not declared for their route or group.
-5. **Named service pools**: Services are assigned to named `servicePools` (workload profiles), not one pool per service. A single pool can serve multiple services; different pools can have different scaling strategies and process counts. This mirrors the responder pool model.
+5. **Named service pools**: Services are assigned to named `servicePools` (workload profiles), not one pool per service. A single pool can serve multiple services; different pools can have different process counts and timeouts. This mirrors the responder pool model.
 6. **Operator as process manager**: The operator manages service process pools using the same pool infrastructure as responder pools. Service processes report health and capacity via the operator <-> service transport `control` channel.
 7. **Mesgjs-compatible**: The API should be expressible in Mesgjs message-passing style.
 
@@ -53,7 +53,7 @@ This is impractical for most real-world applications. The goal is a **modular, p
   - Relay service requests and responses via service SP `SocketTransport` `req-N` channels and mod-app `PostMessageTransport` `service` channels
 - Service Pools
   - Track service SPs analogously to standard pool tracking of responder SPs
-  - Have scaling strategies (static / dynamic / on demand) like responder pools, etc.
+  - Have scaling patterns (fixed-size / baseline / zero-baseline) like responder pools, etc.
   - Have a list of service adaptors assigned to run on service SPs in the pool
 - Service SPs (unprivileged, long-lived)
   - Load adapters for all services configured in their pool
@@ -99,7 +99,7 @@ External Service (database, cache, API, etc.)
 
 Service requests are handled by adapters running in pools of long-lived service sub-process instances shared across all responder SPs. Service SPs have their own lifetimes and recycle independently of responder SPs. (A service SP due to recycle will respond "unavailable" to new requests (which will end up pushing those requests to newer service SPs) and recycle after their in-flight requests have completed processing.)
 
-The operator manages service process instances as **named pools** — the same pool infrastructure ([`src/pool-manager.esm.js`](../src/pool-manager.esm.js), [`src/process-manager.esm.js`](../src/process-manager.esm.js)) used for responder pools. Each named service pool (`servicePools`) is a workload profile: it declares scaling strategy, min/max process counts, and recycling policy. Multiple services can be assigned to the same pool (e.g., low-volume services sharing a small pool), or a single high-demand service can have its own dedicated pool.
+The operator manages service process instances as **named pools** — the same pool infrastructure ([`src/pool-manager.esm.js`](../src/pool-manager.esm.js), [`src/process-manager.esm.js`](../src/process-manager.esm.js)) used for responder pools. Each named service pool (`servicePools`) is a workload profile: it declares min/max process counts, and recycling policy. Multiple services can be assigned to the same pool (e.g., low-volume services sharing a small pool), or a single high-demand service can have its own dedicated pool.
 
 This means:
 
@@ -1172,7 +1172,7 @@ Redis/Valkey pub/sub and similar notification patterns require a persistent stre
 7. **Centralized service process via SocketTransport**
    - **Resolved**: Service adapters run in dedicated shared service process instances (Option D). JSMAWS manages the socket listen/connect steps (Unix domain socket or TCP loopback); `SocketTransport` wraps the resulting Deno socket connections. This caps connection count at `maxConnections × poolSize` regardless of responder count, and service connections survive responder recycling. The mod-app-facing `JSMAWS.service` API is identical regardless of pool size.
 8. **Per-service pools vs. named service pools**
-   - **Resolved**: Named `servicePools` (workload profiles). Multiple services can be assigned to the same pool; different pools can have different scaling strategies and process counts. This mirrors the responder pool model and avoids wasteful per-service singleton processes.
+   - **Resolved**: Named `servicePools` (workload profiles). Multiple services can be assigned to the same pool; different pools can have different process counts and timeouts. This mirrors the responder pool model and avoids wasteful per-service singleton processes.
 9. **Socket address assignment: static vs. dynamic**
    - **Resolved**: See Section 17.3.
 10. **Relay ID strategy**: Should the responder use monotonically incrementing integers (scoped per `SocketTransport` connection) or UUIDs for relay IDs? Monotonic integers are simpler and more compact; UUIDs are globally unique but larger. Since relay IDs are scoped to a single responder↔service-process connection and are short-lived, monotonic integers are likely sufficient.

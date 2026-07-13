@@ -252,24 +252,12 @@ This document assesses potential risks for fatal server component errors and def
            // Check required fields
            if (!poolConfig.has('minProcs')) errors.push(`Pool ${poolName}: missing minProcs`);
            if (!poolConfig.has('maxProcs')) errors.push(`Pool ${poolName}: missing maxProcs`);
-           if (!poolConfig.has('scaling')) errors.push(`Pool ${poolName}: missing scaling`);
            
            // Validate ranges
            const minProcs = poolConfig.at('minProcs', 0);
            const maxProcs = poolConfig.at('maxProcs', 0);
            if (minProcs > maxProcs) {
              errors.push(`Pool ${poolName}: minProcs (${minProcs}) > maxProcs (${maxProcs})`);
-           }
-           
-           // Validate scaling strategy
-           const scaling = poolConfig.at('scaling');
-           if (!['static', 'dynamic', 'ondemand'].includes(scaling)) {
-             errors.push(`Pool ${poolName}: invalid scaling strategy '${scaling}'`);
-           }
-           
-           // Static pools must have minProcs == maxProcs
-           if (scaling === 'static' && minProcs !== maxProcs) {
-             errors.push(`Pool ${poolName}: static scaling requires minProcs == maxProcs`);
            }
          }
        }

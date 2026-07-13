@@ -622,7 +622,6 @@ async function sendResponse(ipcSocket, response) {
   @router=[
     minProcs=1
     maxProcs=5
-    scaling=dynamic
     maxReqs=0
     idleTimeout=300
     reqTimeout=30
@@ -630,7 +629,6 @@ async function sendResponse(ipcSocket, response) {
   fast=[
     minProcs=2
     maxProcs=10
-    scaling=dynamic
     minWorkers=2
     maxWorkers=8
     maxReqs=1000
@@ -640,7 +638,6 @@ async function sendResponse(ipcSocket, response) {
   standard=[
     minProcs=1
     maxProcs=20
-    scaling=dynamic
     minWorkers=1
     maxWorkers=4
     maxReqs=100
@@ -650,7 +647,6 @@ async function sendResponse(ipcSocket, response) {
   stream=[
     minProcs=1
     maxProcs=50
-    scaling=ondemand
     maxWorkers=1
     maxReqs=1
     conTimeout=3600
@@ -678,11 +674,11 @@ async function sendResponse(ipcSocket, response) {
 - **standard**: General application requests
 - **stream**: Long-lived streaming connections
 
-**Scaling Strategies**:
+**Scaling Patterns**:
 
-- **static**: Fixed process count, no scaling
-- **dynamic**: Scale between min/max based on load
-- **ondemand**: Spawn on demand, kill after idle timeout
+- **Fixed-Size**: Fixed process count (`minProcs === maxProcs`), no scaling
+- **Baseline**: Scale between min/max based on load
+- **Zero-Baseline**: Spawn on demand (`minProcs === 0`), kill after idle timeout
 
 **Process Manager Behavior**:
 
@@ -728,7 +724,7 @@ class ProcessManager {
   
   async scaleDown() {
     for (const [poolName, config] of Object.entries(this.poolConfig)) {
-      if (config.scaling === 'static') continue;
+      if (config.minProcs === config.maxProcs) continue;
       
       const poolProcesses = this.getPoolProcesses(poolName);
       const idleProcesses = poolProcesses
@@ -754,7 +750,7 @@ class ProcessManager {
    - Uses pool manager for all pool operations
    - Process health monitoring and restart
    - Process recycling based on `maxReqs`
-3. Implement all scaling strategies (static, dynamic, ondemand)
+3. Implement unified scaling algorithm
 4. Implement affinity-aware request routing
 5. Implement request queuing
 6. Add metrics collection

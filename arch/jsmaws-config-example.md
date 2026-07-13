@@ -72,7 +72,6 @@ This document provides an example configuration for JSMAWS using the new pool-ba
 		fast=[
 			minProcs=2
 			maxProcs=10
-			scaling=dynamic
 			maxReqs=1000
 			idleTimeout=300
 			reqTimeout=5
@@ -82,7 +81,6 @@ This document provides an example configuration for JSMAWS using the new pool-ba
 		standard=[
 			minProcs=1
 			maxProcs=20
-			scaling=dynamic
 			maxReqs=100
 			idleTimeout=600
 			reqTimeout=60
@@ -92,7 +90,6 @@ This document provides an example configuration for JSMAWS using the new pool-ba
 		stream=[
 			minProcs=1
 			maxProcs=50
-			scaling=ondemand
 			maxReqs=1
 			conTimeout=3600
 			reqTimeout=0
@@ -174,9 +171,9 @@ extPool=[maxSize=50 timeout=60]
 **New (user-configurable pools)**:
 ```slid
 pools=[
-	fast=[minProcs=2 maxProcs=10 scaling=dynamic maxReqs=1000 reqTimeout=5]
-	standard=[minProcs=1 maxProcs=20 scaling=dynamic maxReqs=100 reqTimeout=60]
-	stream=[minProcs=1 maxProcs=50 scaling=ondemand maxReqs=1 conTimeout=3600]
+	fast=[minProcs=2 maxProcs=10 maxReqs=1000 reqTimeout=5]
+	standard=[minProcs=1 maxProcs=20 maxReqs=100 reqTimeout=60]
+	stream=[minProcs=1 maxProcs=50 maxReqs=1 conTimeout=3600]
 ]
 ```
 
@@ -207,7 +204,6 @@ pools=[
 
 ### 4. New Pool Parameters
 
-- **`scaling`**: Strategy for pool size management (`static`, `dynamic`, `ondemand`)
 - **`conTimeout`**: Connection timeout for long-lived connections (WebSocket, SSE)
 - **`reqTimeout`**: Per-request timeout (0 = no timeout)
 
@@ -253,7 +249,7 @@ For simple deployments, a single pool can handle all requests:
 	noSSL=@t
 	
 	pools=[
-		default=[minProcs=2 maxProcs=10 scaling=dynamic]
+		default=[minProcs=2 maxProcs=10]
 	]
 	
 	routes=[
@@ -275,7 +271,6 @@ For complex deployments with multiple workload types:
 		static=[
 			minProcs=4
 			maxProcs=4
-			scaling=static
 			maxReqs=10000
 			reqTimeout=2
 		]
@@ -284,7 +279,6 @@ For complex deployments with multiple workload types:
 		public=[
 			minProcs=2
 			maxProcs=15
-			scaling=dynamic
 			maxReqs=500
 			reqTimeout=30
 		]
@@ -293,7 +287,6 @@ For complex deployments with multiple workload types:
 		admin=[
 			minProcs=1
 			maxProcs=5
-			scaling=dynamic
 			maxReqs=100
 			reqTimeout=120
 		]
@@ -302,7 +295,6 @@ For complex deployments with multiple workload types:
 		batch=[
 			minProcs=0
 			maxProcs=3
-			scaling=ondemand
 			reqTimeout=600
 		]
 		
@@ -310,7 +302,6 @@ For complex deployments with multiple workload types:
 		websocket=[
 			minProcs=0
 			maxProcs=100
-			scaling=ondemand
 			maxReqs=1
 			conTimeout=7200
 		]
@@ -332,10 +323,9 @@ When updating existing `jsmaws.slid` files:
 
 1. **Add pool definitions** before routes section
 2. **Update route `class` to `pool`** and reference pool names
-3. **Add `scaling` parameter** to each pool (typically `dynamic`)
-4. **Rename parameters** to terser versions (`minSize` → `minProcs`, etc.)
-5. **Add `reqTimeout`** to pools (default: 30s if omitted)
-6. **For WebSocket routes**: Change `ws=@t` to `type=websocket` and use `stream` pool
+3. **Rename parameters** to terser versions (`minSize` → `minProcs`, etc.)
+4. **Add `reqTimeout`** to pools (default: 30s if omitted)
+5. **For WebSocket routes**: Change `ws=@t` to `type=websocket` and use `stream` pool
 
 ## See Also
 

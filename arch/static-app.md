@@ -429,7 +429,7 @@ appWorker.postMessage({
   ]
   
   pools=[
-    fast=[minProcs=2 maxProcs=10 scaling=dynamic reqTimeout=5]
+    fast=[minProcs=2 maxProcs=10 reqTimeout=5]
   ]
   
   routes=[

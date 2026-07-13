@@ -20,7 +20,6 @@ Based on research into servlet containers and application servers (see [`service
   fast=[
     minProcs=2
     maxProcs=10
-    scaling=dynamic
     maxReqs=1000
     idleTimeout=300
     reqTimeout=5
@@ -28,7 +27,6 @@ Based on research into servlet containers and application servers (see [`service
   standard=[
     minProcs=1
     maxProcs=20
-    scaling=dynamic
     maxReqs=100
     idleTimeout=600
     reqTimeout=60
@@ -36,7 +34,6 @@ Based on research into servlet containers and application servers (see [`service
   stream=[
     minProcs=1
     maxProcs=50
-    scaling=ondemand
     maxReqs=1
     conTimeout=3600
     reqTimeout=0
@@ -48,9 +45,8 @@ Based on research into servlet containers and application servers (see [`service
 
 ### Required Parameters
 
-- **`minProcs`**: Minimum number of processes (0 for ondemand)
+- **`minProcs`**: Minimum number of processes (0 for on-demand)
 - **`maxProcs`**: Maximum number of processes
-- **`scaling`**: Scaling strategy (`static`, `dynamic`, `ondemand`)
 
 ### Optional Parameters
 
@@ -72,7 +68,7 @@ Based on research into servlet containers and application servers (see [`service
   - Omit or set to `0` for unlimited
   
 - **`idleTimeout`**: Seconds before idle process exits (default: 300)
-  - Only applies when `scaling=dynamic` or `scaling=ondemand`
+  - Only applies when `minProcs < maxProcs` (dynamic scaling)
   - Processes beyond `minProcs` exit after being idle this long
   - **Note**: This is process idle timeout, not connection idle timeout
 
@@ -131,7 +127,6 @@ JSMAWS implements a three-tier timeout hierarchy for request processing and conn
     standard=[
       minProcs=1
       maxProcs=20
-      scaling=dynamic
       reqTimeout=60     /* Override: longer timeout for standard pool */
     ]
     stream=[
@@ -183,10 +178,12 @@ The `lifecycle` parameter mentioned in research is **redundant** - it's derived 
 - `maxReqs=1` → oneshot lifecycle (process exits after one request)
 - `maxReqs>1` or omitted → persistent lifecycle (process handles multiple requests)
 
-## Scaling Strategies
+## Pool Patterns (Unified Scaling)
 
-### `static`
-- Fixed number of processes (`minProcs` must equal `maxProcs`)
+The unified scaling algorithm adapts its behavior based on configuration parameters, supporting three primary pool patterns:
+
+### Fixed-Size Pool Pattern
+- Fixed number of processes (`minProcs` equals `maxProcs`)
 - Processes never scale up or down
 - Simplest, most predictable
 - Best for: Consistent, predictable workloads
@@ -195,11 +192,10 @@ The `lifecycle` parameter mentioned in research is **redundant** - it's derived 
 worker=[
   minProcs=4
   maxProcs=4
-  scaling=static
-]
+ ]
 ```
 
-### `dynamic`
+### Baseline Pool Pattern
 - Scales between `minProcs` and `maxProcs` based on load
 - Spawns new processes when all busy
 - Kills idle processes after `idleTimeout`
@@ -209,13 +205,12 @@ worker=[
 api=[
   minProcs=2
   maxProcs=20
-  scaling=dynamic
   idleTimeout=300
 ]
 ```
 
-### `ondemand`
-- Spawns processes only when needed (`minProcs` typically 0)
+### Zero-Baseline Pool Pattern
+- Spawns processes only when needed (`minProcs` is 0)
 - Kills processes after `idleTimeout` of inactivity
 - Highest resource efficiency, higher latency on first request
 - Best for: Sporadic, low-frequency workloads
@@ -224,7 +219,6 @@ api=[
 batch=[
   minProcs=0
   maxProcs=5
-  scaling=ondemand
   idleTimeout=60
 ]
 ```
@@ -236,13 +230,12 @@ batch=[
 fast=[
   minProcs=2
   maxProcs=10
-  scaling=dynamic
   minWorkers=2
   maxWorkers=8
   maxReqs=1000
   idleTimeout=300
   reqTimeout=5
-]
+ ]
 ```
 
 **Characteristics**:
@@ -257,7 +250,6 @@ fast=[
 standard=[
   minProcs=1
   maxProcs=20
-  scaling=dynamic
   minWorkers=1
   maxWorkers=4
   maxReqs=100
@@ -280,7 +272,6 @@ standard=[
 stream=[
   minProcs=1
   maxProcs=50
-  scaling=ondemand
   maxWorkers=1
   maxReqs=1
   reqTimeout=0
@@ -362,7 +353,6 @@ These are more similar - both are request-response pools. The difference is **wo
    - `minProcs >= 0`
    - `maxProcs > 0`
    - `minProcs <= maxProcs`
-   - For `scaling=static`: `minProcs == maxProcs`
 4. **Timeout values**: All timeouts >= 0
 5. **maxReqs**: If specified, must be > 0
 
@@ -370,10 +360,7 @@ These are more similar - both are request-response pools. The difference is **wo
 
 ```slid
 /* ERROR: minProcs > maxProcs */
-bad=[minProcs=10 maxProcs=5 scaling=dynamic]
-
-/* ERROR: static requires minProcs == maxProcs */
-bad=[minProcs=2 maxProcs=10 scaling=static]
+bad=[minProcs=10 maxProcs=5]
 
 /* ERROR: undefined pool reference */
 [(routes=[
@@ -388,9 +375,9 @@ If no pools are defined, use these defaults:
 ```slid
 [(
 pools=[
-  fast=[minProcs=2 maxProcs=10 scaling=dynamic minWorkers=2 maxWorkers=8 maxReqs=1000 reqTimeout=5]
-  standard=[minProcs=1 maxProcs=20 scaling=dynamic minWorkers=1 maxWorkers=4 maxReqs=100 reqTimeout=60]
-  stream=[minProcs=1 maxProcs=50 scaling=ondemand maxWorkers=1 maxReqs=1 conTimeout=3600]
+  fast=[minProcs=2 maxProcs=10 minWorkers=2 maxWorkers=8 maxReqs=1000 reqTimeout=5]
+  standard=[minProcs=1 maxProcs=20 minWorkers=1 maxWorkers=4 maxReqs=100 reqTimeout=60]
+  stream=[minProcs=1 maxProcs=50 maxWorkers=1 maxReqs=1 conTimeout=3600]
 ]
 
 /* Response chunking configuration (global defaults) */
@@ -408,7 +395,7 @@ chunking=[
 ### Minimal (Single Pool)
 ```slid
 [(pools=[
-  default=[minProcs=2 maxProcs=10 scaling=dynamic minWorkers=1 maxWorkers=4]
+  default=[minProcs=2 maxProcs=10 minWorkers=1 maxWorkers=4]
 ])]
 
 [(routes=[
@@ -419,9 +406,9 @@ chunking=[
 ### Standard (Three Pools)
 ```slid
 [(pools=[
-  fast=[minProcs=2 maxProcs=10 scaling=dynamic minWorkers=2 maxWorkers=8 maxReqs=1000 reqTimeout=5]
-  standard=[minProcs=1 maxProcs=20 scaling=dynamic minWorkers=1 maxWorkers=4 maxReqs=100 reqTimeout=60]
-  stream=[minProcs=1 maxProcs=50 scaling=ondemand maxWorkers=1 maxReqs=1 conTimeout=3600]
+  fast=[minProcs=2 maxProcs=10 minWorkers=2 maxWorkers=8 maxReqs=1000 reqTimeout=5]
+  standard=[minProcs=1 maxProcs=20 minWorkers=1 maxWorkers=4 maxReqs=100 reqTimeout=60]
+  stream=[minProcs=1 maxProcs=50 maxWorkers=1 maxReqs=1 conTimeout=3600]
 ])]
 
 [(routes=[
@@ -435,19 +422,19 @@ chunking=[
 ```slid
 [(pools=[
   /* Static files - high capacity, minimal overhead */
-  static=[minProcs=4 maxProcs=4 scaling=static minWorkers=4 maxWorkers=8 maxReqs=10000 reqTimeout=2]
+  static=[minProcs=4 maxProcs=4 minWorkers=4 maxWorkers=8 maxReqs=10000 reqTimeout=2]
   
   /* Public API - moderate capacity, strict timeout */
-  public=[minProcs=2 maxProcs=15 scaling=dynamic minWorkers=1 maxWorkers=4 maxReqs=500 reqTimeout=30]
+  public=[minProcs=2 maxProcs=15 minWorkers=1 maxWorkers=4 maxReqs=500 reqTimeout=30]
   
   /* Admin API - low capacity, longer timeout */
-  admin=[minProcs=1 maxProcs=5 scaling=dynamic minWorkers=1 maxWorkers=2 maxReqs=100 reqTimeout=120]
+  admin=[minProcs=1 maxProcs=5 minWorkers=1 maxWorkers=2 maxReqs=100 reqTimeout=120]
   
   /* Background jobs - on-demand, long timeout */
-  batch=[minProcs=0 maxProcs=3 scaling=ondemand minWorkers=1 maxWorkers=1 reqTimeout=600]
+  batch=[minProcs=0 maxProcs=3 minWorkers=1 maxWorkers=1 reqTimeout=600]
   
   /* WebSocket - per-connection processes */
-  websocket=[minProcs=0 maxProcs=100 scaling=ondemand maxWorkers=1 maxReqs=1 conTimeout=7200]
+  websocket=[minProcs=0 maxProcs=100 maxWorkers=1 maxReqs=1 conTimeout=7200]
 ])]
 
 [(routes=[
