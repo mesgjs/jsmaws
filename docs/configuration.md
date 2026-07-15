@@ -208,6 +208,7 @@ routes=[
 | `authn` | string \| array | Route-level authn scalar filter (overrides group/top-level) |
 | `role` | string \| array | Required role(s) for this route |
 | `appEnv` | object | Route-level mod-app environment overrides (see [`appEnv`](#mod-app-environment-injection-appenv)) |
+| `persistent` | boolean | Set `@t` to run the mod-app in a persistent, long-lived worker (overrides pool) |
 | `reqTimeout` | number | Request timeout in seconds (overrides pool/global) |
 | `idleTimeout` | number | Idle timeout between frames in seconds (overrides pool/global) |
 | `conTimeout` | number | Connection lifetime timeout in seconds (overrides pool/global) |
@@ -382,6 +383,9 @@ Pools are named, configurable groups of sub-processes. Routes reference pools by
 | `maxWorkers` | number | `4` | Maximum concurrent workers per process |
 | `maxReqs` | number | — | Maximum requests per process before recycling (omit or `0` for unlimited) |
 | `resType` | array | all | Allowed response types: `response`, `stream`, `bidi` |
+| `persistent` | boolean | `@f` | Set `@t` to make all mod-apps running in this pool persistent (long-lived workers) |
+| `maxWorkerReqs` | number | — | Maximum requests a persistent worker handles before being gracefully recycled (omit or `0` for unlimited) |
+| `workerIdleTimeout` | number | — | Idle timeout in seconds before terminating an idle persistent worker (omit or `0` for unlimited) |
 | `appEnv` | object | — | Pool-level mod-app environment values (see [`appEnv`](#mod-app-environment-injection-appenv)) |
 
 **`resType`** restricts which response modes a pool accepts. Omit to allow all types. Examples:
@@ -389,6 +393,13 @@ Pools are named, configurable groups of sub-processes. Routes reference pools by
 - `resType=[stream bidi]` — streaming and bidirectional only (no regular responses)
 
 **`maxReqs=1`** creates one-shot processes (each process handles exactly one request then exits). Combined with `maxWorkers=1`, this is the recommended configuration for WebSocket/streaming pools.
+
+### Persistent Workers
+
+When `persistent=@t` is configured for a pool (or a route), the responder process maintains a registry of persistent workers. Instead of spawning a new Web Worker for every request, idle persistent workers are kept alive and reused sequentially for subsequent requests.
+
+* **`maxWorkerReqs`**: To mitigate potential memory leaks in long-running mod-apps, you can configure `maxWorkerReqs` (e.g., `10000`). The responder process will gracefully recycle the worker after it has handled the specified number of requests.
+* **`workerIdleTimeout`**: To free up system resources during periods of low traffic, you can configure `workerIdleTimeout` (e.g., `300` for 5 minutes). Idle persistent workers that have not handled any requests for this duration will be terminated.
 
 ### Scaling Strategies
 

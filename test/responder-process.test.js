@@ -127,7 +127,9 @@ Deno.test('ResponderProcess - availWorkers reflects capacity', () => {
 
 	// Simulate active requests
 	proc.activeRequests.set('req-1', {});
+	proc.activeRequests.set({}, {});
 	proc.activeRequests.set('req-2', {});
+	proc.activeRequests.set({}, {});
 	assertEquals(proc.availWorkers, 8);
 
 	proc.activeRequests.clear();
@@ -287,13 +289,13 @@ Deno.test('ResponderProcess - handleShutdown sets isShuttingDown', async () => {
 
 	try {
 		// Create a mock shutdown message
-		const mockMsg = {
+		const mockShutdownMsg = {
 			text: JSON.stringify({ timeout: 0 }),
 			done: () => {},
 			process: () => {},
 		};
 
-		await proc.handleShutdown(mockMsg);
+		await proc.handleShutdown(mockShutdownMsg);
 
 		assertEquals(proc.isShuttingDown, true);
 		assertEquals(exitCalled, true);
@@ -339,7 +341,9 @@ Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 		// Fill capacity
 		proc.maxConcurrentRequests = 2;
 		proc.activeRequests.set('req-existing-1', { timeout: null, worker: null, transport: null });
+		proc.activeRequests.set({}, {});
 		proc.activeRequests.set('req-existing-2', { timeout: null, worker: null, transport: null });
+		proc.activeRequests.set({}, {});
 
 		// Request the req-0 channel from both sides simultaneously (like control channel setup)
 		const [operatorReqChannel, serviceReqChannel] = await Promise.all([

@@ -551,6 +551,9 @@ export class PoolManager {
 			idleTimeout: config.idleTimeout ?? 300,
 			reqTimeout: config.reqTimeout ?? 30,
 			conTimeout: config.conTimeout ?? 60,
+			persistent: config.persistent ?? false,
+			maxWorkerReqs: config.maxWorkerReqs ?? 0,
+			workerIdleTimeout: config.workerIdleTimeout ?? 0,
 		};
 
 		// Validation rules

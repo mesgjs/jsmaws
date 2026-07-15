@@ -72,6 +72,16 @@ Based on research into servlet containers and application servers (see [`service
   - Processes beyond `minProcs` exit after being idle this long
   - **Note**: This is process idle timeout, not connection idle timeout
 
+- **`persistent`**: Whether mod-apps in this pool run in persistent, long-lived workers (default: false)
+  - If true, workers are kept alive and reused for subsequent requests, eliminating startup overhead.
+  - Can also be configured at the individual route level.
+
+- **`maxWorkerReqs`**: Maximum requests a persistent worker handles before recycling (default: 0 / disabled)
+  - Used to mitigate memory leaks in persistent mod-apps by gracefully recycling workers.
+
+- **`workerIdleTimeout`**: Seconds before an idle persistent worker is terminated (default: 0 / disabled)
+  - Cleans up resources by terminating persistent workers that have been idle longer than this duration.
+
 - **`resType`**: Allowed response types (default: all types allowed)
   - List of allowed response types: `response`, `stream`, `bidi`
   - Omit to allow all types (backward compatible)

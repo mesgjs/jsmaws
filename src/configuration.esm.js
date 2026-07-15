@@ -227,6 +227,38 @@ export class Configuration {
 	}
 
 	/**
+	 * Get the max worker requests for a pool.
+	 * @param {string} poolName Pool name
+	 * @returns {number} Max worker requests (0 = disabled)
+	 */
+	getMaxWorkerReqs (poolName) {
+		const poolConfig = this.getPoolConfig(poolName);
+		return poolConfig?.maxWorkerReqs ?? 0;
+	}
+
+	/**
+	 * Get the worker idle timeout for a pool.
+	 * @param {string} poolName Pool name
+	 * @returns {number} Worker idle timeout in seconds (0 = disabled)
+	 */
+	getWorkerIdleTimeout (poolName) {
+		const poolConfig = this.getPoolConfig(poolName);
+		return poolConfig?.workerIdleTimeout ?? 0;
+	}
+
+	/**
+	 * Check if a route or pool is persistent.
+	 * @param {string} poolName Pool name
+	 * @param {Object|null} routeSpec Route specification (optional, plain object)
+	 * @returns {boolean} True if persistent
+	 */
+	isPersistent (poolName, routeSpec = null) {
+		if (routeSpec?.persistent === true) return true;
+		const poolConfig = this.getPoolConfig(poolName);
+		return poolConfig?.persistent === true;
+	}
+
+	/**
 	 * Get timeout configuration with hierarchy: route > pool > global
 	 * @param {string} poolName Pool name
 	 * @param {Object|null} routeSpec Route specification (optional, plain object)

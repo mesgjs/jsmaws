@@ -28,18 +28,23 @@ import { SubProcess } from './sub-process.esm.js';
 import { REQ_CHANNEL_MESSAGE_TYPES } from './request-channel-pool.esm.js';
 import { BOOT_CHANNEL_MESSAGE_TYPES } from './apps/bootstrap.esm.js';
 
+const APP_CHANNEL_MESSAGE_TYPES = ['req', 'res', 'res-frame', 'res-error', 'bidi-frame'];
+
 /**
  * Responder process class
  * Spawns mod-app workers on-demand to handle requests
  */
 export class ResponderProcess extends SubProcess {
+	static WORKER_IDLE_CHECK_INTERVAL = 10000; // 10s
+
 	constructor (processId, poolName) {
 		super('responder', processId);
 		if (typeof poolName !== 'string' || !poolName) throw new Error('ResponderProcess missing required pool name');
 		this.poolName = poolName;
 
 		// Track active requests and workers
-		this.activeRequests = new Map(); // requestId -> { worker, transport, reqChannel, timeout, isStreaming }
+		this.activeRequests = new Map(); // requestId, worker -> { worker, transport, reqChannel, timeout, isStreaming }
+		this.persistentWorkers = new Map(); // appPath -> Array<WorkerInfo>
 		this.channelMap = new Map(); // channel -> requestId
 		this.requestCount = 0;
 		this.maxConcurrentRequests = 10; // Will be set from pool config
@@ -52,13 +57,42 @@ export class ResponderProcess extends SubProcess {
 
 		// Drain promise for shutdown (resolved when all requests complete)
 		this.drainResolvers = null;
+		this.workerIdleCleanupInterval = null;
 	}
 
 	/**
 	 * Available workers (concurrent request slots remaining)
 	 */
 	get availWorkers () {
-		return this.maxConcurrentRequests - this.activeRequests.size;
+		return this.maxConcurrentRequests - this.activeRequests.size / 2;
+	}
+
+	/**
+	 * Clean up idle persistent workers that have exceeded the idle timeout.
+	 * @param {number} timeoutSeconds - Idle timeout in seconds
+	 */
+	#cleanupIdlePersistentWorkers (timeoutSeconds) {
+		const now = Date.now();
+		const timeoutMs = timeoutSeconds * 1000;
+
+		for (const [app, workers] of this.persistentWorkers.entries()) {
+			const activeWorkers = [];
+
+			for (const w of workers) {
+				if (w.status === 'idle' && (now - w.lastUsed) >= timeoutMs) {
+					console.debug(`[${this.processId}] Terminating idle persistent worker for "${app}" (idle for ${Math.round((now - w.lastUsed) / 1000)}s)`);
+					w.worker.terminate();
+					w.transport.stop({ disconnected: true }).catch(() => {});
+				} else {
+					activeWorkers.push(w);
+				}
+			}
+			if (activeWorkers.length === 0) {
+				this.persistentWorkers.delete(app);
+			} else {
+				this.persistentWorkers.set(app, activeWorkers);
+			}
+		}
 	}
 
 	/**
@@ -73,6 +107,7 @@ export class ResponderProcess extends SubProcess {
 	 */
 	cleanupRequest (id) {
 		const requestInfo = this.activeRequests.get(id);
+
 		if (!requestInfo || requestInfo.cleaningUp) return;
 		requestInfo.cleaningUp = true;
 
@@ -100,10 +135,23 @@ export class ResponderProcess extends SubProcess {
 
 		// Update max concurrent requests from pool config
 		const poolConfig = this.config.getPoolConfig(this.poolName);
+
 		if (poolConfig) {
 			this.maxConcurrentRequests = poolConfig.maxWorkers ?? 10;
 		} else {
 			console.warn(`[${this.processId}] Pool config not found for '${this.poolName}', keeping default ${this.maxConcurrentRequests}`);
+		}
+
+		// Start or stop persistent worker idle cleanup timer as needed
+		const workerIdleTimeout = this.config.getWorkerIdleTimeout(this.poolName);
+
+		if (workerIdleTimeout > 0 && !this.workerIdleCleanupInterval) {
+			this.workerIdleCleanupInterval = setInterval(() => {
+				this.#cleanupIdlePersistentWorkers(workerIdleTimeout);
+			}, ResponderProcess.WORKER_IDLE_CHECK_INTERVAL); // Check every 10 seconds
+		} else if (this.workerIdleCleanupInterval && !workerIdleTimeout) {
+			clearInterval(this.workerIdleCleanupInterval);
+			this.workerIdleCleanupInterval = null;
 		}
 
 		console.debug(`[${this.processId}] Configuration updated`);
@@ -122,11 +170,12 @@ export class ResponderProcess extends SubProcess {
 
 		// Send health response via control channel
 		const availableWorkers = this.availWorkers;
+
 		await this.controlChannel.write('health-response', JSON.stringify({
 			status: 'ok',
 			availableWorkers,
 			totalWorkers: this.maxConcurrentRequests,
-			activeRequests: this.activeRequests.size,
+			activeRequests: this.activeRequests.size / 2,
 			uptime: Math.floor(performance.now() / 1000),
 		}));
 
@@ -148,6 +197,7 @@ export class ResponderProcess extends SubProcess {
 		(async () => {
 			while (true) {
 				const msg = await reqChannel.read({ only: 'req' });
+
 				if (!msg) break;
 				await msg.process(async () => {
 					await this.#onWebRequest(reqChannel, msg.data.decode());
@@ -161,8 +211,10 @@ export class ResponderProcess extends SubProcess {
 		(async () => {
 			// console.log('*** hndReqCh (res client -> app) bidi-relay ready');
 			let requestId = null; // Unknown until channel is assigned
+
 			while (true) {
 				const msg = await reqChannel.read({ only: 'bidi-frame', dechunk: false });
+
 				if (!msg) break;
 				// console.log('*** Res Cli->App bidi relay', msg.dataSize);
 				requestId ??= this.channelMap.get(reqChannel);
@@ -174,26 +226,102 @@ export class ResponderProcess extends SubProcess {
 	}
 
 	/**
+	 * Handle request completion for persistent or one-shot workers.
+	 * @param {string|number} id - Request ID
+	 */
+	async #handleRequestCompletion (id) {
+		const requestInfo = this.activeRequests.get(id);
+
+		if (!requestInfo) return;
+
+		// Clear request timeout
+		clearTimeout(requestInfo.timeout);
+
+		// Get worker info if persistent
+		const isPersistent = requestInfo.isPersistent;
+		const workers = (isPersistent && this.persistentWorkers.get(requestInfo.app)) || [];
+		const workerInfo = isPersistent && workers.find((w) => w.worker === requestInfo.worker);
+
+		if (workerInfo) {
+			// Check maxWorkerReqs recycling
+			const maxWorkerReqs = this.config.getMaxWorkerReqs(this.poolName);
+			const shouldRecycle = maxWorkerReqs > 0 && workerInfo.reqCount >= maxWorkerReqs;
+
+			if (shouldRecycle) {
+				console.debug(`[${this.processId}] Recycling persistent worker (reached maxWorkerReqs: ${maxWorkerReqs})`);
+				this.cleanupRequest(id);
+			} else {
+				// Mark as resetting so it won't be selected for new requests while resetting
+				workerInfo.status = 'resetting';
+
+				// Close and reopen appChannel, and reassign message types
+				if (workerInfo.appChannel) {
+					await workerInfo.appChannel.close().catch(() => {});
+				}
+
+				try {
+					const appChannel = await workerInfo.transport.requestChannel('app');
+					await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
+					workerInfo.appChannel = appChannel;
+					workerInfo.status = 'idle';
+					workerInfo.lastUsed = Date.now();
+				} catch (err) {
+					console.error(`[${this.processId}] Failed to reset appChannel for persistent worker:`, err);
+					this.cleanupRequest(id);
+					return;
+				}
+
+				// Remove from active requests so capacity is updated, but do NOT terminate worker
+				this.activeRequests.delete(requestInfo.worker);
+				this.activeRequests.delete(id);
+			}
+		} else {
+			// One-shot worker: cleanup immediately
+			this.cleanupRequest(id);
+		}
+	}
+
+	/**
 	 * Handle shutdown request from operator.
 	 * @param {object} msg - PolyTransport message
 	 */
 	async handleShutdown (msg) {
 		const { deadline, spread } = this.shutdownMesgDeadline(msg);
+
 		msg?.done();
 
 		const remainingMs = Math.max(0, deadline - Date.now());
 		const remainingSec = Math.ceil(remainingMs / 1000);
+
 		console.info(`[${this.processId}] Shutdown requested (${remainingSec}s)`);
 
 		const modAppDeadline = deadline - (spread ?? 0) * 1000;
 
 		this.isShuttingDown = true;
 
+		// Clear persistent worker idle cleanup timer
+		if (this.workerIdleCleanupInterval) {
+			clearInterval(this.workerIdleCleanupInterval);
+			this.workerIdleCleanupInterval = null;
+		}
+
+		// Terminate all idle persistent workers immediately
+		for (const [app, workers] of this.persistentWorkers.entries()) {
+			for (const w of workers) {
+				if (w.status === 'idle') {
+					console.debug(`[${this.processId}] Terminating idle persistent worker for "${app}" during shutdown`);
+					w.worker.terminate();
+					w.transport.stop({ disconnected: true }).catch(() => {});
+				}
+			}
+		}
+		this.persistentWorkers.clear();
+
 		// Phase 1: notify mod-apps of impending shutdown via bootstrap channel
 		// This replaces the old "graceful stop" which immediately made new channel writes impossible.
 		// Instead, we notify mod-apps and let them finish their work before the deadline.
-		for (const requestInfo of this.activeRequests.values()) {
-			if (requestInfo.bootstrapChannel) {
+		for (const [key, requestInfo] of this.activeRequests.entries()) {
+			if (typeof key !== 'object' && requestInfo.bootstrapChannel) {
 				await requestInfo.bootstrapChannel.write('shutdown', JSON.stringify({ deadline: modAppDeadline }))
 					.catch(() => {});
 			}
@@ -204,17 +332,19 @@ export class ResponderProcess extends SubProcess {
 			// Set up periodic reporting
 			const reportInterval = setInterval(() => {
 				if (this.activeRequests.size > 0) {
-					console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active request(s)...`);
+					console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size / 2} active request(s)...`);
 				}
 			}, 1000);
 
 			// Create drain promise (resolved by #onAppTransportStopped when all requests complete)
 			this.drainResolvers = Promise.withResolvers();
+
 			const drainPromise = this.drainResolvers.promise;
 
 			// Create deadline promise
 			const deadlinePromise = new Promise((resolve) => {
 				const remaining = Math.max(0, modAppDeadline - Date.now());
+
 				setTimeout(resolve, remaining);
 			});
 
@@ -228,7 +358,9 @@ export class ResponderProcess extends SubProcess {
 		// and triggers the 'stopped' event, which handles 503 + state cleanup.
 		// Collect the disconnected-stop promises so we can await them below.
 		const stopPromises = [];
+
 		for (const [id, requestInfo] of this.activeRequests.entries()) {
+			if (typeof id === 'object') continue;
 			console.debug(`[${this.processId}] Hard-terminating worker for request ${id}`);
 			requestInfo.worker?.terminate();
 			if (requestInfo.transport) {
@@ -261,6 +393,7 @@ export class ResponderProcess extends SubProcess {
 	 */
 	async #onAppResError (id, errorJson, requestInfo) {
 		let errorData;
+
 		try {
 			errorData = JSON.parse(errorJson);
 		} catch (_) {
@@ -291,6 +424,7 @@ export class ResponderProcess extends SubProcess {
 
 		// Check if pool allows this response type
 		const allowedTypes = this.config.getAllowedResponseTypes(this.poolName);
+
 		if (!allowedTypes.has(effectiveType)) {
 			console.error(
 				`[${this.processId}] Pool "${this.poolName}" does not allow ` +
@@ -351,8 +485,10 @@ export class ResponderProcess extends SubProcess {
 	 */
 	#onAppTransportStopped (id) {
 		const requestInfo = this.activeRequests.get(id);
+
 		if (!requestInfo) return; // Already cleaned up
-		const { timeout, idleTimeout, connectionTimeout, appChannel, reqChannel, responseStarted } = requestInfo;
+
+		const { app, appChannel, connectionTimeout, idleTimeout, isPersistent, reqChannel, responseStarted, timeout, worker } = requestInfo;
 
 		// Clear all timers (request, idle, connection timeouts)
 		clearTimeout(timeout);
@@ -364,7 +500,21 @@ export class ResponderProcess extends SubProcess {
 		}
 
 		this.channelMap.delete(reqChannel);
+		this.activeRequests.delete(worker);
 		this.activeRequests.delete(id);
+
+		// Also remove from persistent workers registry if present
+		if (isPersistent) {
+			const workers = this.persistentWorkers.get(app);
+			const index = workers.findIndex((w) => w.worker === worker);
+
+			if (index !== -1) {
+				const lastWorker = workers.pop();
+
+				if (index !== workers.length) workers[index] = lastWorker;
+				console.debug(`[${this.processId}] Removed persistent worker for "${app}" from registry (transport stopped)`);
+			}
+		}
 
 		// Resolve drain promise if all requests are complete (for shutdown)
 		if (this.drainResolvers && this.activeRequests.size === 0) {
@@ -387,6 +537,7 @@ export class ResponderProcess extends SubProcess {
 		}
 
 		const { appChannel, mode } = requestInfo;
+
 		if (mode !== 'bidi') {
 			console.warn(`[${this.processId}] Bidi frame for non-bidi request ${requestId}`);
 			return;
@@ -422,13 +573,14 @@ export class ResponderProcess extends SubProcess {
 
 		try {
 			// Check if we're at capacity
-			if (this.activeRequests.size >= this.maxConcurrentRequests) {
-				console.debug(`[${this.processId}] At capacity (${this.activeRequests.size}/${this.maxConcurrentRequests}), returning 503`);
+			if (this.activeRequests.size / 2 >= this.maxConcurrentRequests) {
+				console.debug(`[${this.processId}] At capacity (${this.activeRequests.size / 2}/${this.maxConcurrentRequests}), returning 503`);
 				await this.#sendErrorResponse(reqChannel, id, 503, 'Service Unavailable');
 				return;
 			}
 
 			const urlObj = new URL(url);
+
 			console.debug(`[${this.processId}] Request: ${method?.toUpperCase()} ${urlObj.pathname} -> ${app}`);
 
 			// Resolve timeout configuration with hierarchy: route > pool > global
@@ -444,9 +596,62 @@ export class ResponderProcess extends SubProcess {
 			// Compute effective appEnv for this request (global → pool → route merge)
 			const appEnv = this.config.getEffectiveAppEnv(routeSpec, this.poolName);
 
-			// Spawn mod-app worker and establish PostMessageTransport
-			const { worker, transport, c2cChannel, appChannel, bootstrapChannel } =
-				await this.#spawnAppWorker(app, mode, appEnv);
+			const isPersistent = this.config.isPersistent(this.poolName, routeSpec);
+
+			let worker, transport, c2cChannel, appChannel, bootstrapChannel, workerInfo;
+
+			if (isPersistent) {
+				const existingWorkers = this.persistentWorkers.get(app), workers = existingWorkers || [];
+
+				workerInfo = workers.find((w) => w.status === 'idle');
+
+				if (workerInfo) {
+					workerInfo.status = 'busy';
+					workerInfo.reqCount++;
+					workerInfo.lastUsed = Date.now();
+					worker = workerInfo.worker;
+					transport = workerInfo.transport;
+					c2cChannel = workerInfo.c2cChannel;
+					appChannel = workerInfo.appChannel;
+					bootstrapChannel = workerInfo.bootstrapChannel;
+					console.debug(`[${this.processId}] Reusing idle persistent worker for "${app}" (reqCount: ${workerInfo.reqCount})`);
+				} else {
+					// Spawn new persistent worker
+					const spawned = await this.#spawnAppWorker(app, mode, appEnv, true);
+
+					worker = spawned.worker;
+					transport = spawned.transport;
+					c2cChannel = spawned.c2cChannel;
+					appChannel = spawned.appChannel;
+					bootstrapChannel = spawned.bootstrapChannel;
+
+					workerInfo = {
+						worker,
+						transport,
+						c2cChannel,
+						appChannel,
+						bootstrapChannel,
+						status: 'busy',
+						reqCount: 1,
+						lastUsed: Date.now(),
+					};
+
+					if (!existingWorkers) {
+						this.persistentWorkers.set(app, workers);
+					}
+					workers.push(workerInfo);
+					console.debug(`[${this.processId}] Spawned new persistent worker for "${app}"`);
+				}
+			} else {
+				// One-shot worker
+				const spawned = await this.#spawnAppWorker(app, mode, appEnv, false);
+
+				worker = spawned.worker;
+				transport = spawned.transport;
+				c2cChannel = spawned.c2cChannel;
+				appChannel = spawned.appChannel;
+				bootstrapChannel = spawned.bootstrapChannel;
+			}
 
 			// Set up request timeout: send error first (sets responseStarted), then abort.
 			const timeout = reqTimeout ? setTimeout(() => {
@@ -458,9 +663,11 @@ export class ResponderProcess extends SubProcess {
 			}, reqTimeout * 1000) : null;
 
 			// Track active request
-			this.activeRequests.set(id, {
+			const reqInfo = {
+				app,
 				appChannel,
 				bootstrapChannel,
+				isPersistent,
 				isStreaming: false,
 				mode,
 				reqChannel,
@@ -470,17 +677,16 @@ export class ResponderProcess extends SubProcess {
 				transport,
 				routeSpec,
 				worker,
-			});
+			};
+
+			this.activeRequests.set(id, reqInfo);
+			this.activeRequests.set(worker, reqInfo);
 			this.channelMap.set(reqChannel, id);
 
 			// Register the general worker-termination handler on the mod-app transport.
 			// This is the single authoritative path for 503 + state cleanup when the
 			// transport stops for any reason (graceful, disconnected, or shutdown).
 			transport.addEventListener('stopped', () => this.#onAppTransportStopped(id));
-
-			// Forward mod-app C2C console output to operator via the req-N channel
-			// (con-* message types, not the C2C channel — associates output with the request)
-			this.#startC2CForwarding(id, c2cChannel, reqChannel);
 
 			// Handle worker errors: send 500 (sets responseStarted), then abort.
 			// The transport 'stopped' handler will not send a duplicate 503 because
@@ -534,15 +740,104 @@ export class ResponderProcess extends SubProcess {
 	}
 
 	/**
+	 * Start reading response metadata and body from the mod-app channel,
+	 * and relay to the operator via req-N channel.
+	 * @param {string|number} id - Request ID
+	 * @param {object} appChannel - The 'app' channel from PostMessageTransport
+	 */
+	#processAppResponse (id, appChannel) {
+		const requestInfo = this.activeRequests.get(id);
+
+		if (!requestInfo) return;
+
+		const { reqChannel, mode } = requestInfo;
+
+		// Loop 1: response metadata (dechunked — each read() returns one complete message)
+		// 'res' carries HTTP response status + headers (sent once, before any res-frame chunks)
+		// 'res-error' carries error response (sent instead of res + res-frame)
+		(async () => {
+			while (true) {
+				const msg = await appChannel.read({ only: ['res', 'res-error'] });
+
+				if (!msg) break;
+				await msg.process(async () => {
+					const info = this.activeRequests.get(id);
+
+					if (!info) return;
+					switch (msg.messageType) {
+					case 'res':
+						await this.#onAppResMeta(id, msg.text, info);
+						break;
+					case 'res-error':
+						await this.#onAppResError(id, msg.text, info);
+						break;
+					}
+				});
+			}
+		})();
+
+		// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
+		// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
+		// Mod-apps use PostMessageTransport (object stream, no auto text encoding), so
+		// string writes set msg.text (not msg.data). Use msg.data ?? msg.text to handle both.
+		(async () => {
+			while (true) {
+				const msg = await appChannel.read({ only: 'res-frame', dechunk: false });
+
+				if (!msg) break;
+
+				let done = false;
+
+				await msg.process(async () => {
+					const info = this.activeRequests.get(id);
+
+					if (!info) return;
+
+					const frameData = msg.data ?? msg.text;
+
+					if (frameData === undefined && msg.eom) {
+						done = true; // zero-data + eom:true = end-of-stream signal
+					} else {
+						const reqChannel = info.reqChannel;
+
+						await reqChannel.write('res-frame', frameData, { eom: msg.eom ?? false });
+					}
+				});
+				if (done) {
+					await this.#sendEndOfStream(id);
+					await this.#handleRequestCompletion(id);
+					break;
+				}
+			}
+		})();
+
+		// Loop 3: bidi relay
+		(async () => {
+			while (true) {
+				const msg = await appChannel.read({ only: 'bidi-frame', dechunk: false });
+
+				if (!msg) break;
+				await msg.process(async () => {
+					// console.log('*** Res App->Cli bidi relay', msg.dataSize);
+					// Forward bidi-frame to operator via req-N channel
+					await reqChannel.write('bidi-frame', msg.data, { eom: false });
+				});
+			}
+		})();
+	}
+
+	/**
 	 * Send end-of-stream signal to operator (zero-data final res-frame).
 	 * @param {string|number} id - Request ID
 	 */
 	async #sendEndOfStream (id) {
 		const requestInfo = this.activeRequests.get(id);
+
 		if (!requestInfo) return;
 
 		// Send zero-data res-frame with eom:true = end-of-stream signal
 		const reqChannel = requestInfo.reqChannel;
+
 		await reqChannel.write('res-frame', null, { ifOpen: true });
 
 		// For non-keepAlive requests: the bootstrap stops the transport after the
@@ -564,7 +859,9 @@ export class ResponderProcess extends SubProcess {
 	 */
 	async #sendErrorResponse (reqChannel, id, status, message) {
 		if (!reqChannel) return;
+
 		const requestInfo = id != null ? this.activeRequests.get(id) : null;
+
 		if (requestInfo) requestInfo.responseStarted = true;
 		await reqChannel.write('res-error', JSON.stringify({ id, status, error: message }));
 	}
@@ -580,7 +877,7 @@ export class ResponderProcess extends SubProcess {
 	 * @param {Object} [appEnv] - Resolved appEnv to inject into the mod-app worker
 	 * @returns {Promise<{ worker, transport, bootstrapChannel, appChannel }>}
 	 */
-	async #spawnAppWorker (appPath, mode, appEnv) {
+	async #spawnAppWorker (appPath, mode, appEnv, persistent = false) {
 		// Determine permissions based on mod-app path
 		let readAny = false, keepDeno = false;
 		switch (appPath) {
@@ -593,8 +890,8 @@ export class ResponderProcess extends SubProcess {
 		const appHref = appURL.href;
 		const isUrlBased = appHref.startsWith('https://') || appHref.startsWith('http://');
 		const bootstrapURL = new URL('./apps/bootstrap.esm.js', import.meta.url);
-
 		const readable = [bootstrapURL.pathname];
+
 		if (!isUrlBased) readable.push(appURL.pathname);
 
 		const permissions = {
@@ -635,8 +932,11 @@ export class ResponderProcess extends SubProcess {
 
 		// Send setup instructions to bootstrap via the private 'bootstrap' channel
 		const bootstrapChannel = await transport.requestChannel('bootstrap');
+
 		await bootstrapChannel.addMessageTypes(BOOT_CHANNEL_MESSAGE_TYPES);
-		const setupData = { appPath: appHref, mode, keepDeno };
+
+		const setupData = { appPath: appHref, mode, keepDeno, persistent };
+
 		if (appEnv && Object.keys(appEnv).length > 0) {
 			setupData.appEnv = appEnv;
 		}
@@ -644,30 +944,38 @@ export class ResponderProcess extends SubProcess {
 
 		// Set up the mod-app communication channel
 		const appChannel = await transport.requestChannel('app');
-		await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
+
+		await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
+
+		// Start forwarding mod-app C2C console output to operator via the req-N channel
+		this.#startC2CForwarding(worker, c2cChannel);
 
 		return { worker, transport, c2cChannel, appChannel, bootstrapChannel };
 	}
 
 	/**
-	 * Start forwarding mod-app C2C console output to operator via the req-N channel.
-	 * C2C bare names (trace/debug/info/warn/error) are forwarded with 'con-' prefix
-	 * to avoid collision with other message types on the req-N channel.
-	 * @param {string|number} id - Request ID
-	 * @param {object} c2cChannel - The C2C channel from the mod-app's PostMessageTransport
-	 * @param {object} reqChannel - The req-N channel to forward to
-	 */
-	#startC2CForwarding (id, c2cChannel, reqChannel) {
+		* Start forwarding mod-app C2C console output to operator via the req-N channel.
+		* C2C bare names (trace/debug/info/warn/error) are forwarded with 'con-' prefix
+		* to avoid collision with other message types on the req-N channel.
+		* @param {object} worker - The Web Worker instance
+		* @param {object} c2cChannel - The C2C channel from the mod-app's PostMessageTransport
+		*/
+	#startC2CForwarding (worker, c2cChannel) {
 		(async () => {
 			while (true) {
 				const msg = await c2cChannel.read({ decode: true });
+
 				if (!msg) break;
 				await msg.process(() => {
-					if (!this.activeRequests.has(id)) return; // Request already cleaned up
+					const info = this.activeRequests.get(worker);
+
+					if (!info) return; // No active request for this worker right now
+
 					// Forward with 'con-' prefix: 'trace' → 'con-trace', etc.
 					// Console messages may have no data — forward null in that case.
 					const text = msg.text ?? null;
-					reqChannel.write(`con-${msg.messageType}`, text).catch((err) => {
+
+					info.reqChannel.write(`con-${msg.messageType}`, text).catch((err) => {
 						console.warn(`[${this.processId}] Failed to forward con-${msg.messageType}:`, err);
 					});
 				});
@@ -683,6 +991,7 @@ export class ResponderProcess extends SubProcess {
 
 		return setTimeout(() => {
 			const requestInfo = this.activeRequests.get(id);
+
 			if (requestInfo && requestInfo.keepAlive) {
 				console.debug(`[${this.processId}] Connection ${id} lifetime timeout after ${conTimeout}s`);
 				this.#sendErrorResponse(requestInfo.reqChannel, id, 408, 'Request Timeout').catch(console.error);
@@ -700,87 +1009,13 @@ export class ResponderProcess extends SubProcess {
 
 		return setTimeout(() => {
 			const requestInfo = this.activeRequests.get(id);
+
 			if (requestInfo && requestInfo.keepAlive) {
 				console.debug(`[${this.processId}] Connection ${id} idle timeout after ${idleTimeout}s`);
 				this.#sendErrorResponse(requestInfo.reqChannel, id, 408, 'Request Timeout').catch(console.error);
 				this.cleanupRequest(id);
 			}
 		}, idleTimeout * 1000);
-	}
-
-	/**
-	 * Start reading response metadata and body from the mod-app channel,
-	 * and relay to the operator via req-N channel.
-	 * @param {string|number} id - Request ID
-	 * @param {object} appChannel - The 'app' channel from PostMessageTransport
-	 */
-	#processAppResponse (id, appChannel) {
-		const requestInfo = this.activeRequests.get(id);
-		if (!requestInfo) return;
-		const { reqChannel, mode } = requestInfo;
-
-		// Loop 1: response metadata (dechunked — each read() returns one complete message)
-		// 'res' carries HTTP response status + headers (sent once, before any res-frame chunks)
-		// 'res-error' carries error response (sent instead of res + res-frame)
-		(async () => {
-			while (true) {
-				const msg = await appChannel.read({ only: ['res', 'res-error'] });
-				if (!msg) break;
-				await msg.process(async () => {
-					const info = this.activeRequests.get(id);
-					if (!info) return;
-					switch (msg.messageType) {
-					case 'res':
-						await this.#onAppResMeta(id, msg.text, info);
-						break;
-					case 'res-error':
-						await this.#onAppResError(id, msg.text, info);
-						break;
-					}
-				});
-			}
-		})();
-
-		// Loop 2: response body chunks (dechunk: false — relay verbatim without reassembly)
-		// res-frame carries raw response body data; zero-data + eom:true = end-of-stream.
-		// Mod-apps use PostMessageTransport (object stream, no auto text encoding), so
-		// string writes set msg.text (not msg.data). Use msg.data ?? msg.text to handle both.
-		(async () => {
-			while (true) {
-				const msg = await appChannel.read({ only: 'res-frame', dechunk: false });
-				if (!msg) break;
-				let done = false;
-				await msg.process(async () => {
-					const info = this.activeRequests.get(id);
-					if (!info) return;
-					const frameData = msg.data ?? msg.text;
-					if (frameData === undefined && msg.eom) {
-						done = true; // zero-data + eom:true = end-of-stream signal
-					} else {
-						const reqChannel = info.reqChannel;
-						await reqChannel.write('res-frame', frameData, { eom: msg.eom ?? false });
-					}
-				});
-				if (done) {
-					await this.#sendEndOfStream(id);
-					break;
-				}
-			}
-		})();
-
-		// Loop 3: bidi relay
-		(async () => {
-			// if (mode === 'bidi') console.log('*** pAR (res app->cli) bidi relay ready');
-			while (true) {
-				const msg = await appChannel.read({ only: 'bidi-frame', dechunk: false });
-				if (!msg) break;
-				await msg.process(async () => {
-					// console.log('*** Res App->Cli bidi relay', msg.dataSize);
-					// Forward bidi-frame to operator via req-N channel
-					await reqChannel.write('bidi-frame', msg.data, { eom: false });
-				});
-			}
-		})();
 	}
 }
 
@@ -790,6 +1025,7 @@ export class ResponderProcess extends SubProcess {
 async function main () {
 	const processId = Deno.env.get('JSMAWS_PID'); // process id string
 	const poolName = Deno.env.get('JSMAWS_POOL');
+
 	Deno.stderr.writeSync(new TextEncoder().encode(
 		`Responder main pid ${processId} pool ${poolName}\n`
 	));

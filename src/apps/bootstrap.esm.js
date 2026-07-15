@@ -30,10 +30,11 @@ import { PromiseTracer } from '@poly-transport/promise-tracer.esm.js';
 import { Channel } from '@poly-transport/channel.esm.js';
 
 /**
- * Bootstrap channel message types
- * Exported for use by responder-process.esm.js
+ * Bootstrap and app channel message types
+ * Bootstrap types exported for use by responder-process.esm.js
  */
 export const BOOT_CHANNEL_MESSAGE_TYPES = ['setup', 'shutdown'];
+const APP_CHANNEL_MESSAGE_TYPES = ['req', 'res', 'res-frame', 'res-error', 'bidi-frame'];
 
 /**
  * Approved Deno APIs
@@ -78,6 +79,7 @@ function disableWorkers () {
 			throw new Error('Web workers are disabled');
 		}
 	});
+
 	Object.defineProperty(globalThis, 'Worker', {
 		value: disabledWorker,
 		writable: false,
@@ -134,6 +136,7 @@ function setupConsole (c2c) {
 
 	// Save original console methods before replacing (for fallback)
 	const originalConsole = {};
+
 	for (const level of ['debug', 'error', 'info', 'log', 'warn']) {
 		originalConsole[level] = globalThis.console[level]?.bind(globalThis.console);
 	}
@@ -150,11 +153,13 @@ function setupConsole (c2c) {
 	 */
 	function createLogMethod (level) {
 		const c2cLevel = levelMap[level] ?? 'info';
+
 		return function (...args) {
 			// Use C2C when the channel is open; fall back to original console otherwise
 			// (handles transport disconnect and terminal debugging scenarios)
 			if (c2c.state === Channel.STATE_OPEN) {
 				const text = args.map(consoleFormat).join(' ');
+
 				c2c[c2cLevel]?.(text);
 			} else {
 				originalConsole[level]?.(...args);
@@ -225,6 +230,7 @@ async function bootstrap () {
 	// Get the C2C channel and set up console interception immediately
 	// (before any mod-app code runs, so all console output goes through C2C)
 	const c2c = transport.getChannel(c2cSymbol);
+
 	if (c2c) setupConsole(c2c);
 
 	// Read setup instructions from the private 'bootstrap' channel
@@ -232,6 +238,7 @@ async function bootstrap () {
 	await bootstrapChannel.addMessageTypes(BOOT_CHANNEL_MESSAGE_TYPES);
 	const setupMsg = await bootstrapChannel.read({ only: 'setup', decode: true });
 	let setupData;
+
 	await setupMsg.process(() => {
 		setupData = JSON.parse(setupMsg.text);
 	});
@@ -247,17 +254,22 @@ async function bootstrap () {
 	}
 
 	// Set up the JSMAWS communication channel (mod-app ↔ server)
-	const appChannel = await transport.requestChannel('app');
-	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error', 'bidi-frame']);
+	let appChannel = await transport.requestChannel('app');
+
+	await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
 
 	// Set up shutdown deadline promise (resolved when shutdown message is received)
 	const shutdownResolvers = Promise.withResolvers();
+	let isShuttingDown = false;
 
 	// Background: listen for shutdown message on bootstrap channel
 	(async () => {
 		const msg = await bootstrapChannel.read({ only: 'shutdown', decode: true });
+
 		if (msg) {
+			isShuttingDown = true;
 			const { deadline } = JSON.parse(msg.text);
+
 			await msg.done();
 			shutdownResolvers.resolve(deadline);
 		}
@@ -265,7 +277,7 @@ async function bootstrap () {
 
 	// Build the JSMAWS namespace object (frozen before mod-app import)
 	const jsmawsNamespace = {
-		server: appChannel,
+		get server () { return appChannel; },
 		env: Object.freeze(setupData.appEnv ?? {}),
 		shutdownDeadline: shutdownResolvers.promise,
 	};
@@ -276,8 +288,95 @@ async function bootstrap () {
 	// Dynamically import and run the mod-app
 	try {
 		const appModule = await import(appPath);
-		// Call the default export if it is a function (standard mod-app entry point)
-		if (typeof appModule.default === 'function') {
+		let fetchHandler = null;
+
+		if (appModule.default && typeof appModule.default.fetch === 'function') {
+			fetchHandler = appModule.default.fetch.bind(appModule.default);
+		} else if (typeof appModule.fetch === 'function') {
+			fetchHandler = appModule.fetch;
+		}
+
+		if (fetchHandler) {
+			const isPersistent = setupData.persistent === true;
+
+			while (!isShuttingDown) {
+				const reqMsg = await appChannel.read({ only: 'req', decode: true });
+
+				if (!reqMsg) break; // Exit loop if transport is stopped (shutdown)
+
+				let requestData;
+
+				await reqMsg.process(() => {
+					requestData = JSON.parse(reqMsg.text);
+				});
+
+				const { method, url, headers, body } = requestData;
+
+				try {
+					const requestOptions = {
+						method: method?.toUpperCase() || 'GET',
+						headers: new Headers(headers || {}),
+					};
+
+					if (requestOptions.method !== 'GET' && requestOptions.method !== 'HEAD' && body) {
+						requestOptions.body = new Uint8Array(body);
+					}
+
+					const request = new Request(url, requestOptions);
+
+					// Call fetch handler
+					const response = await fetchHandler(request, setupData.appEnv ?? {});
+
+					// Send response metadata
+					await appChannel.write('res', JSON.stringify({
+						status: response.status,
+						headers: Object.fromEntries(response.headers.entries()),
+					}));
+
+					// Send response body chunks
+					if (response.body) {
+						const reader = response.body.getReader();
+
+						try {
+							while (true) {
+								const { done, value } = await reader.read();
+
+								if (done) break;
+								await appChannel.write('res-frame', value);
+							}
+						} finally {
+							reader.releaseLock();
+						}
+					}
+
+					// End of stream
+					await appChannel.write('res-frame', null);
+
+				} catch (error) {
+					console.error('Fetch handler error:', error.message);
+					if (error.stack) console.error(error.stack);
+					try {
+						await appChannel.write('res-error', JSON.stringify({
+							error: error.message,
+							stack: error.stack,
+						}));
+					} catch (_writeError) {
+						// Ignore write errors during error reporting
+					}
+				}
+
+				// If not persistent, handle exactly one request and exit
+				if (!isPersistent) {
+					break;
+				}
+
+				// Reset app channel for next request
+				await appChannel.close();
+				appChannel = await transport.requestChannel('app');
+				await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
+			}
+		} else if (typeof appModule.default === 'function') {
+			// One-shot, low-Level channel model (including bidi)
 			await appModule.default(setupData);
 		}
 	} catch (error) {
