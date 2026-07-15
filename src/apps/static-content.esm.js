@@ -1,48 +1,38 @@
 /**
- * JSMAWS Built-in Static File Mod-App
+ * JSMAWS Built-in Static File Mod-App (Fetch API)
  * Serves static files from the configured root directory
  *
  * Features:
  * - Path traversal prevention via Deno.realPath() validation
  * - HTTP Range request support for resumable downloads
  * - Proper MIME type detection from file extension
- * - Chunked responses for large files with backpressure handling
+ * - Standard Response and ReadableStream-based file streaming
  * - Security: Ensures resolved path stays within configured root
- *
- * Protocol: PolyTransport channel API via globalThis.JSMAWS.server
- * - Reads 'req' message (JSON) for request metadata
- * - Writes 'res' message (JSON text) for response status + headers
- * - Writes 'res-frame' messages (binary Uint8Array) for response body chunks
- * - Signals end-of-stream with zero-data 'res-frame' (undefined data, default eom:true)
- * - Writes 'res-error' message (JSON text) on error
  *
  * Copyright 2025-2026 Kappa Computer Solutions, LLC and Brian Katzung
  */
 
 /**
  * Send a 404 Not Found response
- * @param {object} server - PolyTransport channel (globalThis.JSMAWS.server)
+ * @returns {Response} Standard Response object
  */
-async function send404 (server) {
-	await server.write('res', JSON.stringify({
+function send404 () {
+	return new Response('File not found', {
 		status: 404,
 		headers: { 'content-type': 'text/plain' },
-	}));
-	await server.write('res-frame', 'File not found');
-	await server.write('res-frame', null);
+	});
 }
 
 /**
  * Send a 416 Range Not Satisfiable response
- * @param {object} server - PolyTransport channel (globalThis.JSMAWS.server)
  * @param {number} fileSize - Total file size for Content-Range header
+ * @returns {Response} Standard Response object
  */
-async function send416 (server, fileSize) {
-	await server.write('res', JSON.stringify({
+function send416 (fileSize) {
+	return new Response(null, {
 		status: 416,
 		headers: { 'Content-Range': `bytes */${fileSize}` },
-	}));
-	await server.write('res-frame', null);
+	});
 }
 
 /**
@@ -71,72 +61,78 @@ function getMimeType (filePath, mimeTypes, explicitMimeType) {
 
 /**
  * Handle full file request (no Range header)
- * @param {object} server - PolyTransport channel
  * @param {string} resolvedPath - Absolute resolved file path
  * @param {number} fileSize - File size in bytes
  * @param {string} contentType - MIME type for Content-Type header
- * @param {number} chunkSize - Maximum bytes per res-frame chunk
+ * @param {number} chunkSize - Maximum bytes per chunk
+ * @returns {Promise<Response>} Standard Response object
  */
-async function handleFullRequest (server, resolvedPath, fileSize, contentType, chunkSize) {
+async function handleFullRequest (resolvedPath, fileSize, contentType, chunkSize) {
 	// Try to open file - if it fails (e.g., permission denied), return 404
 	let file;
+
 	try {
 		file = await Deno.open(resolvedPath, { read: true });
 	} catch (_error) {
-		await send404(server);
-		return;
+		return send404();
 	}
 
-	// Send response metadata
-	await server.write('res', JSON.stringify({
+	// Create a standard ReadableStream to stream file chunks
+	const stream = new ReadableStream({
+		async pull (controller) {
+			const buffer = new Uint8Array(chunkSize);
+
+			try {
+				const bytesRead = await file.read(buffer);
+
+				if (bytesRead === null) {
+					file.close();
+					controller.close();
+				} else {
+					controller.enqueue(buffer.subarray(0, bytesRead));
+				}
+			} catch (error) {
+				file.close();
+				controller.error(error);
+			}
+		},
+		cancel () {
+			file.close();
+		},
+	});
+
+	return new Response(stream, {
 		status: 200,
 		headers: {
 			'content-type': contentType,
 			'content-length': fileSize.toString(),
 			'accept-ranges': 'bytes',
 		},
-	}));
-
-	// For larger files, send file data in chunks
-	const buffer = new Uint8Array(Math.min(fileSize, chunkSize));
-
-	for (;;) {
-		const bytesRead = await file.read(buffer);
-		if (bytesRead === null) break;
-
-		const chunk = buffer.slice(0, bytesRead);
-		await server.write('res-frame', chunk);
-	}
-
-	// Send end-of-stream signal
-	await server.write('res-frame', null);
-
-	file.close();
+	});
 }
 
 /**
  * Handle Range request for resumable downloads
- * @param {object} server - PolyTransport channel
  * @param {string} resolvedPath - Absolute resolved file path
  * @param {number} fileSize - Total file size in bytes
  * @param {string} rangeHeader - Value of the Range request header
  * @param {string} contentType - MIME type for Content-Type header
- * @param {number} chunkSize - Maximum bytes per res-frame chunk
+ * @param {number} chunkSize - Maximum bytes per chunk
+ * @returns {Promise<Response>} Standard Response object
  */
-async function handleRangeRequest (server, resolvedPath, fileSize, rangeHeader, contentType, chunkSize) {
+async function handleRangeRequest (resolvedPath, fileSize, rangeHeader, contentType, chunkSize) {
 	// Parse Range header: "bytes=start-end"
 	const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+
 	if (!match) {
-		await send416(server, fileSize);
-		return;
+		return send416(fileSize);
 	}
 
 	const start = parseInt(match[1]);
 	const end = match[2] ? parseInt(match[2]) : fileSize - 1;
 
 	if (start >= fileSize || end >= fileSize || start > end) {
-		await send416(server, fileSize);
-		return;
+		return send416(fileSize);
 	}
 
 	const rangeSize = end - start + 1;
@@ -147,12 +143,44 @@ async function handleRangeRequest (server, resolvedPath, fileSize, rangeHeader, 
 		file = await Deno.open(resolvedPath, { read: true });
 		await file.seek(start, Deno.SeekMode.Start);
 	} catch (_error) {
-		await send404(server);
-		return;
+		return send404();
 	}
 
-	// Send response metadata with partial content headers
-	await server.write('res', JSON.stringify({
+	let remaining = rangeSize;
+
+	// Create a standard ReadableStream to stream the requested range
+	const stream = new ReadableStream({
+		async pull (controller) {
+			if (remaining <= 0) {
+				file.close();
+				controller.close();
+				return;
+			}
+
+			const toRead = Math.min(chunkSize, remaining);
+			const buffer = new Uint8Array(toRead);
+
+			try {
+				const bytesRead = await file.read(buffer);
+
+				if (bytesRead === null) {
+					file.close();
+					controller.close();
+				} else {
+					remaining -= bytesRead;
+					controller.enqueue(buffer.subarray(0, bytesRead));
+				}
+			} catch (error) {
+				file.close();
+				controller.error(error);
+			}
+		},
+		cancel () {
+			file.close();
+		},
+	});
+
+	return new Response(stream, {
 		status: 206,
 		headers: {
 			'content-type': contentType,
@@ -160,94 +188,69 @@ async function handleRangeRequest (server, resolvedPath, fileSize, rangeHeader, 
 			'Content-Range': `bytes ${start}-${end}/${fileSize}`,
 			'accept-ranges': 'bytes',
 		},
-	}));
-
-	// Send range data in chunks
-	const buffer = new Uint8Array(chunkSize);
-	let remaining = rangeSize;
-
-	while (remaining > 0) {
-		const toRead = Math.min(chunkSize, remaining);
-		const bytesRead = await file.read(buffer.subarray(0, toRead));
-		if (bytesRead === null) break;
-
-		const chunk = buffer.slice(0, bytesRead);
-		remaining -= bytesRead;
-
-		await server.write('res-frame', chunk);
-	}
-
-	// Send end-of-stream signal
-	await server.write('res-frame', null);
-
-	file.close();
+	});
 }
 
-/**
- * Main mod-app entry point
- * Called by bootstrap after environment setup and JSMAWS namespace is frozen
- * @param {object} _setupData - Setup data from bootstrap (appPath, mode, etc.)
- */
-export default async function (_setupData) {
-	const server = globalThis.JSMAWS.server;
+export default {
+	/**
+	 * Standard Fetch Model entry point
+	 * @param {Request} request - Standard Request object with attached JSMAWS metadata
+	 * @param {object} _env - Environment variables
+	 * @returns {Promise<Response>} Standard Response object
+	 */
+	async fetch (request, _env) {
+		// Extract JSMAWS-specific metadata attached by bootstrap
+		const { routeTail, config, maxChunkSize } = request;
 
-	// Read the incoming request
-	const reqMsg = await server.read({ only: 'req', decode: true });
-	if (!reqMsg) return;
-
-	let requestData;
-	await reqMsg.process(() => {
-		requestData = JSON.parse(reqMsg.text);
-	});
-
-	const { headers, routeTail, maxChunkSize, config } = requestData;
-
-	try {
 		// Validate that root was provided
 		const root = config?.root;
+
 		if (!root) {
-			await send404(server);
-			return;
+			return send404();
 		}
 
-		// Get configuration
-		const mimeTypes = config?.mimeTypes || {};
-		const explicitMimeType = config?.mimeType || null;
-		const chunkSize = maxChunkSize || 65536;
+		try {
+			const mimeTypes = config?.mimeTypes || {};
+			const explicitMimeType = config?.mimeType || null;
+			const chunkSize = maxChunkSize || 65536;
 
-		// Construct file path from routeTail
-		const filePath = `${root}${routeTail}`;
+			// Construct file path from routeTail
+			const filePath = `${root}${routeTail}`;
 
-		// Security: Prevent directory traversal
-		const resolvedPath = await Deno.realPath(filePath).catch(() => null);
-		if (!resolvedPath || !resolvedPath.startsWith(root)) {
-			await send404(server);
-			return;
+			// Security: Prevent directory traversal
+			const resolvedPath = await Deno.realPath(filePath).catch(() => null);
+
+			if (!resolvedPath || !resolvedPath.startsWith(root)) {
+				return send404();
+			}
+
+			// Check if file exists and is readable
+			const stat = await Deno.stat(resolvedPath).catch(() => null);
+
+			if (!stat || !stat.isFile) {
+				return send404();
+			}
+
+			// Determine MIME type from extension (first-match strategy)
+			const contentType = getMimeType(filePath, mimeTypes, explicitMimeType);
+
+			// Handle Range requests for resumable downloads
+			const rangeHeader = request.headers.get('Range') || request.headers.get('range');
+
+			if (rangeHeader) {
+				return await handleRangeRequest(resolvedPath, stat.size, rangeHeader, contentType, chunkSize);
+			} else {
+				return await handleFullRequest(resolvedPath, stat.size, contentType, chunkSize);
+			}
+
+		} catch (error) {
+			return new Response(JSON.stringify({
+				error: error.message,
+				stack: error.stack,
+			}), {
+				status: 500,
+				headers: { 'content-type': 'application/json' },
+			});
 		}
-
-		// Check if file exists and is readable
-		const stat = await Deno.stat(resolvedPath).catch(() => null);
-
-		if (!stat || !stat.isFile) {
-			await send404(server);
-			return;
-		}
-
-		// Determine MIME type from extension (first-match strategy)
-		const contentType = getMimeType(filePath, mimeTypes, explicitMimeType);
-
-		// Handle Range requests for resumable downloads
-		const rangeHeader = headers['Range'] || headers['range'];
-		if (rangeHeader) {
-			await handleRangeRequest(server, resolvedPath, stat.size, rangeHeader, contentType, chunkSize);
-		} else {
-			await handleFullRequest(server, resolvedPath, stat.size, contentType, chunkSize);
-		}
-
-	} catch (error) {
-		await server.write('res-error', JSON.stringify({
-			error: error.message,
-			stack: error.stack,
-		}));
-	}
-}
+	},
+};

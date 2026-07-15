@@ -18,6 +18,7 @@ import { PostMessageTransport } from '@poly-transport/transport/post-message.esm
 
 const bootstrapPath = new URL('../src/apps/bootstrap.esm.js', import.meta.url).href;
 const staticContentPath = new URL('../src/apps/static-content.esm.js', import.meta.url).href;
+const APP_CHANNEL_MESSAGE_TYPES = ['req', 'res', 'res-frame', 'res-error'];
 
 // Setup test directory and files
 let testDir;
@@ -111,7 +112,7 @@ async function setupStaticWorker (c2cSymbol = undefined) {
 
 	// Set up the mod-app communication channel
 	const appChannel = await transport.requestChannel('app');
-	await appChannel.addMessageTypes(['req', 'res', 'res-frame', 'res-error']);
+	await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
 
 	const cleanup = async () => {
 		await transport.stop({ discard: true }).catch(() => {});
@@ -507,7 +508,7 @@ Deno.test('Static Content - handles Range request', async () => {
 		});
 
 		assertEquals(result.status, 206); // Partial Content
-		assertEquals(result.headers['Content-Range'], 'bytes 0-4/13');
+		assertEquals(result.headers['content-range'], 'bytes 0-4/13');
 		assertEquals(result.headers['content-length'], '5');
 		assertEquals(result.bodyText, 'Hello');
 	} finally {
@@ -533,7 +534,7 @@ Deno.test('Static Content - handles Range request with open end', async () => {
 		});
 
 		assertEquals(result.status, 206);
-		assertEquals(result.headers['Content-Range'], 'bytes 7-12/13');
+		assertEquals(result.headers['content-range'], 'bytes 7-12/13');
 		assertEquals(result.bodyText, 'World!');
 	} finally {
 		await cleanup();
@@ -558,7 +559,7 @@ Deno.test('Static Content - returns 416 for invalid Range', async () => {
 		});
 
 		assertEquals(result.status, 416); // Range Not Satisfiable
-		assertEquals(result.headers['Content-Range'], 'bytes */13');
+		assertEquals(result.headers['content-range'], 'bytes */13');
 	} finally {
 		await cleanup();
 	}
@@ -637,7 +638,7 @@ Deno.test('Static Content - chunks large Range request', async () => {
 		});
 
 		assertEquals(metaData.status, 206);
-		assertEquals(metaData.headers['Content-Range'], 'bytes 0-49999/102400');
+		assertEquals(metaData.headers['content-range'], 'bytes 0-49999/102400');
 		assertEquals(metaData.headers['content-length'], '50000');
 
 		// Collect all body chunks until end-of-stream.
@@ -689,5 +690,79 @@ Deno.test('Static Content - returns 404 for unreadable file', async () => {
 		assertEquals(result.bodyText, 'File not found');
 	} finally {
 		await cleanup();
+	}
+});
+
+Deno.test('Static Content - persistent mode worker reuse', async () => {
+	// Set up a persistent static worker
+	const worker = new Worker(bootstrapPath, {
+		type: 'module',
+		deno: {
+			permissions: {
+				read: true,
+				write: false,
+				net: true,
+				env: false,
+				run: false,
+			},
+		},
+	});
+
+	const transport = new PostMessageTransport({
+		gateway: worker,
+		maxChunkBytes: 65536,
+	});
+
+	transport.addEventListener('newChannel', (event) => { event.accept(); });
+	await transport.start();
+
+	const bootstrapChannel = await transport.requestChannel('bootstrap');
+	await bootstrapChannel.addMessageTypes(['setup']);
+	await bootstrapChannel.write('setup', JSON.stringify({
+		appPath: staticContentPath,
+		mode: 'response',
+		keepDeno: true,
+		keepWorkers: false,
+		persistent: true, // Enable persistence
+	}));
+
+	let appChannel = await transport.requestChannel('app');
+	await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
+
+	try {
+		// Request 1
+		const result1 = await sendStaticRequest(appChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.txt',
+			headers: {},
+			routeParams: {},
+			routeTail: '/test.txt',
+			maxChunkSize: 65536,
+			config: { root: testDir, mimeTypes: { '.txt': 'text/plain' } },
+		});
+		assertEquals(result1.status, 200);
+		assertEquals(result1.bodyText, 'Hello, World!');
+
+		// Reset app channel for next request (simulating responder reuse)
+		await appChannel.close();
+		appChannel = await transport.requestChannel('app');
+		await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
+
+		// Request 2 (on the same warm worker)
+		const result2 = await sendStaticRequest(appChannel, {
+			method: 'GET',
+			url: 'https://example.com/test.html',
+			headers: {},
+			routeParams: {},
+			routeTail: '/test.html',
+			maxChunkSize: 65536,
+			config: { root: testDir, mimeTypes: { '.html': 'text/html' } },
+		});
+		assertEquals(result2.status, 200);
+		assertEquals(result2.bodyText, '<html><body>Test</body></html>');
+
+	} finally {
+		await transport.stop({ discard: true }).catch(() => {});
+		worker.terminate();
 	}
 });

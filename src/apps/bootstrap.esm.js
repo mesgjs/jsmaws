@@ -324,6 +324,12 @@ async function bootstrap () {
 
 					const request = new Request(url, requestOptions);
 
+					// Attach JSMAWS-specific metadata to the Request object
+					request.routeTail = requestData.routeTail;
+					request.routeParams = requestData.routeParams;
+					request.config = requestData.config;
+					request.maxChunkSize = requestData.maxChunkSize;
+
 					// Call fetch handler
 					const response = await fetchHandler(request, setupData.appEnv ?? {});
 
@@ -371,9 +377,14 @@ async function bootstrap () {
 				}
 
 				// Reset app channel for next request
-				await appChannel.close();
-				appChannel = await transport.requestChannel('app');
-				await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
+				try {
+					await appChannel.close();
+					appChannel = await transport.requestChannel('app');
+					await appChannel.addMessageTypes(APP_CHANNEL_MESSAGE_TYPES);
+				} catch (_err) {
+					// If transport is stopping or stopped, exit loop gracefully
+					break;
+				}
 			}
 		} else if (typeof appModule.default === 'function') {
 			// One-shot, low-Level channel model (including bidi)

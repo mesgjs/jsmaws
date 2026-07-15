@@ -43,8 +43,9 @@ export class ResponderProcess extends SubProcess {
 		this.poolName = poolName;
 
 		// Track active requests and workers
-		this.activeRequests = new Map(); // requestId, worker -> { worker, transport, reqChannel, timeout, isStreaming }
-		this.persistentWorkers = new Map(); // appPath -> Array<WorkerInfo>
+		this.activeRequests = new Map(); // requestId -> { worker, transport, reqChannel, timeout, isStreaming }
+		this.workerInfo = new Map(); // worker -> workerInfo
+		this.workersByApp = new Map(); // appPath -> Array<workerInfo>
 		this.channelMap = new Map(); // channel -> requestId
 		this.requestCount = 0;
 		this.maxConcurrentRequests = 10; // Will be set from pool config
@@ -64,7 +65,7 @@ export class ResponderProcess extends SubProcess {
 	 * Available workers (concurrent request slots remaining)
 	 */
 	get availWorkers () {
-		return this.maxConcurrentRequests - this.activeRequests.size / 2;
+		return this.maxConcurrentRequests - this.activeRequests.size;
 	}
 
 	/**
@@ -75,7 +76,7 @@ export class ResponderProcess extends SubProcess {
 		const now = Date.now();
 		const timeoutMs = timeoutSeconds * 1000;
 
-		for (const [app, workers] of this.persistentWorkers.entries()) {
+		for (const [app, workers] of this.workersByApp.entries()) {
 			const activeWorkers = [];
 
 			for (const w of workers) {
@@ -88,9 +89,9 @@ export class ResponderProcess extends SubProcess {
 				}
 			}
 			if (activeWorkers.length === 0) {
-				this.persistentWorkers.delete(app);
+				this.workersByApp.delete(app);
 			} else {
-				this.persistentWorkers.set(app, activeWorkers);
+				this.workersByApp.set(app, activeWorkers);
 			}
 		}
 	}
@@ -114,11 +115,15 @@ export class ResponderProcess extends SubProcess {
 		clearTimeout(requestInfo.timeout);           // Request timeout
 		clearTimeout(requestInfo.idleTimeout);       // Idle timeout
 		clearTimeout(requestInfo.connectionTimeout); // Connection timeout
-		requestInfo.worker?.terminate();
 
-		// Disconnected stop triggers the 'stopped' event, which handles
-		// the 503 response (if needed) and removes the entry from activeRequests.
-		requestInfo.transport?.stop({ disconnected: true }).catch(() => {});
+		const workerInfo = requestInfo.workerInfo;
+		if (workerInfo) {
+			workerInfo.worker?.terminate();
+
+			// Disconnected stop triggers the 'stopped' event, which handles
+			// the 503 response (if needed) and removes the entry from activeRequests.
+			workerInfo.transport?.stop({ disconnected: true }).catch(() => {});
+		}
 	}
 
 	/**
@@ -175,7 +180,7 @@ export class ResponderProcess extends SubProcess {
 			status: 'ok',
 			availableWorkers,
 			totalWorkers: this.maxConcurrentRequests,
-			activeRequests: this.activeRequests.size / 2,
+			activeRequests: this.activeRequests.size,
 			uptime: Math.floor(performance.now() / 1000),
 		}));
 
@@ -237,12 +242,9 @@ export class ResponderProcess extends SubProcess {
 		// Clear request timeout
 		clearTimeout(requestInfo.timeout);
 
-		// Get worker info if persistent
-		const isPersistent = requestInfo.isPersistent;
-		const workers = (isPersistent && this.persistentWorkers.get(requestInfo.app)) || [];
-		const workerInfo = isPersistent && workers.find((w) => w.worker === requestInfo.worker);
+		const workerInfo = requestInfo.workerInfo;
 
-		if (workerInfo) {
+		if (workerInfo && workerInfo.isPersistent) {
 			// Check maxWorkerReqs recycling
 			const maxWorkerReqs = this.config.getMaxWorkerReqs(this.poolName);
 			const shouldRecycle = maxWorkerReqs > 0 && workerInfo.reqCount >= maxWorkerReqs;
@@ -253,6 +255,7 @@ export class ResponderProcess extends SubProcess {
 			} else {
 				// Mark as resetting so it won't be selected for new requests while resetting
 				workerInfo.status = 'resetting';
+				workerInfo.activeRequest = null;
 
 				// Close and reopen appChannel, and reassign message types
 				if (workerInfo.appChannel) {
@@ -272,7 +275,6 @@ export class ResponderProcess extends SubProcess {
 				}
 
 				// Remove from active requests so capacity is updated, but do NOT terminate worker
-				this.activeRequests.delete(requestInfo.worker);
 				this.activeRequests.delete(id);
 			}
 		} else {
@@ -305,34 +307,25 @@ export class ResponderProcess extends SubProcess {
 			this.workerIdleCleanupInterval = null;
 		}
 
-		// Terminate all idle persistent workers immediately
-		for (const [app, workers] of this.persistentWorkers.entries()) {
-			for (const w of workers) {
-				if (w.status === 'idle') {
-					console.debug(`[${this.processId}] Terminating idle persistent worker for "${app}" during shutdown`);
-					w.worker.terminate();
-					w.transport.stop({ disconnected: true }).catch(() => {});
-				}
-			}
-		}
-		this.persistentWorkers.clear();
-
-		// Phase 1: notify mod-apps of impending shutdown via bootstrap channel
-		// This replaces the old "graceful stop" which immediately made new channel writes impossible.
-		// Instead, we notify mod-apps and let them finish their work before the deadline.
-		for (const [key, requestInfo] of this.activeRequests.entries()) {
-			if (typeof key !== 'object' && requestInfo.bootstrapChannel) {
-				await requestInfo.bootstrapChannel.write('shutdown', JSON.stringify({ deadline: modAppDeadline }))
+		// Phase 1: Terminate idle workers and notify busy ones of impending shutdown
+		for (const [worker, workerInfo] of this.workerInfo.entries()) {
+			if (workerInfo.status === 'idle') {
+				console.debug(`[${this.processId}] Terminating idle persistent worker for "${workerInfo.app}" during shutdown`);
+				workerInfo.worker.terminate();
+				workerInfo.transport.stop({ disconnected: true }).catch(() => {});
+			} else if (workerInfo.status === 'busy' && workerInfo.bootstrapChannel) {
+				await workerInfo.bootstrapChannel.write('shutdown', JSON.stringify({ deadline: modAppDeadline }))
 					.catch(() => {});
 			}
 		}
+		this.workersByApp.clear();
 
 		// Phase 2: wait for active requests to drain (with timeout)
 		if (this.activeRequests.size > 0) {
 			// Set up periodic reporting
 			const reportInterval = setInterval(() => {
 				if (this.activeRequests.size > 0) {
-					console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size / 2} active request(s)...`);
+					console.debug(`[${this.processId}] Waiting for ${this.activeRequests.size} active request(s)...`);
 				}
 			}, 1000);
 
@@ -359,12 +352,11 @@ export class ResponderProcess extends SubProcess {
 		// Collect the disconnected-stop promises so we can await them below.
 		const stopPromises = [];
 
-		for (const [id, requestInfo] of this.activeRequests.entries()) {
-			if (typeof id === 'object') continue;
-			console.debug(`[${this.processId}] Hard-terminating worker for request ${id}`);
-			requestInfo.worker?.terminate();
-			if (requestInfo.transport) {
-				stopPromises.push(requestInfo.transport.stop({ disconnected: true }).catch(() => {}));
+		for (const [worker, workerInfo] of this.workerInfo.entries()) {
+			console.debug(`[${this.processId}] Hard-terminating worker for "${workerInfo.app}"`);
+			workerInfo.worker?.terminate();
+			if (workerInfo.transport) {
+				stopPromises.push(workerInfo.transport.stop({ disconnected: true }).catch(() => {}));
 			}
 		}
 
@@ -481,45 +473,62 @@ export class ResponderProcess extends SubProcess {
 	 * mod-app transport stops (graceful completion, timeout abort, shutdown
 	 * hard-terminate, or unexpected worker exit).
 	 *
-	 * @param {string|number} id - Request ID
+	 * @param {object} worker - The Web Worker instance
 	 */
-	#onAppTransportStopped (id) {
-		const requestInfo = this.activeRequests.get(id);
+	#onAppTransportStopped (worker) {
+	 const workerInfo = this.workerInfo.get(worker);
 
-		if (!requestInfo) return; // Already cleaned up
+	 if (!workerInfo) return; // Already cleaned up
 
-		const { app, appChannel, connectionTimeout, idleTimeout, isPersistent, reqChannel, responseStarted, timeout, worker } = requestInfo;
+	 const { app, isPersistent, activeRequest } = workerInfo;
 
-		// Clear all timers (request, idle, connection timeouts)
-		clearTimeout(timeout);
-		clearTimeout(idleTimeout);
-		clearTimeout(connectionTimeout);
+	 // Clean up active request if there is one
+	 if (activeRequest) {
+		const activeRequestId = activeRequest.id;
+	 	const requestInfo = this.activeRequests.get(activeRequestId);
 
-		if (!responseStarted) {
-			this.#sendErrorResponse(reqChannel, id, 503, 'Service Unavailable').catch(() => {});
-		}
+	 	if (requestInfo) {
+	 		const { reqChannel, responseStarted, timeout, idleTimeout, connectionTimeout } = requestInfo;
 
-		this.channelMap.delete(reqChannel);
-		this.activeRequests.delete(worker);
-		this.activeRequests.delete(id);
+	 		// Clear all timers (request, idle, connection timeouts)
+	 		clearTimeout(timeout);
+	 		clearTimeout(idleTimeout);
+	 		clearTimeout(connectionTimeout);
 
-		// Also remove from persistent workers registry if present
-		if (isPersistent) {
-			const workers = this.persistentWorkers.get(app);
-			const index = workers.findIndex((w) => w.worker === worker);
+	 		if (!responseStarted) {
+	 			this.#sendErrorResponse(reqChannel, activeRequestId, 503, 'Service Unavailable').catch(() => {});
+	 		}
 
-			if (index !== -1) {
-				const lastWorker = workers.pop();
+	 		this.channelMap.delete(reqChannel);
+	 		this.activeRequests.delete(activeRequestId);
+	 	}
+	 }
 
-				if (index !== workers.length) workers[index] = lastWorker;
-				console.debug(`[${this.processId}] Removed persistent worker for "${app}" from registry (transport stopped)`);
-			}
-		}
+	 // Remove from workerInfo Map
+	 this.workerInfo.delete(worker);
 
-		// Resolve drain promise if all requests are complete (for shutdown)
-		if (this.drainResolvers && this.activeRequests.size === 0) {
-			this.drainResolvers.resolve();
-		}
+	 // Also remove from persistent workers registry if present
+	 if (isPersistent) {
+	 	const workers = this.workersByApp.get(app);
+	 	if (workers) {
+	 		const index = workers.findIndex((w) => w.worker === worker);
+
+	 		if (index !== -1) {
+	 			const lastWorker = workers.pop();
+
+	 			if (index !== workers.length) workers[index] = lastWorker;
+	 			console.debug(`[${this.processId}] Removed persistent worker for "${app}" from registry (transport stopped)`);
+	 		}
+	 		if (workers.length === 0) {
+	 			this.workersByApp.delete(app);
+	 		}
+	 	}
+	 }
+
+	 // Resolve drain promise if all requests are complete (for shutdown)
+	 if (this.drainResolvers && this.activeRequests.size === 0) {
+	 	this.drainResolvers.resolve();
+	 }
 	}
 
 	/**
@@ -536,10 +545,16 @@ export class ResponderProcess extends SubProcess {
 			return;
 		}
 
-		const { appChannel, mode } = requestInfo;
+		const { mode, workerInfo } = requestInfo;
+		const appChannel = workerInfo?.appChannel;
 
 		if (mode !== 'bidi') {
 			console.warn(`[${this.processId}] Bidi frame for non-bidi request ${requestId}`);
+			return;
+		}
+
+		if (!appChannel) {
+			console.warn(`[${this.processId}] No app channel for bidi request ${requestId}`);
 			return;
 		}
 
@@ -573,8 +588,8 @@ export class ResponderProcess extends SubProcess {
 
 		try {
 			// Check if we're at capacity
-			if (this.activeRequests.size / 2 >= this.maxConcurrentRequests) {
-				console.debug(`[${this.processId}] At capacity (${this.activeRequests.size / 2}/${this.maxConcurrentRequests}), returning 503`);
+			if (this.activeRequests.size >= this.maxConcurrentRequests) {
+				console.debug(`[${this.processId}] At capacity (${this.activeRequests.size}/${this.maxConcurrentRequests}), returning 503`);
 				await this.#sendErrorResponse(reqChannel, id, 503, 'Service Unavailable');
 				return;
 			}
@@ -598,10 +613,10 @@ export class ResponderProcess extends SubProcess {
 
 			const isPersistent = this.config.isPersistent(this.poolName, routeSpec);
 
-			let worker, transport, c2cChannel, appChannel, bootstrapChannel, workerInfo;
+			let workerInfo;
 
 			if (isPersistent) {
-				const existingWorkers = this.persistentWorkers.get(app), workers = existingWorkers || [];
+				const existingWorkers = this.workersByApp.get(app), workers = existingWorkers || [];
 
 				workerInfo = workers.find((w) => w.status === 'idle');
 
@@ -609,49 +624,25 @@ export class ResponderProcess extends SubProcess {
 					workerInfo.status = 'busy';
 					workerInfo.reqCount++;
 					workerInfo.lastUsed = Date.now();
-					worker = workerInfo.worker;
-					transport = workerInfo.transport;
-					c2cChannel = workerInfo.c2cChannel;
-					appChannel = workerInfo.appChannel;
-					bootstrapChannel = workerInfo.bootstrapChannel;
 					console.debug(`[${this.processId}] Reusing idle persistent worker for "${app}" (reqCount: ${workerInfo.reqCount})`);
 				} else {
 					// Spawn new persistent worker
-					const spawned = await this.#spawnAppWorker(app, mode, appEnv, true);
-
-					worker = spawned.worker;
-					transport = spawned.transport;
-					c2cChannel = spawned.c2cChannel;
-					appChannel = spawned.appChannel;
-					bootstrapChannel = spawned.bootstrapChannel;
-
-					workerInfo = {
-						worker,
-						transport,
-						c2cChannel,
-						appChannel,
-						bootstrapChannel,
-						status: 'busy',
-						reqCount: 1,
-						lastUsed: Date.now(),
-					};
+					workerInfo = await this.#spawnAppWorker(app, mode, appEnv, true);
+					workerInfo.reqCount = 1;
 
 					if (!existingWorkers) {
-						this.persistentWorkers.set(app, workers);
+						this.workersByApp.set(app, workers);
 					}
 					workers.push(workerInfo);
 					console.debug(`[${this.processId}] Spawned new persistent worker for "${app}"`);
 				}
 			} else {
 				// One-shot worker
-				const spawned = await this.#spawnAppWorker(app, mode, appEnv, false);
-
-				worker = spawned.worker;
-				transport = spawned.transport;
-				c2cChannel = spawned.c2cChannel;
-				appChannel = spawned.appChannel;
-				bootstrapChannel = spawned.bootstrapChannel;
+				workerInfo = await this.#spawnAppWorker(app, mode, appEnv, false);
+				workerInfo.reqCount = 1;
 			}
+
+			const { worker, transport, appChannel } = workerInfo;
 
 			// Set up request timeout: send error first (sets responseStarted), then abort.
 			const timeout = reqTimeout ? setTimeout(() => {
@@ -664,29 +655,20 @@ export class ResponderProcess extends SubProcess {
 
 			// Track active request
 			const reqInfo = {
-				app,
-				appChannel,
-				bootstrapChannel,
-				isPersistent,
-				isStreaming: false,
-				mode,
+				id,
 				reqChannel,
 				responseStarted: false,
 				timeout,
 				timeouts: { reqTimeout, idleTimeout, conTimeout },
-				transport,
 				routeSpec,
-				worker,
+				isStreaming: false,
+				workerInfo,
 			};
 
-			this.activeRequests.set(id, reqInfo);
-			this.activeRequests.set(worker, reqInfo);
-			this.channelMap.set(reqChannel, id);
+			workerInfo.activeRequest = reqInfo;
 
-			// Register the general worker-termination handler on the mod-app transport.
-			// This is the single authoritative path for 503 + state cleanup when the
-			// transport stops for any reason (graceful, disconnected, or shutdown).
-			transport.addEventListener('stopped', () => this.#onAppTransportStopped(id));
+			this.activeRequests.set(id, reqInfo);
+			this.channelMap.set(reqChannel, id);
 
 			// Handle worker errors: send 500 (sets responseStarted), then abort.
 			// The transport 'stopped' handler will not send a duplicate 503 because
@@ -950,7 +932,26 @@ export class ResponderProcess extends SubProcess {
 		// Start forwarding mod-app C2C console output to operator via the req-N channel
 		this.#startC2CForwarding(worker, c2cChannel);
 
-		return { worker, transport, c2cChannel, appChannel, bootstrapChannel };
+		const workerInfo = {
+			app: appPath,
+			worker,
+			transport,
+			c2cChannel,
+			appChannel,
+			bootstrapChannel,
+			isPersistent: persistent,
+			status: 'busy',
+			reqCount: 0,
+			lastUsed: Date.now(),
+			activeRequest: null,
+		};
+
+		this.workerInfo.set(worker, workerInfo);
+
+		// Register the stopped listener exactly once for the worker's lifetime
+		transport.addEventListener('stopped', () => this.#onAppTransportStopped(worker));
+
+		return workerInfo;
 	}
 
 	/**
@@ -967,7 +968,8 @@ export class ResponderProcess extends SubProcess {
 
 				if (!msg) break;
 				await msg.process(() => {
-					const info = this.activeRequests.get(worker);
+					const workerInfo = this.workerInfo.get(worker);
+					const info = workerInfo?.activeRequest;
 
 					if (!info) return; // No active request for this worker right now
 

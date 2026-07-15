@@ -423,8 +423,8 @@ Deno.test('Persistent Mod-Apps - ResponderProcess: persistent worker reuse', asy
 		assertExists(eosMsg1);
 		eosMsg1.done();
 
-		// Verify worker is in persistentWorkers registry and is idle
-		const workers = proc.persistentWorkers.get(appUrl);
+		// Verify worker is in workersByApp registry and is idle
+		const workers = proc.workersByApp.get(appUrl);
 		assertExists(workers);
 		assertEquals(workers.length, 1);
 		// Wait for worker to become idle (since resetting is async)
@@ -546,7 +546,7 @@ Deno.test('Persistent Mod-Apps - ResponderProcess: maxWorkerReqs recycling', asy
 		assertExists(eosMsg1);
 		eosMsg1.done();
 
-		const workers = proc.persistentWorkers.get(appUrl);
+		const workers = proc.workersByApp.get(appUrl);
 		assertExists(workers);
 		assertEquals(workers.length, 1);
 		assertEquals(workers[0].reqCount, 1);
@@ -588,7 +588,7 @@ Deno.test('Persistent Mod-Apps - ResponderProcess: maxWorkerReqs recycling', asy
 		await new Promise ((resolve) => setTimeout (resolve, 1000));
 
 		// Verify the original worker was removed from the registry
-		const workersAfter = proc.persistentWorkers.get(appUrl) || [];
+		const workersAfter = proc.workersByApp.get(appUrl) || [];
 		const foundOriginal = workersAfter.some (w => w.worker === originalWorker);
 		assertEquals(foundOriginal, false);
 	} finally {
@@ -668,8 +668,8 @@ Deno.test('Persistent Mod-Apps - ResponderProcess: workerIdleTimeout cleanup', a
 		assertExists(eosMsg1);
 		eosMsg1.done();
 
-		// Verify worker is in persistentWorkers registry and is idle
-		const workers = proc.persistentWorkers.get(appUrl);
+		// Verify worker is in workersByApp registry and is idle
+		const workers = proc.workersByApp.get(appUrl);
 		const status = workers[0].status;
 		assertExists(workers);
 		assertEquals(workers.length, 1);
@@ -680,10 +680,202 @@ Deno.test('Persistent Mod-Apps - ResponderProcess: workerIdleTimeout cleanup', a
 		await new Promise ((resolve) => setTimeout (resolve, 1500));
 
 		// Verify the worker was cleaned up
-		const workersAfter = proc.persistentWorkers.get(appUrl);
+		const workersAfter = proc.workersByApp.get(appUrl);
 		assertEquals(workersAfter, undefined);
 		await cleanup();
 	} finally {
 		ResponderProcess.WORKER_IDLE_CHECK_INTERVAL = originalInterval;
+	}
+});
+
+Deno.test('Persistent Mod-Apps - ResponderProcess: unexpected termination while busy', async () => {
+	const appCode = `
+		export default {
+			async fetch (request, env) {
+				// Wait forever to simulate a long-running request
+				await new Promise(() => {});
+			}
+		};
+	`;
+	const appUrl = makeAppUrl(appCode);
+
+	const { proc, operatorTransport, serviceTransport, cleanup } = await setupResponderProcess('rp-term-busy-test', 'standard');
+
+	try {
+		const [operatorReqChannel, serviceReqChannel] = await Promise.all([
+			operatorTransport.requestChannel('req-0'),
+			serviceTransport.requestChannel('req-0'),
+		]);
+
+		await Promise.all([
+			operatorReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+			serviceReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+		]);
+
+		proc.channelMap.set(serviceReqChannel, 'req-0');
+		proc.handleReqChannel(serviceReqChannel);
+
+		// Send request
+		const requestData = {
+			id: 'req-busy-term',
+			method: 'GET',
+			url: 'https://example.com/test',
+			app: appUrl,
+			pool: 'standard',
+			headers: {},
+			routeParams: {},
+			routeTail: '/test',
+			routeSpec: { persistent: true },
+		};
+		await operatorReqChannel.write('req', JSON.stringify(requestData));
+
+		// Wait for worker to be spawned and become busy
+		let workers;
+		for (let i = 0; i < 50; i++) {
+			workers = proc.workersByApp.get(appUrl);
+			if (workers && workers.length === 1 && workers[0].status === 'busy') {
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+
+		assertExists(workers);
+		assertEquals(workers.length, 1);
+		const workerInfo = workers[0];
+		assertEquals(workerInfo.status, 'busy');
+
+		// Terminate the worker unexpectedly
+		workerInfo.worker.terminate();
+		// Stop the transport with disconnected: true to trigger the 'stopped' event
+		await workerInfo.transport.stop({ disconnected: true });
+
+		// Read the error response from operator side
+		const responseMsg = await operatorReqChannel.read({ only: 'res-error', decode: true });
+		assertExists(responseMsg);
+		let errorData;
+		await responseMsg.process(() => {
+			errorData = JSON.parse(responseMsg.text);
+		});
+
+		assertEquals(errorData.status, 503);
+		assertEquals(errorData.error, 'Service Unavailable');
+
+		// Verify request is removed from activeRequests
+		assertEquals(proc.activeRequests.has('req-busy-term'), false);
+
+		// Verify worker is removed from workersByApp registry
+		const workersAfter = proc.workersByApp.get(appUrl);
+		assertEquals(workersAfter, undefined);
+	} finally {
+		await cleanup();
+	}
+});
+
+Deno.test('Persistent Mod-Apps - ResponderProcess: unexpected termination while idle', async () => {
+	const appCode = `
+		export default {
+			async fetch (request, env) {
+				return new Response('OK');
+			}
+		};
+	`;
+	const appUrl = makeAppUrl(appCode);
+
+	const { proc, operatorTransport, serviceTransport, cleanup } = await setupResponderProcess('rp-term-idle-test', 'standard');
+
+	try {
+		const [operatorReqChannel, serviceReqChannel] = await Promise.all([
+			operatorTransport.requestChannel('req-0'),
+			serviceTransport.requestChannel('req-0'),
+		]);
+
+		await Promise.all([
+			operatorReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+			serviceReqChannel.addMessageTypes(REQ_CHANNEL_MESSAGE_TYPES),
+		]);
+
+		proc.channelMap.set(serviceReqChannel, 'req-0');
+		proc.handleReqChannel(serviceReqChannel);
+
+		// Send request 1
+		const requestData1 = {
+			id: 'req-1',
+			method: 'GET',
+			url: 'https://example.com/test',
+			app: appUrl,
+			pool: 'standard',
+			headers: {},
+			routeParams: {},
+			routeTail: '/test',
+			routeSpec: { persistent: true },
+		};
+		await operatorReqChannel.write('req', JSON.stringify(requestData1));
+
+		// Read response 1
+		const resMsg1 = await operatorReqChannel.read({ only: 'res', decode: true });
+		assertExists(resMsg1);
+		resMsg1.done();
+
+		const frameMsg1 = await operatorReqChannel.read({ only: 'res-frame', decode: true });
+		assertExists(frameMsg1);
+		frameMsg1.done();
+
+		const eosMsg1 = await operatorReqChannel.read({ only: 'res-frame' });
+		assertExists(eosMsg1);
+		eosMsg1.done();
+
+		// Wait for worker to become idle
+		const workers = proc.workersByApp.get(appUrl);
+		assertExists(workers);
+		assertEquals(workers.length, 1);
+		for (let i = 0; i < 50 && workers[0].status !== 'idle'; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		assertEquals(workers[0].status, 'idle');
+
+		const originalWorker = workers[0].worker;
+
+		// Terminate the worker unexpectedly while idle
+		workers[0].worker.terminate();
+		await workers[0].transport.stop({ disconnected: true });
+
+		// Verify worker is removed from workersByApp registry
+		const workersAfterTerm = proc.workersByApp.get(appUrl);
+		assertEquals(workersAfterTerm, undefined);
+
+		// Send request 2 (should spawn a new worker)
+		const requestData2 = {
+			id: 'req-2',
+			method: 'GET',
+			url: 'https://example.com/test',
+			app: appUrl,
+			pool: 'standard',
+			headers: {},
+			routeParams: {},
+			routeTail: '/test',
+			routeSpec: { persistent: true },
+		};
+		await operatorReqChannel.write('req', JSON.stringify(requestData2));
+
+		// Read response 2
+		const resMsg2 = await operatorReqChannel.read({ only: 'res', decode: true });
+		assertExists(resMsg2);
+		resMsg2.done();
+
+		const frameMsg2 = await operatorReqChannel.read({ only: 'res-frame', decode: true });
+		assertExists(frameMsg2);
+		frameMsg2.done();
+
+		const eosMsg2 = await operatorReqChannel.read({ only: 'res-frame' });
+		assertExists(eosMsg2);
+		eosMsg2.done();
+
+		// Verify a new worker was spawned and is in the registry
+		const workersAfter2 = proc.workersByApp.get(appUrl);
+		assertExists(workersAfter2);
+		assertEquals(workersAfter2.length, 1);
+		assert(workersAfter2[0].worker !== originalWorker);
+	} finally {
+		await cleanup();
 	}
 });

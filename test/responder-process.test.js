@@ -127,9 +127,7 @@ Deno.test('ResponderProcess - availWorkers reflects capacity', () => {
 
 	// Simulate active requests
 	proc.activeRequests.set('req-1', {});
-	proc.activeRequests.set({}, {});
 	proc.activeRequests.set('req-2', {});
-	proc.activeRequests.set({}, {});
 	assertEquals(proc.availWorkers, 8);
 
 	proc.activeRequests.clear();
@@ -218,7 +216,15 @@ Deno.test('ResponderProcess - cleanupRequest clears timers and initiates transpo
 		},
 		addEventListener: () => {},
 	};
-	proc.activeRequests.set('req-1', { timeout, worker: null, transport: mockTransport, responseStarted: false, reqChannel: null });
+	proc.activeRequests.set('req-1', {
+		timeout,
+		responseStarted: false,
+		reqChannel: null,
+		workerInfo: {
+			worker: null,
+			transport: mockTransport,
+		},
+	});
 
 	assertEquals(proc.activeRequests.has('req-1'), true);
 	proc.cleanupRequest('req-1');
@@ -341,9 +347,7 @@ Deno.test('ResponderProcess - returns 503 when at capacity', async () => {
 		// Fill capacity
 		proc.maxConcurrentRequests = 2;
 		proc.activeRequests.set('req-existing-1', { timeout: null, worker: null, transport: null });
-		proc.activeRequests.set({}, {});
 		proc.activeRequests.set('req-existing-2', { timeout: null, worker: null, transport: null });
-		proc.activeRequests.set({}, {});
 
 		// Request the req-0 channel from both sides simultaneously (like control channel setup)
 		const [operatorReqChannel, serviceReqChannel] = await Promise.all([
